@@ -3,6 +3,7 @@ import json
 import base64
 import requests
 import streamlit as st
+from supabase import create_client, Client
 
 # Page Configuration
 st.set_page_config(
@@ -69,18 +70,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- INITIALIZE SESSION STATE FOR STORAGE ---
+# --- INITIALIZE SESSION STATE ---
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
-if "saved_reports" not in st.session_state:
-    st.session_state.saved_reports = {} 
 
 # --- SECURE URL ROUTING ---
-# If the URL contains ?portal=true, lock the app strictly to the patient portal and hide clinician controls.
 query_params = st.query_params
 is_patient_link = query_params.get("portal") == "true"
 
 api_key = ""
+supabase_url = ""
+supabase_key = ""
 
 if is_patient_link:
     app_mode = "Secure Patient Mobile Portal"
@@ -97,6 +97,20 @@ else:
         "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
     )
     st.sidebar.divider()
+    st.sidebar.subheader("Cloud Database (Supabase)")
+    supabase_url = st.sidebar.text_input("Supabase Project URL", placeholder="https://xyz.supabase.co")
+    supabase_key = st.sidebar.text_input("Supabase Anon Key", type="password", placeholder="sb_publishable_...")
+    st.sidebar.divider()
+
+# Helper function to initialize Supabase client supporting new publishable keys
+def get_supabase_client():
+    if not supabase_url or not supabase_key:
+        return None
+    try:
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        return create_client(supabase_url, supabase_key, options={"headers": headers})
+    except Exception:
+        return None
 
 # ==========================================
 # VIEW 1: CLINICIAN DASHBOARD
@@ -207,12 +221,15 @@ if app_mode == "Clinician Dashboard":
 
     st.divider()
 
-    st.subheader("🚀 Master Report Compilation & Portal Publishing")
-    st.markdown("Compile all queued tests into a master report and securely publish it to the participant's mobile companion portal.")
+    st.subheader("🚀 Master Report Compilation & Cloud Publishing")
+    st.markdown("Compile all queued tests into a master report and securely publish it to your Supabase cloud database.")
 
     if st.button("Generate & Publish Master Report", type="primary", use_container_width=True):
+        db = get_supabase_client()
         if not api_key:
             st.error("Please enter your Google Gemini API key in the sidebar.")
+        elif not db:
+            st.error("Please enter your Supabase Project URL and Publishable Key in the sidebar.")
         elif not participant_name:
             st.warning("Please enter the participant's name.")
         elif not patient_pin or len(patient_pin) < 4:
@@ -279,15 +296,18 @@ if app_mode == "Clinician Dashboard":
                         if html_output.endswith("```"):
                             html_output = html_output[:-3]
 
-                        st.session_state.saved_reports[participant_name.strip().lower()] = {
+                        record = {
+                            "name_lower": participant_name.strip().lower(),
                             "name": participant_name,
                             "pin": patient_pin.strip(),
-                            "date": str(assessment_date),
-                            "html": html_output,
-                            "tests_count": len(st.session_state.participant_tests)
+                            "assessment_date": str(assessment_date),
+                            "tests_count": len(st.session_state.participant_tests),
+                            "html_output": html_output
                         }
+                        
+                        db.table("longevity_reports").upsert(record, on_conflict="name_lower").execute()
 
-                        st.success("Master Report successfully generated and published with PIN protection!")
+                        st.success("Master Report successfully published to Supabase Cloud Database with PIN protection!")
 
                         st.download_button(
                             label="📥 Download Master HTML Report File",
@@ -318,36 +338,54 @@ elif app_mode == "Secure Patient Mobile Portal":
     if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
         lookup_key = client_lookup.strip().lower()
         
-        if lookup_key in st.session_state.saved_reports:
-            client_data = st.session_state.saved_reports[lookup_key]
+        try:
+            db_url = supabase_url if supabase_url else (st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else "")
+            db_key = supabase_key if supabase_key else (st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else "")
             
-            if client_data["pin"] == client_pin.strip():
-                st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
+            db = None
+            if db_url and db_key:
+                headers = {"apikey": db_key, "Authorization": f"Bearer {db_key}"}
+                db = create_client(db_url, db_key, options={"headers": headers})
 
-                st.markdown(
-                    f"""
-                    <div class='portal-box'>
-                        <h3>📋 Your Longevity Profile Summary</h3>
-                        <p><b>Participant:</b> {client_data['name']}</p>
-                        <p><b>Last Clinical Assessment:</b> {client_data['date']}</p>
-                        <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
-                        <p><b>Assigned Care Schedule:</b> Active 6-Week Therapeutic Care Plan &amp; Osteopathic Protocol</p>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                st.download_button(
-                    label="📥 Download My Master HTML Report (Mobile / PC)",
-                    data=client_data['html'],
-                    file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
-                    mime="text/html",
-                    use_container_width=True
-                )
-
-                st.subheader("🔎 Your Live Interactive Healthspan Dashboard")
-                st.components.v1.html(client_data['html'], height=750, scrolling=True)
+            if not db:
+                st.error("Database connection configuration missing. Please ensure cloud credentials are active.")
             else:
-                st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
-        else:
-            st.warning("No published reports found matching that name. Please check your spelling or contact your clinician.")
+                response = db.table("longevity_reports").select("*").eq("name_lower", lookup_key).execute()
+                data = response.data
+
+                if data and len(data) > 0:
+                    client_data = data[0]
+                    
+                    if client_data["pin"] == client_pin.strip():
+                        st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
+
+                        st.markdown(
+                            f"""
+                            <div class='portal-box'>
+                                <h3>📋 Your Longevity Profile Summary</h3>
+                                <p><b>Participant:</b> {client_data['name']}</p>
+                                <p><b>Last Clinical Assessment:</b> {client_data['assessment_date']}</p>
+                                <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
+                                <p><b>Assigned Care Schedule:</b> Active 6-Week Therapeutic Care Plan &amp; Osteopathic Protocol</p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+                        st.download_button(
+                            label="📥 Download My Master HTML Report (Mobile / PC)",
+                            data=client_data['html_output'],
+                            file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
+                            mime="text/html",
+                            use_container_width=True
+                        )
+
+                        st.subheader("🔎 Your Live Interactive Healthspan Dashboard")
+                        st.components.v1.html(client_data['html_output'], height=750, scrolling=True)
+                    else:
+                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
+                else:
+                    st.warning("No published reports found matching that name. Please check your spelling or contact your clinician.")
+        
+        except Exception as e:
+            st.error(f"Error connecting to cloud records: {e}")
