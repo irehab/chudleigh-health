@@ -1,6 +1,7 @@
 import datetime
+import json
+import requests
 import streamlit as st
-import google.generativeai as genai
 
 # Page Configuration
 st.set_page_config(
@@ -123,7 +124,6 @@ if assessment_type == "Autonomic/HRV":
         "Blood Pressure": blood_pressure,
     }
 else:
-    # Allow uploading a diagnostic PDF report
     uploaded_pdf = st.file_uploader(
         f"Upload official {assessment_type} PDF report (optional)", type=["pdf"]
     )
@@ -146,32 +146,11 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
         st.warning("Please enter the participant's name.")
     else:
         with st.spinner(
-            "Analyzing PDF/data and generating clinical HTML report with Gemini..."
+            "Synthesizing data and generating clinical HTML report with Gemini..."
         ):
             try:
-                # Configure Gemini API
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-3.8-flash")
-
-                contents_payload = []
-
-                # If a PDF was uploaded, upload it to Gemini's file processor
-                if uploaded_pdf is not None:
-                    # Save temporary file bytes
-                    bytes_data = uploaded_pdf.getvalue()
-                    import tempfile
-                    import os
-
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                        tmp_file.write(bytes_data)
-                        tmp_file_path = tmp_file.name
-
-                    # Upload file to Gemini API
-                    gemini_file = genai.upload_file(tmp_file_path, mime_type="application/pdf")
-                    contents_payload.append(gemini_file)
-
-                # Constructing the prompt payload for the LLM
-                prompt_content = f"""
+                # Prepare prompt text
+                prompt_text = f"""
                 Act as an expert clinical web developer and longevity data analyst at Chudleigh Health Hub.
                 Generate a fully customized, patient-specific HTML web page report for a longevity assessment pilot participant.
                 
@@ -185,36 +164,61 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 {input_data_payload}
                 
                 Requirements:
-                - If a PDF file is attached, extract all relevant metrics and values directly from the document.
                 - Use a professional design system with primary color #0f382b.
                 - Create clean metric boxes and an evidence-based clinical interpretation section tailored to these specific figures.
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                 """
 
-                contents_payload.append(prompt_content)
+                # If PDF was uploaded, convert it to base64 to send via REST API
+                parts = [{"text": prompt_text}]
+                if uploaded_pdf is not None:
+                    import base64
+                    pdf_bytes = uploaded_pdf.getvalue()
+                    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": "application/pdf",
+                            "data": pdf_b64
+                        }
+                    })
 
-                response = model.generate_content(contents_payload)
-                html_output = response.text
+                # Direct REST API call to Gemini endpoint supporting AQ keys
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [{
+                        "parts": parts
+                    }]
+                }
 
-                # Clean potential markdown markdown ticks if returned
-                if html_output.startswith("```html"):
-                    html_output = html_output[7:]
-                if html_output.endswith("```"):
-                    html_output = html_output[:-3]
+                response = requests.post(url, headers=headers, data=json.dumps(payload))
+                res_json = response.json()
 
-                st.success("Report successfully generated from PDF & data!")
+                if response.status_code != 200:
+                    error_msg = res_json.get("error", {}).get("message", "Unknown API error")
+                    st.error(f"API Error ({response.status_code}): {error_msg}")
+                else:
+                    html_output = res_json["candidates"][0]["content"]["parts"][0]["text"]
 
-                # Display download button
-                st.download_button(
-                    label="📥 Download HTML Report File",
-                    data=html_output,
-                    file_name=f"{participant_name.replace(' ', '_')}_{assessment_type.replace(' ', '_')}_Report.html",
-                    mime="text/html",
-                )
+                    # Clean potential markdown code ticks if returned
+                    if html_output.startswith("```html"):
+                        html_output = html_output[7:]
+                    if html_output.endswith("```"):
+                        html_output = html_output[:-3]
 
-                # Live preview container
-                st.subheader("🔎 Live Report Preview")
-                st.components.v1.html(html_output, height=650, scrolling=True)
+                    st.success("Report successfully generated!")
+
+                    # Display download button
+                    st.download_button(
+                        label="📥 Download HTML Report File",
+                        data=html_output,
+                        file_name=f"{participant_name.replace(' ', '_')}_{assessment_type.replace(' ', '_')}_Report.html",
+                        mime="text/html",
+                    )
+
+                    # Live preview container
+                    st.subheader("🔎 Live Report Preview")
+                    st.components.v1.html(html_output, height=650, scrolling=True)
 
             except Exception as e:
                 st.error(f"An error occurred during generation: {e}")
