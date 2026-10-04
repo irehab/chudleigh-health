@@ -102,14 +102,17 @@ else:
     supabase_key = st.sidebar.text_input("Supabase Anon Key", type="password", placeholder="sb_publishable_...")
     st.sidebar.divider()
 
-# Helper function to initialize Supabase client supporting new publishable keys
+# Bulletproof helper function to initialize Supabase client
 def get_supabase_client():
-    if not supabase_url or not supabase_key:
+    url = supabase_url if ('supabase_url' in locals() and supabase_url) else (st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else "")
+    key = supabase_key if ('supabase_key' in locals() and supabase_key) else (st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else "")
+    
+    if not url or not key:
         return None
     try:
-        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        return create_client(supabase_url, supabase_key, options={"headers": headers})
-    except Exception:
+        return create_client(url.strip(), key.strip())
+    except Exception as e:
+        st.error(f"Supabase Connection Error: {e}")
         return None
 
 # ==========================================
@@ -339,16 +342,10 @@ elif app_mode == "Secure Patient Mobile Portal":
         lookup_key = client_lookup.strip().lower()
         
         try:
-            db_url = supabase_url if supabase_url else (st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else "")
-            db_key = supabase_key if supabase_key else (st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else "")
-            
-            db = None
-            if db_url and db_key:
-                headers = {"apikey": db_key, "Authorization": f"Bearer {db_key}"}
-                db = create_client(db_url, db_key, options={"headers": headers})
+            db = get_supabase_client()
 
             if not db:
-                st.error("Database connection configuration missing. Please ensure cloud credentials are active.")
+                st.error("Database connection configuration missing. Please ensure your cloud credentials are active.")
             else:
                 response = db.table("longevity_reports").select("*").eq("name_lower", lookup_key).execute()
                 data = response.data
