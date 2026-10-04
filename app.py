@@ -1,6 +1,6 @@
 import datetime
 import streamlit as st
-import openai
+import google.generativeai as genai
 
 # Page Configuration
 st.set_page_config(
@@ -55,9 +55,9 @@ st.markdown(
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Configuration & Settings")
 
-# Secure API Key Input
+# Secure API Key Input for Gemini
 api_key = st.sidebar.text_input(
-    "OpenAI API Key", type="password", help="Enter your OpenAI API key here."
+    "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
 )
 
 st.sidebar.divider()
@@ -135,17 +135,18 @@ st.divider()
 if st.button("Generate HTML Report", type="primary", use_container_width=True):
     if not api_key:
         st.error(
-            "Please enter your OpenAI API key in the sidebar before generating reports."
+            "Please enter your Google Gemini API key in the sidebar before generating reports."
         )
     elif not participant_name:
         st.warning("Please enter the participant's name.")
     else:
         with st.spinner(
-            "Synthesizing data and generating clinical HTML report..."
+            "Synthesizing data and generating clinical HTML report with Gemini..."
         ):
             try:
-                # Client initialization
-                client = OpenAI(api_key=api_key)
+                # Configure Gemini API
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
 
                 # Constructing the prompt payload for the LLM
                 prompt_content = f"""
@@ -167,13 +168,8 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                 """
 
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt_content}],
-                    temperature=0.2,
-                )
-
-                html_output = response.choices[0].message.content
+                response = model.generate_content(prompt_content)
+                html_output = response.text
 
                 # Clean potential markdown markdown ticks if returned
                 if html_output.startswith("```html"):
