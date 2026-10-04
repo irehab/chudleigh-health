@@ -183,7 +183,7 @@ st.divider()
 
 # --- MASTER REPORT GENERATION BUTTON ---
 st.subheader("🚀 Master Report Compilation")
-st.markdown("Once you have added all individual test results (including your Tanita, HRV, and VALD ForceDecks reports) for this participant, click below to synthesize everything into a single comprehensive executive healthspan summary.")
+st.markdown("Once you have added all individual test results for this participant, click below to generate the master longitudinal report featuring tailored Chudleigh Health Hub clinical and therapeutic care pathways.")
 
 if st.button("Generate Master Longitudinal Summary Report", type="primary", use_container_width=True):
     if not api_key:
@@ -193,7 +193,7 @@ if st.button("Generate Master Longitudinal Summary Report", type="primary", use_
     elif len(st.session_state.participant_tests) == 0:
         st.warning("Please add at least one test assessment to the participant's profile before generating the master report.")
     else:
-        with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} clinical assessments into master report with Gemini..."):
+        with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} clinical assessments and formulating therapeutic care plan..."):
             try:
                 # Compile prompt text
                 prompt_text = f"""
@@ -205,7 +205,7 @@ if st.button("Generate Master Longitudinal Summary Report", type="primary", use_
                 Assessment Date: {str(assessment_date)}
                 Body Mass / Height: {body_mass_height}
                 
-                The participant has completed the following {len(st.session_state.participant_tests)} individual assessments (including VALD ForceDecks force plate metrics where applicable):
+                The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
                 """
 
                 parts = [{"text": prompt_text}]
@@ -226,9 +226,12 @@ if st.button("Generate Master Longitudinal Summary Report", type="primary", use_
                 final_instructions = """
                 Requirements for the Master Report:
                 - Create a professional, executive-level multi-test dashboard layout using primary color #0f382b.
-                - Provide an Executive Summary section synthesizing cross-system correlations (e.g., analyzing neuromuscular performance from force plates alongside body composition and metabolic health).
+                - Provide an Executive Summary section synthesizing cross-system correlations (analyzing neuromuscular performance from force plates alongside body composition and metabolic health).
                 - Include individual breakdown modules for each test completed.
-                - Provide concrete, evidence-based lifestyle, clinical, and longevity recommendations.
+                - **Chudleigh Health Hub Therapeutic & Clinical Action Plan:** Include a prominent, dedicated intervention section that outlines tailored practitioner recommendations based on the participant's findings:
+                    1. **Osteopathic Manual Therapy Pathway:** Prescribe specific care frequency (e.g., weekly or monthly sessions) specifically justified by any tissue stiffness, asymmetries, neuromuscular restrictions, or postural imbalances found across the assessments.
+                    2. **Targeted Exercise & Personal Training Prescription:** Outline concrete programming (e.g., prescriptive blocks like 3x personal training sessions per week for 6 weeks) addressing specific force plate deficits (rate of force development, eccentric impulse) or body composition goals (lean mass optimization).
+                    3. **Longevity Lifestyle & Autonomous Recovery:** Actionable daily habits for autonomic nervous system regulation and recovery.
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                 """
                 parts.append({"text": final_instructions})
