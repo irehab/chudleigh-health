@@ -73,11 +73,9 @@ st.markdown(
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
 if "saved_reports" not in st.session_state:
-    # Storage structure: { "name_lower": { "name": ..., "pin": ..., "html": ..., "date": ..., "tests_count": ... } }
     st.session_state.saved_reports = {} 
 
 # --- DETECT URL PARAMETERS TO DEFAULT TO PATIENT PORTAL ---
-# If you share `https://healthautonomy.streamlit.app/?portal=true`, it opens straight to the client view!
 query_params = st.query_params
 default_mode_index = 1 if query_params.get("portal") == "true" else 0
 
@@ -89,9 +87,12 @@ app_mode = st.sidebar.selectbox(
     index=default_mode_index
 )
 
-api_key = st.sidebar.text_input(
-    "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
-)
+# Only show the Gemini API key input in the Clinician Dashboard view
+api_key = ""
+if app_mode == "Clinician Dashboard":
+    api_key = st.sidebar.text_input(
+        "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
+    )
 
 st.sidebar.divider()
 
@@ -124,7 +125,6 @@ if app_mode == "Clinician Dashboard":
         assessment_date = st.date_input(
             "Assessment Date", value=datetime.date.today(), key="p_date"
         )
-        # Unique 4-digit PIN assigned by clinician for secure patient login
         patient_pin = st.text_input(
             "Patient Secure PIN (4 digits)", type="password", placeholder="e.g. 1234", key="p_pin"
         )
@@ -277,7 +277,6 @@ if app_mode == "Clinician Dashboard":
                         if html_output.endswith("```"):
                             html_output = html_output[:-3]
 
-                        # Store report securely keyed by name and encrypted PIN
                         st.session_state.saved_reports[participant_name.strip().lower()] = {
                             "name": participant_name,
                             "pin": patient_pin.strip(),
@@ -320,7 +319,6 @@ elif app_mode == "Secure Patient Mobile Portal":
         if lookup_key in st.session_state.saved_reports:
             client_data = st.session_state.saved_reports[lookup_key]
             
-            # Verify PIN
             if client_data["pin"] == client_pin.strip():
                 st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
 
