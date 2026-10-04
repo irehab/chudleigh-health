@@ -97,7 +97,7 @@ else:
     )
     st.sidebar.divider()
 
-# Direct, hardcoded Supabase client initialization
+# Direct Supabase client initialization
 def get_supabase_client():
     url = "https://eyuvugzgxfawagpndmqo.supabase.co"
     key = "sb_publishable_hC0EacZHCbJ3wo-qKP2Q0A_sqn-_FC9"
