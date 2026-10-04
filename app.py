@@ -65,8 +65,6 @@ st.markdown(
 # --- INITIALIZE SESSION STATE FOR MULTI-TEST BATCHING ---
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
-if "current_participant" not in st.session_state:
-    st.session_state.current_participant = ""
 
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Configuration & Settings")
@@ -120,6 +118,9 @@ assessment_type = st.selectbox(
         "AGE Reader",
         "ECG",
         "Autonomic/HRV",
+        "VALD ForceDecks - Sit-to-Stand",
+        "VALD ForceDecks - Squat",
+        "VALD ForceDecks - Quiet Stand (Balance)",
     ],
 )
 
@@ -182,7 +183,7 @@ st.divider()
 
 # --- MASTER REPORT GENERATION BUTTON ---
 st.subheader("🚀 Master Report Compilation")
-st.markdown("Once you have added all individual test results (up to 10+ reports) for this participant, click below to synthesize everything into a single comprehensive executive healthspan summary.")
+st.markdown("Once you have added all individual test results (including your Tanita, HRV, and VALD ForceDecks reports) for this participant, click below to synthesize everything into a single comprehensive executive healthspan summary.")
 
 if st.button("Generate Master Longitudinal Summary Report", type="primary", use_container_width=True):
     if not api_key:
@@ -204,7 +205,7 @@ if st.button("Generate Master Longitudinal Summary Report", type="primary", use_
                 Assessment Date: {str(assessment_date)}
                 Body Mass / Height: {body_mass_height}
                 
-                The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
+                The participant has completed the following {len(st.session_state.participant_tests)} individual assessments (including VALD ForceDecks force plate metrics where applicable):
                 """
 
                 parts = [{"text": prompt_text}]
@@ -225,7 +226,7 @@ if st.button("Generate Master Longitudinal Summary Report", type="primary", use_
                 final_instructions = """
                 Requirements for the Master Report:
                 - Create a professional, executive-level multi-test dashboard layout using primary color #0f382b.
-                - Provide an Executive Summary section synthesizing cross-system correlations (e.g., how autonomic tone interacts with body composition and metabolic health).
+                - Provide an Executive Summary section synthesizing cross-system correlations (e.g., analyzing neuromuscular performance from force plates alongside body composition and metabolic health).
                 - Include individual breakdown modules for each test completed.
                 - Provide concrete, evidence-based lifestyle, clinical, and longevity recommendations.
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
