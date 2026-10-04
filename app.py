@@ -75,26 +75,28 @@ if "participant_tests" not in st.session_state:
 if "saved_reports" not in st.session_state:
     st.session_state.saved_reports = {} 
 
-# --- DETECT URL PARAMETERS TO DEFAULT TO PATIENT PORTAL ---
+# --- SECURE URL ROUTING ---
+# If the URL contains ?portal=true, lock the app strictly to the patient portal and hide clinician controls.
 query_params = st.query_params
-default_mode_index = 1 if query_params.get("portal") == "true" else 0
+is_patient_link = query_params.get("portal") == "true"
 
-# --- SIDEBAR NAVIGATION ---
-st.sidebar.header("Portal Navigation")
-app_mode = st.sidebar.selectbox(
-    "Select Portal View",
-    ["Clinician Dashboard", "Secure Patient Mobile Portal"],
-    index=default_mode_index
-)
-
-# Only show the Gemini API key input in the Clinician Dashboard view
 api_key = ""
-if app_mode == "Clinician Dashboard":
+
+if is_patient_link:
+    app_mode = "Secure Patient Mobile Portal"
+    st.sidebar.subheader("🔒 Client Portal")
+    st.sidebar.markdown("Chudleigh Health Hub Secure Patient Access")
+    st.sidebar.divider()
+else:
+    st.sidebar.header("Portal Navigation")
+    app_mode = st.sidebar.selectbox(
+        "Select Portal View",
+        ["Clinician Dashboard", "Secure Patient Mobile Portal"]
+    )
     api_key = st.sidebar.text_input(
         "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
     )
-
-st.sidebar.divider()
+    st.sidebar.divider()
 
 # ==========================================
 # VIEW 1: CLINICIAN DASHBOARD
