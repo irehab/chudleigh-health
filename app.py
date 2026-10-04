@@ -1,9 +1,9 @@
 import datetime
 import json
 import base64
-import requests
 import streamlit as st
 from supabase import create_client, Client
+import google.generativeai as genai
 
 # Page Configuration
 st.set_page_config(
@@ -96,7 +96,7 @@ else:
     )
     st.sidebar.divider()
 
-# Direct, hardcoded Supabase client initialization (Guaranteed connection)
+# Direct, hardcoded Supabase client initialization
 def get_supabase_client():
     url = "https://eyuvugzgxfawagpndmqo.supabase.co"
     key = "sb_publishable_hC0EacZHCbJ3wo-qKP2Q0A_sqn-_FC9"
@@ -233,30 +233,31 @@ if app_mode == "Clinician Dashboard":
         else:
             with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} assessments and formulating clinical care plan..."):
                 try:
-                    prompt_text = f"""
-                    Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
-                    Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
-                    
-                    Participant Name: {participant_name}
-                    Age / Gender: {age_gender}
-                    Assessment Date: {str(assessment_date)}
-                    Body Mass / Height: {body_mass_height}
-                    
-                    The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
-                    """
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel("gemini-3.8-flash")
 
-                    parts = [{"text": prompt_text}]
+                    prompt_parts = [
+                        f"""
+                        Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
+                        Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
+                        
+                        Participant Name: {participant_name}
+                        Age / Gender: {age_gender}
+                        Assessment Date: {str(assessment_date)}
+                        Body Mass / Height: {body_mass_height}
+                        
+                        The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
+                        """
+                    ]
 
                     for idx, t in enumerate(st.session_state.participant_tests):
                         test_desc = f"\n--- Test #{idx+1}: {t['type']} ---\nData/Notes: {t['data']}"
-                        parts.append({"text": test_desc})
+                        prompt_parts.append(test_desc)
                         
                         if t["pdf_b64"]:
-                            parts.append({
-                                "inline_data": {
-                                    "mime_type": "application/pdf",
-                                    "data": t["pdf_b64"]
-                                }
+                            prompt_parts.append({
+                                "mime_type": "application/pdf",
+                                "data": base64.b64decode(t["pdf_b64"])
                             })
 
                     final_instructions = """
@@ -270,48 +271,38 @@ if app_mode == "Clinician Dashboard":
                         3. **Longevity Lifestyle & Autonomous Recovery:** Daily habits for nervous system regulation.
                     - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                     """
-                    parts.append({"text": final_instructions})
+                    prompt_parts.append(final_instructions)
 
-                    payload = {"contents": [{"parts": parts}]}
-                    headers = {"Content-Type": "application/json"}
+                    response = model.generate_content(prompt_parts)
+                    html_output = response.text
 
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
-                    response = requests.post(url, headers=headers, data=json.dumps(payload))
-                    res_json = response.json()
+                    if html_output.startswith("```html"):
+                        html_output = html_output[7:]
+                    if html_output.endswith("```"):
+                        html_output = html_output[:-3]
 
-                    if response.status_code != 200:
-                        error_msg = res_json.get("error", {}).get("message", "Unknown API error")
-                        st.error(f"API Error ({response.status_code}): {error_msg}")
-                    else:
-                        html_output = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                    record = {
+                        "name_lower": participant_name.strip().lower(),
+                        "name": participant_name,
+                        "pin": patient_pin.strip(),
+                        "assessment_date": str(assessment_date),
+                        "tests_count": len(st.session_state.participant_tests),
+                        "html_output": html_output
+                    }
+                    
+                    db.table("longevity_reports").upsert(record, on_conflict="name_lower").execute()
 
-                        if html_output.startswith("```html"):
-                            html_output = html_output[7:]
-                        if html_output.endswith("```"):
-                            html_output = html_output[:-3]
+                    st.success("Master Report successfully published to Supabase Cloud Database with PIN protection!")
 
-                        record = {
-                            "name_lower": participant_name.strip().lower(),
-                            "name": participant_name,
-                            "pin": patient_pin.strip(),
-                            "assessment_date": str(assessment_date),
-                            "tests_count": len(st.session_state.participant_tests),
-                            "html_output": html_output
-                        }
-                        
-                        db.table("longevity_reports").upsert(record, on_conflict="name_lower").execute()
+                    st.download_button(
+                        label="📥 Download Master HTML Report File",
+                        data=html_output,
+                        file_name=f"{participant_name.replace(' ', '_')}_Master_Longevity_Report.html",
+                        mime="text/html",
+                    )
 
-                        st.success("Master Report successfully published to Supabase Cloud Database with PIN protection!")
-
-                        st.download_button(
-                            label="📥 Download Master HTML Report File",
-                            data=html_output,
-                            file_name=f"{participant_name.replace(' ', '_')}_Master_Longevity_Report.html",
-                            mime="text/html",
-                        )
-
-                        st.subheader("🔎 Live Master Report Preview")
-                        st.components.v1.html(html_output, height=800, scrolling=True)
+                    st.subheader("🔎 Live Master Report Preview")
+                    st.components.v1.html(html_output, height=800, scrolling=True)
 
                 except Exception as e:
                     st.error(f"An error occurred during generation: {e}")
