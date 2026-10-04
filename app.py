@@ -146,7 +146,7 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
             try:
                 # Configure Gemini API
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-2.5-flash")
+                model = genai.GenerativeModel("gemini-3.8-flash")
 
                 # Constructing the prompt payload for the LLM
                 prompt_content = f"""
