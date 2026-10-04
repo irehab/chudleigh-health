@@ -1,11 +1,12 @@
 import datetime
 import json
+import base64
 import requests
 import streamlit as st
 
 # Page Configuration
 st.set_page_config(
-    page_title="Chudleigh Health Hub - Longevity Report Generator",
+    page_title="Chudleigh Health Hub - Master Longevity Report Generator",
     page_icon="🩺",
     layout="wide",
 )
@@ -37,6 +38,14 @@ st.markdown(
         text-transform: uppercase;
         letter-spacing: 1px;
     }
+    .test-card {
+        background-color: #f8fafc;
+        border-left: 4px solid #0f382b;
+        padding: 10px 15px;
+        margin-bottom: 10px;
+        border-radius: 4px;
+        color: #1e293b;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -47,25 +56,63 @@ st.markdown(
     """
     <div class="main-header">
         <h1>Chudleigh Health Hub</h1>
-        <p>Diagnostic Longevity Pilot &bull; Clinical Report Generator</p>
+        <p>Comprehensive Diagnostic Longevity &bull; Master Report Generator</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+# --- INITIALIZE SESSION STATE FOR MULTI-TEST BATCHING ---
+if "participant_tests" not in st.session_state:
+    st.session_state.participant_tests = []
+if "current_participant" not in st.session_state:
+    st.session_state.current_participant = ""
+
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("Configuration & Settings")
 
-# Secure API Key Input for Gemini
 api_key = st.sidebar.text_input(
     "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
 )
 
 st.sidebar.divider()
+st.sidebar.subheader("Participant File Management")
 
-# Assessment Type Dropdown
-assessment_type = st.sidebar.selectbox(
-    "Select Assessment Type",
+# Reset / New Participant Button
+if st.sidebar.button("🔄 Clear All Tests / New Patient"):
+    st.session_state.participant_tests = []
+    st.rerun()
+
+# Display current queued tests count in sidebar
+st.sidebar.markdown(f"**Tests Logged in Profile:** {len(st.session_state.participant_tests)}")
+for idx, t in enumerate(st.session_state.participant_tests):
+    st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {t['type']}</b></div>", unsafe_allow_html=True)
+
+# --- MAIN FORM: PARTICIPANT METADATA ---
+st.subheader("📋 Participant Metadata")
+col1, col2 = st.columns(2)
+
+with col1:
+    participant_name = st.text_input(
+        "Participant Name", placeholder="e.g. John Doe", key="p_name"
+    )
+    age_gender = st.text_input(
+        "Age / Gender", placeholder="e.g. 48 / Male", key="p_ag"
+    )
+
+with col2:
+    assessment_date = st.date_input(
+        "Assessment Date", value=datetime.date.today(), key="p_date"
+    )
+    body_mass_height = st.text_input(
+        "Body Mass / Height", placeholder="e.g. 78 kg / 175 cm", key="p_bm"
+    )
+
+st.divider()
+
+# --- DYNAMIC INPUT AREA FOR INDIVIDUAL TESTS ---
+assessment_type = st.selectbox(
+    "Select Assessment Type to Add",
     [
         "Tanita Body Composition",
         "Push-Up Assessment",
@@ -76,33 +123,10 @@ assessment_type = st.sidebar.selectbox(
     ],
 )
 
-# --- MAIN FORM: PATIENT METADATA ---
-st.subheader("📋 Participant Metadata")
-col1, col2 = st.columns(2)
-
-with col1:
-    participant_name = st.text_input(
-        "Participant Name", placeholder="e.g. John Doe"
-    )
-    age_gender = st.text_input(
-        "Age / Gender", placeholder="e.g. 48 / Male"
-    )
-
-with col2:
-    assessment_date = st.date_input(
-        "Assessment Date", value=datetime.date.today()
-    )
-    body_mass_height = st.text_input(
-        "Body Mass / Height", placeholder="e.g. 78 kg / 175 cm"
-    )
-
-st.divider()
-
-# --- DYNAMIC INPUT AREA ---
 st.subheader(f"📊 Input Data: {assessment_type}")
 
 uploaded_pdf = None
-input_data_payload = {}
+test_payload_data = {}
 
 if assessment_type == "Autonomic/HRV":
     col_h1, col_h2 = st.columns(2)
@@ -117,7 +141,7 @@ if assessment_type == "Autonomic/HRV":
             "Blood Pressure (mmHg)", placeholder="e.g. 120/80"
         )
 
-    input_data_payload = {
+    test_payload_data = {
         "RMSSD": rmssd,
         "SDNN": sdnn,
         "Respiration Rate": resp_rate,
@@ -125,62 +149,88 @@ if assessment_type == "Autonomic/HRV":
     }
 else:
     uploaded_pdf = st.file_uploader(
-        f"Upload official {assessment_type} PDF report (optional)", type=["pdf"]
+        f"Upload official {assessment_type} PDF report (optional)", type=["pdf"], key=f"pdf_{assessment_type}"
     )
     raw_notes = st.text_area(
-        "Or Paste Raw Metrics / Notes (if no PDF available)",
+        "Or Paste Raw Metrics / Notes",
         placeholder="Paste extracted data metrics or notes here...",
         height=100,
+        key=f"notes_{assessment_type}"
     )
-    input_data_payload = {"Raw Data / Notes": raw_notes}
+    test_payload_data = {"Raw Data / Notes": raw_notes}
+
+# Button to add current test to session batch
+if st.button("➕ Add This Test to Participant Profile", use_container_width=True):
+    if not participant_name:
+        st.warning("Please enter the participant's name before adding tests.")
+    else:
+        pdf_b64 = None
+        if uploaded_pdf is not None:
+            pdf_bytes = uploaded_pdf.getvalue()
+            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        # Save test object to session state
+        st.session_state.participant_tests.append({
+            "type": assessment_type,
+            "data": test_payload_data,
+            "pdf_b64": pdf_b64
+        })
+        st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
+        st.rerun()
 
 st.divider()
 
-# --- GENERATE BUTTON LOGIC ---
-if st.button("Generate HTML Report", type="primary", use_container_width=True):
+# --- MASTER REPORT GENERATION BUTTON ---
+st.subheader("🚀 Master Report Compilation")
+st.markdown("Once you have added all individual test results (up to 10+ reports) for this participant, click below to synthesize everything into a single comprehensive executive healthspan summary.")
+
+if st.button("Generate Master Longitudinal Summary Report", type="primary", use_container_width=True):
     if not api_key:
-        st.error(
-            "Please enter your Google Gemini API key in the sidebar before generating reports."
-        )
+        st.error("Please enter your Google Gemini API key in the sidebar.")
     elif not participant_name:
         st.warning("Please enter the participant's name.")
+    elif len(st.session_state.participant_tests) == 0:
+        st.warning("Please add at least one test assessment to the participant's profile before generating the master report.")
     else:
-        with st.spinner(
-            "Synthesizing data and generating clinical HTML report with Gemini..."
-        ):
+        with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} clinical assessments into master report with Gemini..."):
             try:
-                # Prepare prompt text
+                # Compile prompt text
                 prompt_text = f"""
-                Act as an expert clinical web developer and longevity data analyst at Chudleigh Health Hub.
-                Generate a fully customized, patient-specific HTML web page report for a longevity assessment pilot participant.
+                Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
+                Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
                 
-                Assessment Type: {assessment_type}
                 Participant Name: {participant_name}
                 Age / Gender: {age_gender}
                 Assessment Date: {str(assessment_date)}
                 Body Mass / Height: {body_mass_height}
                 
-                Additional Input Data / Notes:
-                {input_data_payload}
-                
-                Requirements:
-                - Use a professional design system with primary color #0f382b.
-                - Create clean metric boxes and an evidence-based clinical interpretation section tailored to these specific figures.
-                - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
+                The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
                 """
 
-                # If PDF was uploaded, convert it to base64
                 parts = [{"text": prompt_text}]
-                if uploaded_pdf is not None:
-                    import base64
-                    pdf_bytes = uploaded_pdf.getvalue()
-                    pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-                    parts.append({
-                        "inline_data": {
-                            "mime_type": "application/pdf",
-                            "data": pdf_b64
-                        }
-                    })
+
+                # Attach each test's data and optional PDF
+                for idx, t in enumerate(st.session_state.participant_tests):
+                    test_desc = f"\n--- Test #{idx+1}: {t['type']} ---\nData/Notes: {t['data']}"
+                    parts.append({"text": test_desc})
+                    
+                    if t["pdf_b64"]:
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": "application/pdf",
+                                "data": t["pdf_b64"]
+                            }
+                        })
+
+                final_instructions = """
+                Requirements for the Master Report:
+                - Create a professional, executive-level multi-test dashboard layout using primary color #0f382b.
+                - Provide an Executive Summary section synthesizing cross-system correlations (e.g., how autonomic tone interacts with body composition and metabolic health).
+                - Include individual breakdown modules for each test completed.
+                - Provide concrete, evidence-based lifestyle, clinical, and longevity recommendations.
+                - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
+                """
+                parts.append({"text": final_instructions})
 
                 payload = {
                     "contents": [{
@@ -189,7 +239,6 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 }
                 headers = {"Content-Type": "application/json"}
 
-                # Use the exact model endpoint demanded by the API
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
                 response = requests.post(url, headers=headers, data=json.dumps(payload))
                 res_json = response.json()
@@ -206,19 +255,19 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                     if html_output.endswith("```"):
                         html_output = html_output[:-3]
 
-                    st.success("Report successfully generated!")
+                    st.success("Master Longitudinal Report successfully generated!")
 
                     # Display download button
                     st.download_button(
-                        label="📥 Download HTML Report File",
+                        label="📥 Download Master HTML Report File",
                         data=html_output,
-                        file_name=f"{participant_name.replace(' ', '_')}_{assessment_type.replace(' ', '_')}_Report.html",
+                        file_name=f"{participant_name.replace(' ', '_')}_Master_Longevity_Report.html",
                         mime="text/html",
                     )
 
                     # Live preview container
-                    st.subheader("🔎 Live Report Preview")
-                    st.components.v1.html(html_output, height=650, scrolling=True)
+                    st.subheader("🔎 Live Master Report Preview")
+                    st.components.v1.html(html_output, height=800, scrolling=True)
 
             except Exception as e:
                 st.error(f"An error occurred during generation: {e}")
