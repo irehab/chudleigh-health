@@ -275,7 +275,7 @@ if app_mode == "Clinician Dashboard":
                     payload = {"contents": [{"parts": parts}]}
                     headers = {"Content-Type": "application/json"}
 
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
                     response = requests.post(url, headers=headers, data=json.dumps(payload))
                     res_json = response.json()
 
