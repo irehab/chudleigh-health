@@ -100,6 +100,7 @@ st.divider()
 # --- DYNAMIC INPUT AREA ---
 st.subheader(f"📊 Input Data: {assessment_type}")
 
+uploaded_pdf = None
 input_data_payload = {}
 
 if assessment_type == "Autonomic/HRV":
@@ -122,10 +123,14 @@ if assessment_type == "Autonomic/HRV":
         "Blood Pressure": blood_pressure,
     }
 else:
+    # Allow uploading a diagnostic PDF report
+    uploaded_pdf = st.file_uploader(
+        f"Upload official {assessment_type} PDF report (optional)", type=["pdf"]
+    )
     raw_notes = st.text_area(
-        "Paste Raw Metrics, Values, or Notes from Test Device",
+        "Or Paste Raw Metrics / Notes (if no PDF available)",
         placeholder="Paste extracted data metrics or notes here...",
-        height=150,
+        height=100,
     )
     input_data_payload = {"Raw Data / Notes": raw_notes}
 
@@ -141,12 +146,29 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
         st.warning("Please enter the participant's name.")
     else:
         with st.spinner(
-            "Synthesizing data and generating clinical HTML report with Gemini..."
+            "Analyzing PDF/data and generating clinical HTML report with Gemini..."
         ):
             try:
                 # Configure Gemini API
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel("gemini-3.8-flash")
+
+                contents_payload = []
+
+                # If a PDF was uploaded, upload it to Gemini's file processor
+                if uploaded_pdf is not None:
+                    # Save temporary file bytes
+                    bytes_data = uploaded_pdf.getvalue()
+                    import tempfile
+                    import os
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                        tmp_file.write(bytes_data)
+                        tmp_file_path = tmp_file.name
+
+                    # Upload file to Gemini API
+                    gemini_file = genai.upload_file(tmp_file_path, mime_type="application/pdf")
+                    contents_payload.append(gemini_file)
 
                 # Constructing the prompt payload for the LLM
                 prompt_content = f"""
@@ -159,16 +181,19 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 Assessment Date: {str(assessment_date)}
                 Body Mass / Height: {body_mass_height}
                 
-                Input Data Metrics:
+                Additional Input Data / Notes:
                 {input_data_payload}
                 
                 Requirements:
+                - If a PDF file is attached, extract all relevant metrics and values directly from the document.
                 - Use a professional design system with primary color #0f382b.
                 - Create clean metric boxes and an evidence-based clinical interpretation section tailored to these specific figures.
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                 """
 
-                response = model.generate_content(prompt_content)
+                contents_payload.append(prompt_content)
+
+                response = model.generate_content(contents_payload)
                 html_output = response.text
 
                 # Clean potential markdown markdown ticks if returned
@@ -177,7 +202,7 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 if html_output.endswith("```"):
                     html_output = html_output[:-3]
 
-                st.success("Report successfully generated!")
+                st.success("Report successfully generated from PDF & data!")
 
                 # Display download button
                 st.download_button(
