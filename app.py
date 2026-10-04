@@ -73,14 +73,20 @@ st.markdown(
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
 if "saved_reports" not in st.session_state:
-    # Storage for generated reports so patients can view them securely
+    # Storage structure: { "name_lower": { "name": ..., "pin": ..., "html": ..., "date": ..., "tests_count": ... } }
     st.session_state.saved_reports = {} 
+
+# --- DETECT URL PARAMETERS TO DEFAULT TO PATIENT PORTAL ---
+# If you share `https://healthautonomy.streamlit.app/?portal=true`, it opens straight to the client view!
+query_params = st.query_params
+default_mode_index = 1 if query_params.get("portal") == "true" else 0
 
 # --- SIDEBAR NAVIGATION ---
 st.sidebar.header("Portal Navigation")
 app_mode = st.sidebar.selectbox(
     "Select Portal View",
-    ["Clinician Dashboard", "Secure Patient Mobile Portal"]
+    ["Clinician Dashboard", "Secure Patient Mobile Portal"],
+    index=default_mode_index
 )
 
 api_key = st.sidebar.text_input(
@@ -103,7 +109,7 @@ if app_mode == "Clinician Dashboard":
     for idx, t in enumerate(st.session_state.participant_tests):
         st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {t['type']}</b></div>", unsafe_allow_html=True)
 
-    st.subheader("📋 Participant Metadata")
+    st.subheader("📋 Participant Metadata & Security PIN")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -118,9 +124,14 @@ if app_mode == "Clinician Dashboard":
         assessment_date = st.date_input(
             "Assessment Date", value=datetime.date.today(), key="p_date"
         )
-        body_mass_height = st.text_input(
-            "Body Mass / Height", placeholder="e.g. 78 kg / 175 cm", key="p_bm"
+        # Unique 4-digit PIN assigned by clinician for secure patient login
+        patient_pin = st.text_input(
+            "Patient Secure PIN (4 digits)", type="password", placeholder="e.g. 1234", key="p_pin"
         )
+
+    body_mass_height = st.text_input(
+        "Body Mass / Height", placeholder="e.g. 78 kg / 175 cm", key="p_bm"
+    )
 
     st.divider()
 
@@ -202,6 +213,8 @@ if app_mode == "Clinician Dashboard":
             st.error("Please enter your Google Gemini API key in the sidebar.")
         elif not participant_name:
             st.warning("Please enter the participant's name.")
+        elif not patient_pin or len(patient_pin) < 4:
+            st.warning("Please enter a valid 4-digit security PIN for patient portal protection.")
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
@@ -239,7 +252,7 @@ if app_mode == "Clinician Dashboard":
                     - Provide an Executive Summary section synthesizing cross-system correlations.
                     - Include individual breakdown modules for each test completed.
                     - **Chudleigh Health Hub Therapeutic & Clinical Action Plan:** Include a prominent intervention section outlining:
-                        1. **Osteopathic Manual Therapy Pathway:** Specific care frequency (e.g., weekly or monthly sessions) justified by tissue stiffness or asymmetries.
+                        1. **Osteopathic Manual Therapy Pathway:** Specific care frequency (weekly or monthly sessions) justified by tissue stiffness or asymmetries.
                         2. **Targeted Exercise & Personal Training Prescription:** Concrete programming (e.g., 3x personal training sessions per week for 6 weeks) addressing force plate or body composition goals.
                         3. **Longevity Lifestyle & Autonomous Recovery:** Daily habits for nervous system regulation.
                     - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
@@ -264,15 +277,16 @@ if app_mode == "Clinician Dashboard":
                         if html_output.endswith("```"):
                             html_output = html_output[:-3]
 
-                        # Store report securely keyed by participant name for the patient portal
+                        # Store report securely keyed by name and encrypted PIN
                         st.session_state.saved_reports[participant_name.strip().lower()] = {
                             "name": participant_name,
+                            "pin": patient_pin.strip(),
                             "date": str(assessment_date),
                             "html": html_output,
                             "tests_count": len(st.session_state.participant_tests)
                         }
 
-                        st.success("Master Report successfully generated and published to Patient Portal!")
+                        st.success("Master Report successfully generated and published with PIN protection!")
 
                         st.download_button(
                             label="📥 Download Master HTML Report File",
@@ -292,40 +306,48 @@ if app_mode == "Clinician Dashboard":
 # ==========================================
 elif app_mode == "Secure Patient Mobile Portal":
     st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name below to access your secure longitudinal healthspan reports, prescribed personal training blocks, and osteopathic care pathways.")
+    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your name and your secure 4-digit PIN provided by your clinician to access your records.")
 
-    client_lookup = st.text_input("Enter Your Full Name", placeholder="e.g. John Doe")
+    col_l1, col_l2 = st.columns(2)
+    with col_l1:
+        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Doe")
+    with col_l2:
+        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
 
-    if st.button("Access My Healthspan Portal", type="primary", use_container_width=True):
+    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
         lookup_key = client_lookup.strip().lower()
+        
         if lookup_key in st.session_state.saved_reports:
             client_data = st.session_state.saved_reports[lookup_key]
-            st.success(f"Welcome back, {client_data['name']}! Your records are up to date.")
+            
+            # Verify PIN
+            if client_data["pin"] == client_pin.strip():
+                st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
 
-            st.markdown(
-                f"""
-                <div class='portal-box'>
-                    <h3>📋 Your Longevity Profile Summary</h3>
-                    <p><b>Participant:</b> {client_data['name']}</p>
-                    <p><b>Last Clinical Assessment:</b> {client_data['date']}</p>
-                    <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
-                    <p><b>Assigned Care Schedule:</b> Active 6-Week Therapeutic Care Plan &amp; Osteopathic Protocol</p>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+                st.markdown(
+                    f"""
+                    <div class='portal-box'>
+                        <h3>📋 Your Longevity Profile Summary</h3>
+                        <p><b>Participant:</b> {client_data['name']}</p>
+                        <p><b>Last Clinical Assessment:</b> {client_data['date']}</p>
+                        <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
+                        <p><b>Assigned Care Schedule:</b> Active 6-Week Therapeutic Care Plan &amp; Osteopathic Protocol</p>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
 
-            # Mobile Download Button
-            st.download_button(
-                label="📥 Download My Master HTML Report (Mobile / PC)",
-                data=client_data['html'],
-                file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
-                mime="text/html",
-                use_container_width=True
-            )
+                st.download_button(
+                    label="📥 Download My Master HTML Report (Mobile / PC)",
+                    data=client_data['html'],
+                    file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
 
-            st.subheader("🔎 Your Live Interactive Healthspan Dashboard")
-            st.components.v1.html(client_data['html'], height=750, scrolling=True)
-
+                st.subheader("🔎 Your Live Interactive Healthspan Dashboard")
+                st.components.v1.html(client_data['html'], height=750, scrolling=True)
+            else:
+                st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
         else:
-            st.warning("No published reports found matching that name. Please check with your clinician at Chudleigh Health Hub.")
+            st.warning("No published reports found matching that name. Please check your spelling or contact your clinician.")
