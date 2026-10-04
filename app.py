@@ -79,8 +79,6 @@ query_params = st.query_params
 is_patient_link = query_params.get("portal") == "true"
 
 api_key = ""
-supabase_url = ""
-supabase_key = ""
 
 if is_patient_link:
     app_mode = "Secure Patient Mobile Portal"
@@ -97,20 +95,13 @@ else:
         "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
     )
     st.sidebar.divider()
-    st.sidebar.subheader("Cloud Database (Supabase)")
-    supabase_url = st.sidebar.text_input("Supabase Project URL", placeholder="https://xyz.supabase.co")
-    supabase_key = st.sidebar.text_input("Supabase Anon Key", type="password", placeholder="sb_publishable_...")
-    st.sidebar.divider()
 
-# Bulletproof helper function to initialize Supabase client
+# Direct, hardcoded Supabase client initialization (Guaranteed connection)
 def get_supabase_client():
-    url = supabase_url if ('supabase_url' in locals() and supabase_url) else (st.secrets.get("SUPABASE_URL", "") if hasattr(st, "secrets") else "")
-    key = supabase_key if ('supabase_key' in locals() and supabase_key) else (st.secrets.get("SUPABASE_KEY", "") if hasattr(st, "secrets") else "")
-    
-    if not url or not key:
-        return None
+    url = "https://eyuvugzgxfawagpndmqo.supabase.co"
+    key = "sb_publishable_hC0EacZHCbJ3wo-qKP2Q0A_sqn-_FC9"
     try:
-        return create_client(url.strip(), key.strip())
+        return create_client(url, key)
     except Exception as e:
         st.error(f"Supabase Connection Error: {e}")
         return None
@@ -232,7 +223,7 @@ if app_mode == "Clinician Dashboard":
         if not api_key:
             st.error("Please enter your Google Gemini API key in the sidebar.")
         elif not db:
-            st.error("Please enter your Supabase Project URL and Publishable Key in the sidebar.")
+            st.error("Could not connect to Supabase cloud database.")
         elif not participant_name:
             st.warning("Please enter the participant's name.")
         elif not patient_pin or len(patient_pin) < 4:
@@ -284,7 +275,7 @@ if app_mode == "Clinician Dashboard":
                     payload = {"contents": [{"parts": parts}]}
                     headers = {"Content-Type": "application/json"}
 
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
                     response = requests.post(url, headers=headers, data=json.dumps(payload))
                     res_json = response.json()
 
@@ -345,7 +336,7 @@ elif app_mode == "Secure Patient Mobile Portal":
             db = get_supabase_client()
 
             if not db:
-                st.error("Database connection configuration missing. Please ensure your cloud credentials are active.")
+                st.error("Database connection configuration missing.")
             else:
                 response = db.table("longevity_reports").select("*").eq("name_lower", lookup_key).execute()
                 data = response.data
