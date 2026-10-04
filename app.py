@@ -169,7 +169,7 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                 """
 
-                # If PDF was uploaded, convert it to base64 to send via REST API
+                # If PDF was uploaded, convert it to base64
                 parts = [{"text": prompt_text}]
                 if uploaded_pdf is not None:
                     import base64
@@ -182,17 +182,24 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                         }
                     })
 
-                # Direct REST API call to Gemini endpoint supporting AQ keys
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
-                headers = {"Content-Type": "application/json"}
                 payload = {
                     "contents": [{
                         "parts": parts
                     }]
                 }
+                headers = {"Content-Type": "application/json"}
 
-                response = requests.post(url, headers=headers, data=json.dumps(payload))
-                res_json = response.json()
+                # Try primary model, fallback to secondary if high demand error occurs
+                models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+                response = None
+                res_json = None
+
+                for model_name in models_to_try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                    response = requests.post(url, headers=headers, data=json.dumps(payload))
+                    res_json = response.json()
+                    if response.status_code == 200:
+                        break
 
                 if response.status_code != 200:
                     error_msg = res_json.get("error", {}).get("message", "Unknown API error")
