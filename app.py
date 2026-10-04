@@ -189,8 +189,8 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 }
                 headers = {"Content-Type": "application/json"}
 
-                # Try primary model, fallback to secondary if high demand error occurs
-                models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+                # Try stable 1.5 models
+                models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
                 response = None
                 res_json = None
 
