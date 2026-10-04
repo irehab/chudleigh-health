@@ -189,17 +189,10 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 }
                 headers = {"Content-Type": "application/json"}
 
-                # Try stable 1.5 models
-                models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
-                response = None
-                res_json = None
-
-                for model_name in models_to_try:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-                    response = requests.post(url, headers=headers, data=json.dumps(payload))
-                    res_json = response.json()
-                    if response.status_code == 200:
-                        break
+                # Use the stable flash endpoint
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+                response = requests.post(url, headers=headers, data=json.dumps(payload))
+                res_json = response.json()
 
                 if response.status_code != 200:
                     error_msg = res_json.get("error", {}).get("message", "Unknown API error")
