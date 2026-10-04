@@ -189,8 +189,8 @@ if st.button("Generate HTML Report", type="primary", use_container_width=True):
                 }
                 headers = {"Content-Type": "application/json"}
 
-                # Use the current stable gemini-2.0-flash endpoint
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+                # Use the exact model endpoint demanded by the API
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
                 response = requests.post(url, headers=headers, data=json.dumps(payload))
                 res_json = response.json()
 
