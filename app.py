@@ -3,7 +3,8 @@ import json
 import base64
 import streamlit as st
 from supabase import create_client, Client
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # Page Configuration
 st.set_page_config(
@@ -233,32 +234,34 @@ if app_mode == "Clinician Dashboard":
         else:
             with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} assessments and formulating clinical care plan..."):
                 try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel("gemini-3.8-flash")
+                    client = genai.Client(api_key=api_key)
 
-                    prompt_parts = [
-                        f"""
-                        Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
-                        Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
-                        
-                        Participant Name: {participant_name}
-                        Age / Gender: {age_gender}
-                        Assessment Date: {str(assessment_date)}
-                        Body Mass / Height: {body_mass_height}
-                        
-                        The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
-                        """
-                    ]
+                    prompt_text = f"""
+                    Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
+                    Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
+                    
+                    Participant Name: {participant_name}
+                    Age / Gender: {age_gender}
+                    Assessment Date: {str(assessment_date)}
+                    Body Mass / Height: {body_mass_height}
+                    
+                    The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
+                    """
+
+                    contents = [prompt_text]
 
                     for idx, t in enumerate(st.session_state.participant_tests):
                         test_desc = f"\n--- Test #{idx+1}: {t['type']} ---\nData/Notes: {t['data']}"
-                        prompt_parts.append(test_desc)
+                        contents.append(test_desc)
                         
                         if t["pdf_b64"]:
-                            prompt_parts.append({
-                                "mime_type": "application/pdf",
-                                "data": base64.b64decode(t["pdf_b64"])
-                            })
+                            pdf_bytes = base64.b64decode(t["pdf_b64"])
+                            contents.append(
+                                types.Part.from_bytes(
+                                    data=pdf_bytes,
+                                    mime_type="application/pdf",
+                                )
+                            )
 
                     final_instructions = """
                     Requirements for the Master Report:
@@ -271,9 +274,12 @@ if app_mode == "Clinician Dashboard":
                         3. **Longevity Lifestyle & Autonomous Recovery:** Daily habits for nervous system regulation.
                     - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
                     """
-                    prompt_parts.append(final_instructions)
+                    contents.append(final_instructions)
 
-                    response = model.generate_content(prompt_parts)
+                    response = client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=contents,
+                    )
                     html_output = response.text
 
                     if html_output.startswith("```html"):
