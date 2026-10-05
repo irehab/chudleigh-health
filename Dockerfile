@@ -1,12 +1,12 @@
 FROM python:3.11-slim
 
-# Install system certificates and network protocol definitions
+# Install system certificates and network protocols for secure cloud routing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     netbase \
     && rm -rf /var/lib/apt/lists/*
 
-# Force gRPC to use the native system DNS resolver (fixes [Errno -2])
+# Force gRPC to use the native system DNS resolver
 ENV GRPC_DNS_RESOLVER=native
 
 WORKDIR /app
