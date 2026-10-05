@@ -76,8 +76,8 @@ st.markdown(
 # --- SESSION STATE INITIALIZATION ---
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
-if "current_html_output" not in st.session_state:
-    st.session_state.current_html_output = None
+if "editable_clinical_text" not in st.session_state:
+    st.session_state.editable_clinical_text = ""
 
 # --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
 @st.cache_resource
@@ -125,7 +125,7 @@ if app_mode == "Clinician Dashboard":
 
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
         st.session_state.participant_tests = []
-        st.session_state.current_html_output = None
+        st.session_state.editable_clinical_text = ""
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
@@ -166,7 +166,6 @@ if app_mode == "Clinician Dashboard":
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    # Official PDF Report Uploader
     uploaded_pdf = st.file_uploader(
         f"📎 Upload Official {assessment_type} PDF Report (Attached for Patient Download & Clinical Analysis)", 
         type=["pdf"], 
@@ -316,15 +315,14 @@ if app_mode == "Clinician Dashboard":
             st.warning("Please enter the participant's name before adding assessments.")
         else:
             pdf_b64 = None
-            if pdf_bytes_content is not None and len(pdf_bytes_content) < 500 * 1024:
+            if pdf_bytes_content is not None:
                 pdf_b64 = base64.b64encode(pdf_bytes_content).decode("utf-8")
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
                 "pdf_filename": pdf_filename_str,
-                "pdf_b64": pdf_b64,
-                "has_pdf": pdf_bytes_content is not None
+                "pdf_b64": pdf_b64
             })
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
@@ -332,7 +330,7 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     st.subheader("🚀 Clinical Report Compilation & Health Autonomy Engine")
-    st.markdown("Compile all queued tests, run clinical analysis through the Health Autonomy analytics engine, review/edit the output, and publish to Google Cloud.")
+    st.markdown("Compile all queued tests, run clinical analysis, review or edit the interpretation, and publish to Google Cloud.")
 
     if st.button("Generate Master Clinical Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -357,7 +355,7 @@ if app_mode == "Clinician Dashboard":
                                 }
                             })
 
-                    ai_analysis_html = "<p>Clinical interpretation generated successfully.</p>"
+                    draft_interpretation = "<p>Clinical interpretation generated successfully.</p>"
                     
                     if gemini_client:
                         prompt_text = (
@@ -379,10 +377,35 @@ if app_mode == "Clinician Dashboard":
                             contents=contents_payload,
                         )
                         if response and response.text:
-                            ai_analysis_html = response.text
+                            draft_interpretation = response.text
                     else:
-                        st.warning("Clinical analytics client uninitialized. Defaulting to standard report structure.")
+                        st.warning("Clinical analytics client uninitialized.")
 
+                    st.session_state.editable_clinical_text = draft_interpretation
+                    st.success("✨ Clinical report drafted successfully! Review and edit the clinical text below before publishing.")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"An error occurred during report compilation: {e}")
+
+    # --- EDITABLE CLINICAL TEXT AREA & PUBLISH ---
+    if st.session_state.editable_clinical_text:
+        st.divider()
+        st.subheader("✏️ Edit Clinical Interpretation & Recommendations")
+        st.markdown("Modify, refine, or add notes to the clinical evaluation below before publishing to the patient portal:")
+
+        edited_interpretation = st.text_area(
+            "Clinical Interpretation Text (HTML format)",
+            value=st.session_state.editable_clinical_text,
+            height=350,
+            key="clinical_text_editor"
+        )
+
+        if st.button("💾 Publish & Sync Master Report to Google Cloud", type="primary", use_container_width=True):
+            if not participant_name:
+                st.warning("Please ensure participant name is entered.")
+            else:
+                try:
                     # Build individual test cards with secure download buttons
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
@@ -470,74 +493,53 @@ if app_mode == "Clinician Dashboard":
                     </html>
                     """
 
-                    st.session_state.current_html_output = html_template.format(
+                    final_html_output = html_template.format(
                         participant_name=participant_name,
                         age_gender=age_gender if age_gender else 'Not specified',
                         assessment_date=str(assessment_date),
                         body_mass_height=body_mass_height if body_mass_height else 'Not specified',
-                        ai_analysis_html=ai_analysis_html,
+                        ai_analysis_html=edited_interpretation,
                         tests_count=len(st.session_state.participant_tests),
                         tests_html=tests_html
                     )
-                    st.success("✨ Master report generated successfully! Review, edit, and publish below.")
-                    st.rerun()
 
+                    if db:
+                        doc_id = participant_name.strip().lower()
+                        record = {
+                            "name_lower": doc_id,
+                            "name": participant_name,
+                            "pin": patient_pin.strip(),
+                            "assessment_date": str(assessment_date),
+                            "tests_count": len(st.session_state.participant_tests),
+                        }
+                        db.collection("longevity_reports").document(doc_id).set(record)
+                        
+                        html_record = {
+                            "html_output": final_html_output
+                        }
+                        db.collection("longevity_htmls").document(doc_id).set(html_record)
+
+                        st.success("✨ Master Report published and successfully synced to Google Cloud Firestore!")
+                    else:
+                        st.error("Database connection unavailable.")
                 except Exception as e:
-                    st.error(f"An error occurred during report compilation: {e}")
+                    st.error(f"Error publishing to cloud: {e}")
 
-    # --- EDITABLE PREVIEW & PUBLISH SECTION ---
-    if st.session_state.current_html_output:
-        st.divider()
-        st.subheader("✏️ Review & Edit Master Report Before Publishing")
-        st.markdown("You can edit the report content, notes, or HTML structure directly below before syncing it to Google Cloud for the patient portal:")
+        st.subheader("🔎 Live Preview of Master Report")
+        preview_tests_html = ""
+        for idx, t in enumerate(st.session_state.participant_tests):
+            data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
+            preview_tests_html += f"<div style='background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px;'><h3>Test #{idx+1}: {t['type']}</h3><ul>{data_str}</ul></div>"
 
-        edited_html_input = st.text_area(
-            "Master HTML Report Editor",
-            value=st.session_state.current_html_output,
-            height=400,
-            key="html_editor_box"
-        )
-
-        col_pub1, col_pub2 = st.columns(2)
-        with col_pub1:
-            if st.button("💾 Publish & Sync Edited Report to Google Cloud", type="primary", use_container_width=True):
-                if not participant_name:
-                    st.warning("Please ensure participant name is entered.")
-                else:
-                    try:
-                        if db:
-                            doc_id = participant_name.strip().lower()
-                            record = {
-                                "name_lower": doc_id,
-                                "name": participant_name,
-                                "pin": patient_pin.strip(),
-                                "assessment_date": str(assessment_date),
-                                "tests_count": len(st.session_state.participant_tests),
-                            }
-                            db.collection("longevity_reports").document(doc_id).set(record)
-                            
-                            html_record = {
-                                "html_output": edited_html_input
-                            }
-                            db.collection("longevity_htmls").document(doc_id).set(html_record)
-
-                            st.success("✨ Master Report published and successfully synced to Google Cloud Firestore!")
-                        else:
-                            st.error("Database connection unavailable.")
-                    except Exception as e:
-                        st.error(f"Error publishing to cloud: {e}")
-
-        with col_pub2:
-            st.download_button(
-                label="📥 Download Master HTML Report File",
-                data=edited_html_input,
-                file_name=f"{participant_name.replace(' ', '_')}_Health_Autonomy_Report.html",
-                mime="text/html",
-                use_container_width=True
-            )
-
-        st.subheader("🔎 Live Preview of Report")
-        st.components.v1.html(edited_html_input, height=800, scrolling=True)
+        live_preview_html = f"""
+        <div style="font-family: sans-serif; padding: 20px; background: white; border-radius: 8px;">
+            <h2 style="color: #0f382b;">{participant_name} ({age_gender})</h2>
+            <div style="background: #f0fdf4; padding: 15px; border-radius: 6px;">{edited_interpretation}</div>
+            <h3 style="color: #0f382b; margin-top: 20px;">Completed Tests:</h3>
+            {preview_tests_html}
+        </div>
+        """
+        st.components.v1.html(live_preview_html, height=600, scrolling=True)
 
 # ==========================================
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
