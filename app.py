@@ -165,7 +165,7 @@ if app_mode == "Clinician Dashboard":
 
     # Official PDF Report Uploader
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Recommended for Deep AI Extraction)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Embedded in Report & Analyzed by AI)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
@@ -177,9 +177,9 @@ if app_mode == "Clinician Dashboard":
     if uploaded_pdf is not None:
         pdf_bytes_content = uploaded_pdf.getvalue()
         pdf_filename_str = uploaded_pdf.name
-        st.success(f"PDF Loaded: {pdf_filename_str} ({len(pdf_bytes_content) / 1024:.1f} KB)")
+        st.success(f"PDF Loaded Successfully: {pdf_filename_str} ({len(pdf_bytes_content) / 1024:.1f} KB)")
 
-    # Form inputs for quick manual overrides or extra metrics
+    # Form inputs for quick overrides or supplementary metrics
     if assessment_type == "Tanita Body Composition (MC-780MA)":
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -312,25 +312,23 @@ if app_mode == "Clinician Dashboard":
         if not participant_name:
             st.warning("Please enter the participant's name before adding assessments.")
         else:
-            pdf_base64_data = None
-            # Only encode if under ~600KB to safely fit within Firestore 1MB doc limit
-            if pdf_bytes_content and len(pdf_bytes_content) < 600 * 1024:
-                pdf_base64_data = base64.b64encode(pdf_bytes_content).decode("utf-8")
+            pdf_b64 = None
+            if pdf_bytes_content is not None:
+                pdf_b64 = base64.b64encode(pdf_bytes_content).decode("utf-8")
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
-                "has_pdf": pdf_bytes_content is not None,
                 "pdf_filename": pdf_filename_str,
-                "pdf_b64": pdf_base64_data
+                "pdf_b64": pdf_b64
             })
-            st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
+            st.success(f"Successfully added {assessment_type} with attached PDF to {participant_name}'s profile!")
             st.rerun()
 
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, and securely sync to Google Cloud Firestore.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, embed visual PDF viewers, and securely sync to Google Cloud.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -340,14 +338,13 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & compiling master clinical report..."):
+            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & embedding PDF reports..."):
                 try:
                     summary_context = f"Participant: {participant_name}, Age/Gender: {age_gender}, Metrics: {body_mass_height}\n"
                     contents_payload = []
 
                     for idx, t in enumerate(st.session_state.participant_tests):
                         summary_context += f"Test {idx+1}: {t['type']} -> Data: {json.dumps(t['data'])}\n"
-                        # If raw PDF bytes were stored in session temporarily or we can pass base64 parts to Gemini
                         if t.get('pdf_b64'):
                             contents_payload.append({
                                 "inline_data": {
@@ -384,7 +381,7 @@ if app_mode == "Clinician Dashboard":
                     else:
                         st.warning("Gemini client is uninitialized. Defaulting to standard clinical report structure.")
 
-                    # Build individual test cards with embedded PDF viewers if available
+                    # Build individual test cards with fully embedded interactive PDF viewers
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
@@ -392,27 +389,22 @@ if app_mode == "Clinician Dashboard":
                         pdf_viewer_html = ""
                         if t.get('pdf_b64'):
                             pdf_viewer_html = f"""
-                            <div style="margin-top: 15px; background: white; padding: 15px; border-radius: 6px; border: 1px solid #bbf7d0;">
-                                <h4 style="margin-top: 0; color: #2b6a52; font-size: 15px;">Official Diagnostic PDF Report ({t.get('pdf_filename', 'Document')})</h4>
-                                <div style="position: relative; width: 100%; height: 600px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; background: #e2e8f0;">
+                            <div style="margin-top: 20px; background: white; padding: 20px; border-radius: 8px; border: 1px solid #bbf7d0;">
+                                <h3 style="margin-top: 0; color: #2b6a52; font-size: 16px; margin-bottom: 5px;">Official Diagnostic PDF Report ({t.get('pdf_filename', 'Document')})</h3>
+                                <p style="font-size: 13px; color: #64748b; margin-bottom: 15px;">The complete official diagnostic PDF report containing all graphs, charts, and visual data is embedded below for clinical review:</p>
+                                <div style="position: relative; width: 100%; height: 700px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; background: #e2e8f0;">
                                     <object data="data:application/pdf;base64,{t['pdf_b64']}" type="application/pdf" width="100%" height="100%">
                                         <embed src="data:application/pdf;base64,{t['pdf_b64']}" type="application/pdf" width="100%" height="100%" />
-                                        <p style="padding: 20px; text-align: center;">Your browser does not support embedded PDFs.</p>
+                                        <p style="padding: 20px; text-align: center;">Your browser does not support embedded PDFs. Please download the HTML report to view.</p>
                                     </object>
                                 </div>
                             </div>
                             """
-                        elif t.get('has_pdf'):
-                            pdf_viewer_html = f"""
-                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-top: 10px;">
-                                📎 Official PDF Report Attached ({t.get('pdf_filename', 'Document')}) processed for AI extraction.
-                            </p>
-                            """
 
                         tests_html += f"""
-                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 18px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #e2e8f0;">
-                            <h3 style="margin-top: 0; color: #0f382b; font-size: 18px;">Test #{idx+1}: {t['type']}</h3>
-                            <ul style="margin-bottom: 10px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>All metrics extracted directly from official diagnostic PDF report.</li>"}</ul>
+                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t['type']}</h3>
+                            <ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via multimodal AI inspection of attached PDF.</li>"}</ul>
                             {pdf_viewer_html}
                         </div>
                         """
@@ -446,133 +438,4 @@ if app_mode == "Clinician Dashboard":
                             .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
                             .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
                             .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
-                            .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
-                            .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
-                        </style>
-                    </head>
-                    <body>
-                        <div class="report-container">
-                            <div class="header">
-                                <h1>Chudleigh Health Hub</h1>
-                                <p>Diagnostic Longevity Pilot Program &bull; Master Assessment Report</p>
-                            </div>
-                            <div class="content">
-                                <div class="patient-meta">
-                                    <div class="meta-item"><label>Participant Name</label><span>{participant_name}</span></div>
-                                    <div class="meta-item"><label>Age / Gender</label><span>{age_gender if age_gender else 'Not specified'}</span></div>
-                                    <div class="meta-item"><label>Assessment Date</label><span>{str(assessment_date)}</span></div>
-                                    <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height if body_mass_height else 'Not specified'}</span></div>
-                                </div>
-                                
-                                <div class="results-card">
-                                    <h2>🤖 Gemini 3.8-Flash Granular Clinical Interpretation & Deep-Dive</h2>
-                                    <div class="interpretation-text">
-                                        {ai_analysis_html}
-                                    </div>
-                                </div>
-
-                                <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({len(st.session_state.participant_tests)})</h2>
-                                {tests_html}
-                            </div>
-                            <div class="footer">&copy; 2026 Chudleigh Health Hub. Diagnostic Longevity Pilot Program. All rights reserved.</div>
-                        </div>
-                    </body>
-                    </html>
-                    """
-
-                    # Sync to Google Cloud Firestore Database (stripping heavy binary strings from saved record payload to ensure <1MB compliance)
-                    if db:
-                        doc_id = participant_name.strip().lower()
-                        clean_tests = []
-                        for t in st.session_state.participant_tests:
-                            clean_tests.append({
-                                "type": t["type"],
-                                "data": t["data"],
-                                "has_pdf": t.get("has_pdf", False),
-                                "pdf_filename": t.get("pdf_filename")
-                            })
-
-                        record = {
-                            "name_lower": doc_id,
-                            "name": participant_name,
-                            "pin": patient_pin.strip(),
-                            "assessment_date": str(assessment_date),
-                            "tests_count": len(clean_tests),
-                            "html_output": html_output
-                        }
-                        db.collection("longevity_reports").document(doc_id).set(record)
-                        st.success("✨ AI Master Report generated with deep PDF extraction and successfully synced to Google Cloud Firestore!")
-                    else:
-                        st.success("✨ AI Master Report generated successfully!")
-
-                    st.download_button(
-                        label="📥 Download Master HTML Report File",
-                        data=html_output,
-                        file_name=f"{participant_name.replace(' ', '_')}_AI_Longevity_Report.html",
-                        mime="text/html",
-                    )
-
-                    st.subheader("🔎 Live AI Master Report Preview")
-                    st.components.v1.html(html_output, height=800, scrolling=True)
-
-                except Exception as e:
-                    st.error(f"An error occurred during AI report compilation: {e}")
-
-# ==========================================
-# VIEW 2: SECURE PATIENT MOBILE PORTAL
-# ==========================================
-elif app_mode == "Secure Patient Mobile Portal":
-    st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and your secure 4-digit PIN provided by your clinician to access your records.")
-
-    col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
-    with col_l2:
-        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
-
-    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
-        lookup_key = client_lookup.strip().lower()
-        
-        try:
-            if not db:
-                st.error("Google Cloud database connection unavailable.")
-            else:
-                doc_ref = db.collection("longevity_reports").document(lookup_key)
-                doc = doc_ref.get()
-
-                if doc.exists:
-                    client_data = doc.to_dict()
-                    
-                    if client_data["pin"] == client_pin.strip():
-                        st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
-
-                        st.markdown(
-                            f"""
-                            <div class='portal-box'>
-                                <h3>📋 Your Longevity Profile Summary</h3>
-                                <p><b>Participant:</b> {client_data['name']}</p>
-                                <p><b>Last Clinical Assessment:</b> {client_data['assessment_date']}</p>
-                                <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                        st.download_button(
-                            label="📥 Download My Master AI Report (Mobile / PC)",
-                            data=client_data['html_output'],
-                            file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
-                            mime="text/html",
-                            use_container_width=True
-                        )
-
-                        st.subheader("🔎 Your Live Interactive AI Healthspan Dashboard")
-                        st.components.v1.html(client_data['html_output'], height=750, scrolling=True)
-                    else:
-                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
-                else:
-                    st.warning("No published reports found matching that name in the Google Cloud database.")
-        
-        except Exception as e:
-            st.error(f"Error connecting to Google Cloud records: {e}")
+                            .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border
