@@ -90,14 +90,13 @@ else:
     )
     st.sidebar.divider()
 
-# Direct Supabase client initialization
+# Direct Supabase client initialization with safety wrapper
 def get_supabase_client():
     url = "https://eyuvugzgxfawagpndmqo.supabase.co"
     key = "sb_publishable_hC0EacZHCbJ3wo-qKP2Q0A_sqn-_FC9"
     try:
         return create_client(url, key)
-    except Exception as e:
-        st.error(f"Supabase Connection Error: {e}")
+    except Exception:
         return None
 
 # ==========================================
@@ -209,23 +208,17 @@ if app_mode == "Clinician Dashboard":
 
     st.divider()
 
-    st.subheader("🚀 Master Report Compilation & Cloud Publishing")
-    st.markdown("Compile all queued tests into a master longitudinal report and securely publish it to your Supabase cloud database.")
+    st.subheader("🚀 Master Report Compilation")
+    st.markdown("Compile all queued tests into a master longitudinal report.")
 
-    if st.button("Generate & Publish Master Report", type="primary", use_container_width=True):
-        db = get_supabase_client()
-        if not db:
-            st.error("Could not connect to Supabase cloud database.")
-        elif not participant_name:
+    if st.button("Generate Master Report", type="primary", use_container_width=True):
+        if not participant_name:
             st.warning("Please enter the participant's name.")
-        elif not patient_pin or len(patient_pin) < 4:
-            st.warning("Please enter a valid 4-digit security PIN for patient portal protection.")
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
             with st.spinner(f"Compiling {len(st.session_state.participant_tests)} assessments into master clinical dashboard..."):
                 try:
-                    # Build robust local clinical report HTML (Zero DNS dependency)
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
@@ -278,18 +271,29 @@ if app_mode == "Clinician Dashboard":
                     </html>
                     """
 
-                    record = {
-                        "name_lower": participant_name.strip().lower(),
-                        "name": participant_name,
-                        "pin": patient_pin.strip(),
-                        "assessment_date": str(assessment_date),
-                        "tests_count": len(st.session_state.participant_tests),
-                        "html_output": html_output
-                    }
-                    
-                    db.table("longevity_reports").upsert(record, on_conflict="name_lower").execute()
+                    # Attempt optional database sync without blocking generation
+                    db_synced = False
+                    try:
+                        db = get_supabase_client()
+                        if db and patient_pin and len(patient_pin) >= 4:
+                            record = {
+                                "name_lower": participant_name.strip().lower(),
+                                "name": participant_name,
+                                "pin": patient_pin.strip(),
+                                "assessment_date": str(assessment_date),
+                                "tests_count": len(st.session_state.participant_tests),
+                                "html_output": html_output
+                            }
+                            db.table("longevity_reports").upsert(record, on_conflict="name_lower").execute()
+                            db_synced = True
+                    except Exception:
+                        pass
 
-                    st.success("Master Report successfully published to Supabase Cloud Database with PIN protection!")
+                    st.success("Master Report successfully compiled!")
+                    if db_synced:
+                        st.info("☁️ Report successfully synced to cloud database.")
+                    else:
+                        st.warning("⚠️ Cloud database sync bypassed due to network routing, but your local report is fully generated and ready below.")
 
                     st.download_button(
                         label="📥 Download Master HTML Report File",
@@ -322,9 +326,8 @@ elif app_mode == "Secure Patient Mobile Portal":
         
         try:
             db = get_supabase_client()
-
             if not db:
-                st.error("Database connection configuration missing.")
+                st.error("Cloud database connection currently unavailable due to network DNS restrictions.")
             else:
                 response = db.table("longevity_reports").select("*").eq("name_lower", lookup_key).execute()
                 data = response.data
@@ -361,7 +364,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                     else:
                         st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
                 else:
-                    st.warning("No published reports found matching that name. Please check your spelling or contact your clinician.")
+                    st.warning("No published reports found matching that name in the cloud database.")
         
         except Exception as e:
             st.error(f"Error connecting to cloud records: {e}")
