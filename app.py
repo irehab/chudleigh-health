@@ -167,7 +167,13 @@ if app_mode == "Clinician Dashboard":
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    uploaded_pdf = None
+    # UNIVERSAL PDF UPLOADER FOR EVERY TEST TYPE
+    uploaded_pdf = st.file_uploader(
+        f"📎 Upload Official {assessment_type} PDF Report (Optional)", 
+        type=["pdf"], 
+        key=f"pdf_{assessment_type}"
+    )
+
     test_payload_data = {}
 
     if assessment_type == "Autonomic/HRV":
@@ -190,9 +196,6 @@ if app_mode == "Clinician Dashboard":
             "Blood Pressure": blood_pressure,
         }
     else:
-        uploaded_pdf = st.file_uploader(
-            f"Upload official {assessment_type} PDF report (optional)", type=["pdf"], key=f"pdf_{assessment_type}"
-        )
         raw_notes = st.text_area(
             "Or Paste Raw Metrics / Notes",
             placeholder="Paste extracted data metrics or notes here...",
@@ -264,9 +267,11 @@ if app_mode == "Clinician Dashboard":
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
+                        has_pdf = "📎 Official PDF Report Attached" if t.get('pdf_b64') else ""
                         tests_html += f"""
                         <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px; border-radius: 4px;">
                             <h3 style="margin-top: 0; color: #0f382b;">Test #{idx+1}: {t['type']}</h3>
+                            <p style="color: #2b6a52; font-size: 14px; font-weight: bold;">{has_pdf}</p>
                             <ul style="margin-bottom: 0; color: #334155;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
                         </div>
                         """
@@ -397,3 +402,4 @@ elif app_mode == "Secure Patient Mobile Portal":
         
         except Exception as e:
             st.error(f"Error connecting to cloud records: {e}")
+            
