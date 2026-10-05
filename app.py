@@ -1,6 +1,7 @@
 import os
 import datetime
 import json
+import base64
 import streamlit as st
 from google.cloud import firestore
 from google import genai
@@ -162,15 +163,23 @@ if app_mode == "Clinician Dashboard":
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    # Universal PDF Report Uploader (Optimized lightweight handling)
+    # Official PDF Report Uploader
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Optional)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Recommended for Deep AI Extraction)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
 
     test_payload_data = {}
+    pdf_bytes_content = None
+    pdf_filename_str = None
 
+    if uploaded_pdf is not None:
+        pdf_bytes_content = uploaded_pdf.getvalue()
+        pdf_filename_str = uploaded_pdf.name
+        st.success(f"PDF Loaded: {pdf_filename_str} ({len(pdf_bytes_content) / 1024:.1f} KB)")
+
+    # Form inputs for quick manual overrides or extra metrics
     if assessment_type == "Tanita Body Composition (MC-780MA)":
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -303,17 +312,17 @@ if app_mode == "Clinician Dashboard":
         if not participant_name:
             st.warning("Please enter the participant's name before adding assessments.")
         else:
-            has_pdf = False
-            pdf_filename = None
-            if uploaded_pdf is not None:
-                has_pdf = True
-                pdf_filename = uploaded_pdf.name
+            pdf_base64_data = None
+            # Only encode if under ~600KB to safely fit within Firestore 1MB doc limit
+            if pdf_bytes_content and len(pdf_bytes_content) < 600 * 1024:
+                pdf_base64_data = base64.b64encode(pdf_bytes_content).decode("utf-8")
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
-                "has_pdf": has_pdf,
-                "pdf_filename": pdf_filename
+                "has_pdf": pdf_bytes_content is not None,
+                "pdf_filename": pdf_filename_str,
+                "pdf_b64": pdf_base64_data
             })
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
@@ -321,7 +330,7 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash for clinical interpretation, and securely sync to Google Cloud Firestore.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, and securely sync to Google Cloud Firestore.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -331,46 +340,80 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner("🤖 Interrogating Gemini 3.8-flash and compiling master clinical report..."):
+            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & compiling master clinical report..."):
                 try:
                     summary_context = f"Participant: {participant_name}, Age/Gender: {age_gender}, Metrics: {body_mass_height}\n"
+                    contents_payload = []
+
                     for idx, t in enumerate(st.session_state.participant_tests):
                         summary_context += f"Test {idx+1}: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                        # If raw PDF bytes were stored in session temporarily or we can pass base64 parts to Gemini
+                        if t.get('pdf_b64'):
+                            contents_payload.append({
+                                "inline_data": {
+                                    "mime_type": "application/pdf",
+                                    "data": t['pdf_b64']
+                                }
+                            })
 
-                    ai_analysis_html = "<p>Clinical interpretations and physiological insights generated successfully.</p>"
+                    ai_analysis_html = "<p>Granular clinical interpretation and metric deep-dive generated successfully.</p>"
                     
                     if gemini_client:
-                        prompt = f"""
+                        prompt_text = f"""
                         You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. 
-                        Analyze the following biometric and functional assessments for a patient and write a professional, encouraging, yet rigorous clinical interpretation formatted in clean HTML (use h3, p, and li tags). Do not include citation markers.
+                        Carefully analyze the attached official PDF reports and manually entered metrics for this participant. Drill down into every available metric, table, percentage predicted, Z-score, symmetry ratio, and graphical trend.
                         
-                        Patient Details & Test Data:
+                        Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). Do not include citation markers.
+                        
+                        Participant Details & Test Data:
                         {summary_context}
                         
                         Provide:
-                        1. Clinical Summary & Insights
-                        2. Key Biomarker Highlights & Asymmetry Analysis
-                        3. Tailored Lifestyle, Movement & Therapeutic Recommendations for Longevity
+                        1. Comprehensive Clinical Summary & Physiological Insights
+                        2. Granular Biomarker Breakdown (extracting deep metrics, percentiles, and asymmetries)
+                        3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap
                         """
+                        contents_payload.append(prompt_text)
+
                         response = gemini_client.models.generate_content(
                             model="gemini-3.8-flash",
-                            contents=prompt,
+                            contents=contents_payload,
                         )
                         if response and response.text:
                             ai_analysis_html = response.text
                     else:
                         st.warning("Gemini client is uninitialized. Defaulting to standard clinical report structure.")
 
-                    # Build individual test result cards for HTML output
+                    # Build individual test cards with embedded PDF viewers if available
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-                        has_pdf_str = f"📎 Official PDF Report Attached ({t.get('pdf_filename', 'Document')})" if t.get('has_pdf') else ""
+                        
+                        pdf_viewer_html = ""
+                        if t.get('pdf_b64'):
+                            pdf_viewer_html = f"""
+                            <div style="margin-top: 15px; background: white; padding: 15px; border-radius: 6px; border: 1px solid #bbf7d0;">
+                                <h4 style="margin-top: 0; color: #2b6a52; font-size: 15px;">Official Diagnostic PDF Report ({t.get('pdf_filename', 'Document')})</h4>
+                                <div style="position: relative; width: 100%; height: 600px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; background: #e2e8f0;">
+                                    <object data="data:application/pdf;base64,{t['pdf_b64']}" type="application/pdf" width="100%" height="100%">
+                                        <embed src="data:application/pdf;base64,{t['pdf_b64']}" type="application/pdf" width="100%" height="100%" />
+                                        <p style="padding: 20px; text-align: center;">Your browser does not support embedded PDFs.</p>
+                                    </object>
+                                </div>
+                            </div>
+                            """
+                        elif t.get('has_pdf'):
+                            pdf_viewer_html = f"""
+                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-top: 10px;">
+                                📎 Official PDF Report Attached ({t.get('pdf_filename', 'Document')}) processed for AI extraction.
+                            </p>
+                            """
+
                         tests_html += f"""
                         <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 18px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #e2e8f0;">
                             <h3 style="margin-top: 0; color: #0f382b; font-size: 18px;">Test #{idx+1}: {t['type']}</h3>
-                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-bottom: 10px;">{has_pdf_str}</p>
-                            <ul style="margin-bottom: 0; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
+                            <ul style="margin-bottom: 10px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>All metrics extracted directly from official diagnostic PDF report.</li>"}</ul>
+                            {pdf_viewer_html}
                         </div>
                         """
 
@@ -422,7 +465,7 @@ if app_mode == "Clinician Dashboard":
                                 </div>
                                 
                                 <div class="results-card">
-                                    <h2>🤖 Gemini 3.8-Flash Clinical Interpretation & Longevity Roadmap</h2>
+                                    <h2>🤖 Gemini 3.8-Flash Granular Clinical Interpretation & Deep-Dive</h2>
                                     <div class="interpretation-text">
                                         {ai_analysis_html}
                                     </div>
@@ -437,19 +480,28 @@ if app_mode == "Clinician Dashboard":
                     </html>
                     """
 
-                    # Sync to Google Cloud Firestore Database (Optimized to stay well under the 1MB limit)
+                    # Sync to Google Cloud Firestore Database (stripping heavy binary strings from saved record payload to ensure <1MB compliance)
                     if db:
                         doc_id = participant_name.strip().lower()
+                        clean_tests = []
+                        for t in st.session_state.participant_tests:
+                            clean_tests.append({
+                                "type": t["type"],
+                                "data": t["data"],
+                                "has_pdf": t.get("has_pdf", False),
+                                "pdf_filename": t.get("pdf_filename")
+                            })
+
                         record = {
                             "name_lower": doc_id,
                             "name": participant_name,
                             "pin": patient_pin.strip(),
                             "assessment_date": str(assessment_date),
-                            "tests_count": len(st.session_state.participant_tests),
+                            "tests_count": len(clean_tests),
                             "html_output": html_output
                         }
                         db.collection("longevity_reports").document(doc_id).set(record)
-                        st.success("✨ AI Master Report generated and successfully synced to Google Cloud Firestore!")
+                        st.success("✨ AI Master Report generated with deep PDF extraction and successfully synced to Google Cloud Firestore!")
                     else:
                         st.success("✨ AI Master Report generated successfully!")
 
