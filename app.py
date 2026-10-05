@@ -1,7 +1,6 @@
 import os
 import datetime
 import json
-import base64
 import streamlit as st
 from google.cloud import firestore
 from google import genai
@@ -144,7 +143,6 @@ if app_mode == "Clinician Dashboard":
 
     st.divider()
 
-    # ALL 11 ASSESSMENT TYPES SUPPORTED
     assessment_type = st.selectbox(
         "Select Diagnostic Assessment Type",
         [
@@ -164,7 +162,7 @@ if app_mode == "Clinician Dashboard":
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    # Universal PDF Report Uploader
+    # Universal PDF Report Uploader (Optimized lightweight handling)
     uploaded_pdf = st.file_uploader(
         f"📎 Upload Official {assessment_type} PDF Report (Optional)", 
         type=["pdf"], 
@@ -173,7 +171,6 @@ if app_mode == "Clinician Dashboard":
 
     test_payload_data = {}
 
-    # Dynamic input fields per assessment type matching your document prompts
     if assessment_type == "Tanita Body Composition (MC-780MA)":
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -306,15 +303,17 @@ if app_mode == "Clinician Dashboard":
         if not participant_name:
             st.warning("Please enter the participant's name before adding assessments.")
         else:
-            pdf_b64 = None
+            has_pdf = False
+            pdf_filename = None
             if uploaded_pdf is not None:
-                pdf_bytes = uploaded_pdf.getvalue()
-                pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+                has_pdf = True
+                pdf_filename = uploaded_pdf.name
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
-                "pdf_b64": pdf_b64
+                "has_pdf": has_pdf,
+                "pdf_filename": pdf_filename
             })
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
@@ -322,7 +321,7 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash for clinical interpretation using your precise master templates, and securely sync to Google Cloud Firestore.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash for clinical interpretation, and securely sync to Google Cloud Firestore.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -366,11 +365,11 @@ if app_mode == "Clinician Dashboard":
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-                        has_pdf = "📎 Official PDF Report Attached" if t.get('pdf_b64') else ""
+                        has_pdf_str = f"📎 Official PDF Report Attached ({t.get('pdf_filename', 'Document')})" if t.get('has_pdf') else ""
                         tests_html += f"""
                         <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 18px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #e2e8f0;">
                             <h3 style="margin-top: 0; color: #0f382b; font-size: 18px;">Test #{idx+1}: {t['type']}</h3>
-                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-bottom: 10px;">{has_pdf}</p>
+                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-bottom: 10px;">{has_pdf_str}</p>
                             <ul style="margin-bottom: 0; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
                         </div>
                         """
@@ -438,7 +437,7 @@ if app_mode == "Clinician Dashboard":
                     </html>
                     """
 
-                    # Sync to Google Cloud Firestore Database
+                    # Sync to Google Cloud Firestore Database (Optimized to stay well under the 1MB limit)
                     if db:
                         doc_id = participant_name.strip().lower()
                         record = {
