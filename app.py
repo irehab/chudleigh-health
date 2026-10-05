@@ -20,6 +20,7 @@ st.markdown(
     :root {
         --primary: #0f382b;
         --secondary: #2b6a52;
+        --success: #10b981;
     }
     .main-header {
         background-color: var(--primary);
@@ -80,7 +81,6 @@ if "participant_tests" not in st.session_state:
 @st.cache_resource
 def init_firestore():
     try:
-        # Connected explicitly to your 'default' Firestore database instance
         return firestore.Client(database="default")
     except Exception:
         return None
@@ -134,34 +134,37 @@ if app_mode == "Clinician Dashboard":
 
     with col1:
         participant_name = st.text_input("Participant Full Name", placeholder="e.g. John Evans", key="p_name")
-        age_gender = st.text_input("Age / Gender", placeholder="e.g. 48 / Male", key="p_ag")
+        age_gender = st.text_input("Age / Gender / DOB", placeholder="e.g. 48 yrs / Male / 15/03/1978", key="p_ag")
 
     with col2:
         assessment_date = st.date_input("Assessment Date", value=datetime.date.today(), key="p_date")
         patient_pin = st.text_input("Patient Secure PIN (4 digits)", type="password", placeholder="1234", key="p_pin")
 
-    body_mass_height = st.text_input("Body Mass / Height", placeholder="e.g. 78 kg / 175 cm", key="p_bm")
+    body_mass_height = st.text_input("Body Mass / Height / BMI", placeholder="e.g. 78 kg / 175 cm / 25.4", key="p_bm")
 
     st.divider()
 
+    # ALL 11 ASSESSMENT TYPES SUPPORTED
     assessment_type = st.selectbox(
         "Select Diagnostic Assessment Type",
         [
-            "Tanita Body Composition",
-            "Push-Up Assessment",
-            "Spirometry",
-            "AGE Reader",
-            "ECG",
-            "Autonomic/HRV",
+            "Tanita Body Composition (MC-780MA)",
+            "Push-Up Assessment (VALD ForceDecks)",
+            "Spirometry (Pulmonary Function)",
+            "AGE Reader (Advanced Glycation End-Products)",
+            "12-Lead ECG (Electrocardiogram)",
+            "Autonomic / HRV (3-Min Rest, BP, Respiration)",
             "VALD ForceDecks - Sit-to-Stand",
-            "VALD ForceDecks - Squat",
+            "VALD ForceDecks - Multi-Rep Squat",
+            "VALD ForceDecks - Single Leg Stance / Balance",
+            "VALD ForceDecks - Countermovement Jump (CMJ)",
             "VALD ForceDecks - Quiet Stand (Balance)",
         ],
     )
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    # Universal PDF Report Uploader for every test type
+    # Universal PDF Report Uploader
     uploaded_pdf = st.file_uploader(
         f"📎 Upload Official {assessment_type} PDF Report (Optional)", 
         type=["pdf"], 
@@ -170,28 +173,133 @@ if app_mode == "Clinician Dashboard":
 
     test_payload_data = {}
 
-    if assessment_type == "Autonomic/HRV":
-        col_h1, col_h2 = st.columns(2)
-        with col_h1:
-            rmssd = st.text_input("RMSSD (ms)", placeholder="e.g. 45ms")
-            sdnn = st.text_input("SDNN (ms)", placeholder="e.g. 52ms")
-        with col_h2:
-            resp_rate = st.text_input("Respiration Rate (breaths/min)", placeholder="e.g. 14")
-            blood_pressure = st.text_input("Blood Pressure (mmHg)", placeholder="e.g. 120/80")
+    # Dynamic input fields per assessment type matching your document prompts
+    if assessment_type == "Tanita Body Composition (MC-780MA)":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            t_weight = st.text_input("Weight (kg)", "78.0")
+            t_fat_pct = st.text_input("Fat Percentage (%)", "18.5")
+            t_ffm = st.text_input("Fat-Free Mass (kg)", "63.5")
+        with c2:
+            t_muscle = st.text_input("Muscle Mass (kg)", "60.2")
+            t_tbw = st.text_input("Total Body Water (kg / %)", "48.2 kg (61.8%)")
+            t_ecw_tbw = st.text_input("ECW / TBW Ratio", "0.378")
+        with c3:
+            t_visceral = st.text_input("Visceral Fat Rating", "6")
+            t_met_age = st.text_input("Metabolic Age", "42")
+            t_phase_angle = st.text_input("Phase Angle", "6.8°")
+        test_payload_data = {"Weight": t_weight, "Fat %": t_fat_pct, "FFM": t_ffm, "Muscle Mass": t_muscle, "TBW": t_tbw, "ECW/TBW": t_ecw_tbw, "Visceral Fat": t_visceral, "Metabolic Age": t_met_age, "Phase Angle": t_phase_angle}
 
-        test_payload_data = {
-            "RMSSD": rmssd,
-            "SDNN": sdnn,
-            "Respiration Rate": resp_rate,
-            "Blood Pressure": blood_pressure,
-        }
+    elif assessment_type == "Push-Up Assessment (VALD ForceDecks)":
+        c1, c2 = st.columns(2)
+        with c1:
+            pu_force = st.text_input("Peak Push Force (N)", "520 N")
+            pu_impulse = st.text_input("Concentric Impulse (Ns)", "310 Ns")
+        with c2:
+            pu_sym = st.text_input("Left/Right Symmetry (%)", "96.5%")
+            pu_power = st.text_input("Peak Power Output (W)", "680 W")
+        test_payload_data = {"Peak Push Force": pu_force, "Concentric Impulse": pu_impulse, "L/R Symmetry": pu_sym, "Peak Power": pu_power}
+
+    elif assessment_type == "Spirometry (Pulmonary Function)":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            sp_fvc = st.text_input("FVC (L / % Pred)", "4.85 L (104%)")
+            sp_fev1 = st.text_input("FEV1 (L / % Pred)", "3.92 L (102%)")
+        with c2:
+            sp_ratio = st.text_input("FEV1 / FVC Ratio (%)", "80.8%")
+            sp_pef = st.text_input("PEF (L/m / % Pred)", "9.4 L/s (98%)")
+        with c3:
+            sp_fef2575 = st.text_input("FEF 25-75% (L/s)", "4.21 L/s")
+            sp_fef75 = st.text_input("FEF 75% (L/s)", "1.85 L/s")
+        test_payload_data = {"FVC": sp_fvc, "FEV1": sp_fev1, "FEV1/FVC Ratio": sp_ratio, "PEF": sp_pef, "FEF 25-75": sp_fef2575, "FEF 75": sp_fef75}
+
+    elif assessment_type == "AGE Reader (Advanced Glycation End-Products)":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ag_bodyage = st.text_input("BodyAge", "44 yrs")
+        with c2:
+            ag_level = st.text_input("AGE Level Score", "1.9 AU")
+        with c3:
+            ag_var = st.text_input("Variance vs. Average", "-8%")
+        test_payload_data = {"BodyAge": ag_bodyage, "AGE Level Score": ag_level, "Variance": ag_var}
+
+    elif assessment_type == "12-Lead ECG (Electrocardiogram)":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ecg_hr = st.text_input("Heart Rate (BPM)", "58 BPM")
+            ecg_pr = st.text_input("PR Interval (ms)", "162 ms")
+        with c2:
+            ecg_qrs = st.text_input("QRS Duration (ms)", "92 ms")
+            ecg_qtc = st.text_input("QTc Interval (ms)", "410 ms")
+        with c3:
+            ecg_rhythm = st.text_input("Rhythm & Axis", "Normal Sinus Rhythm, Normal Axis")
+        test_payload_data = {"Heart Rate": ecg_hr, "PR Interval": ecg_pr, "QRS Duration": ecg_qrs, "QTc Interval": ecg_qtc, "Rhythm & Axis": ecg_rhythm}
+
+    elif assessment_type == "Autonomic / HRV (3-Min Rest, BP, Respiration)":
+        c1, c2 = st.columns(2)
+        with c1:
+            hrv_rmssd = st.text_input("RMSSD (ms)", "52 ms")
+            hrv_sdnn = st.text_input("SDNN (ms)", "64 ms")
+        with c2:
+            hrv_resp = st.text_input("Respiration Rate (breaths/min)", "12 breaths/min")
+            hrv_bp = st.text_input("Blood Pressure (mmHg)", "118/76 mmHg")
+        test_payload_data = {"RMSSD": hrv_rmssd, "SDNN": hrv_sdnn, "Respiration Rate": hrv_resp, "Blood Pressure": hrv_bp}
+
+    elif assessment_type == "VALD ForceDecks - Sit-to-Stand":
+        c1, c2 = st.columns(2)
+        with c1:
+            sts_force = st.text_input("Peak Concentric Force (N)", "780 N")
+            sts_time = st.text_input("Transition Time (s)", "0.62 s")
+        with c2:
+            sts_rfd = st.text_input("Concentric RFD (N/s)", "1450 N/s")
+            sts_asym = st.text_input("Limb Asymmetry (%)", "4.2%")
+        test_payload_data = {"Peak Concentric Force": sts_force, "Transition Time": sts_time, "Concentric RFD": sts_rfd, "Limb Asymmetry": sts_asym}
+
+    elif assessment_type == "VALD ForceDecks - Multi-Rep Squat":
+        c1, c2 = st.columns(2)
+        with c1:
+            sq_force = st.text_input("Peak Force (N)", "849 N")
+            sq_c_imp = st.text_input("Concentric Impulse (Ns)", "412 Ns")
+        with c2:
+            sq_e_imp = st.text_input("Eccentric Impulse (Ns)", "405 Ns")
+            sq_asym = st.text_input("Left/Right Asymmetry (%)", "13.0%")
+        test_payload_data = {"Peak Force": sq_force, "Concentric Impulse": sq_c_imp, "Eccentric Impulse": sq_e_imp, "L/R Asymmetry": sq_asym}
+
+    elif assessment_type == "VALD ForceDecks - Single Leg Stance / Balance":
+        c1, c2 = st.columns(2)
+        with c1:
+            sls_l_sway = st.text_input("Left Sway Velocity (mm/s)", "14.2 mm/s")
+            sls_r_sway = st.text_input("Right Sway Velocity (mm/s)", "12.8 mm/s")
+        with c2:
+            sls_l_ell = st.text_input("Left Ellipse Area (mm²)", "185 mm²")
+            sls_r_ell = st.text_input("Right Ellipse Area (mm²)", "160 mm²")
+        test_payload_data = {"Left Sway Velocity": sls_l_sway, "Right Sway Velocity": sls_r_sway, "Left Ellipse Area": sls_l_ell, "Right Ellipse Area": sls_r_ell}
+
+    elif assessment_type == "VALD ForceDecks - Countermovement Jump (CMJ)":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            cmj_height = st.text_input("Jump Height (cm)", "34.5 cm")
+            cmj_power = st.text_input("Peak Power / Mass (W/kg)", "48.2 W/kg")
+        with c2:
+            cmj_rsi = st.text_input("Modified RSI", "0.58")
+            cmj_asym = st.text_input("Peak Force Asymmetry (%)", "3.8%")
+        with c3:
+            cmj_eforce = st.text_input("Eccentric Peak Force (N)", "1420 N")
+            cmj_erfd = st.text_input("Eccentric RFD (N/s)", "4200 N/s")
+        test_payload_data = {"Jump Height": cmj_height, "Peak Power/Mass": cmj_power, "Modified RSI": cmj_rsi, "Peak Force Asymmetry": cmj_asym, "Eccentric Peak Force": cmj_eforce, "Eccentric RFD": cmj_erfd}
+
+    elif assessment_type == "VALD ForceDecks - Quiet Stand (Balance)":
+        c1, c2 = st.columns(2)
+        with c1:
+            qs_path = st.text_input("Total Path Length (mm)", "310 mm")
+            qs_vel = st.text_input("Mean Velocity (mm/s)", "5.2 mm/s")
+        with c2:
+            qs_ap = st.text_input("AP Sway Range (mm)", "24.5 mm")
+            qs_asym = st.text_input("Weight Distribution Asymmetry (%)", "2.1%")
+        test_payload_data = {"Total Path Length": qs_path, "Mean Velocity": qs_vel, "AP Sway Range": qs_ap, "Weight Distribution Asymmetry": qs_asym}
+
     else:
-        raw_notes = st.text_area(
-            "Or Paste Raw Metrics / Clinical Observations",
-            placeholder="Paste extracted data metrics, device outputs, or qualitative observations here...",
-            height=100,
-            key=f"notes_{assessment_type}"
-        )
+        raw_notes = st.text_area("Clinical Observations / Metrics", placeholder="Enter notes or raw data...")
         test_payload_data = {"Raw Data / Notes": raw_notes}
 
     if st.button("➕ Add Assessment to Participant Profile", use_container_width=True):
@@ -214,7 +322,7 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash for clinical interpretation, and securely sync to Google Cloud Firestore.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash for clinical interpretation using your precise master templates, and securely sync to Google Cloud Firestore.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -230,20 +338,20 @@ if app_mode == "Clinician Dashboard":
                     for idx, t in enumerate(st.session_state.participant_tests):
                         summary_context += f"Test {idx+1}: {t['type']} -> Data: {json.dumps(t['data'])}\n"
 
-                    ai_analysis_html = "<p>Clinical interpretation generated successfully.</p>"
+                    ai_analysis_html = "<p>Clinical interpretations and physiological insights generated successfully.</p>"
                     
                     if gemini_client:
                         prompt = f"""
-                        You are an expert longevity physician and clinical director at Chudleigh Health Hub. 
-                        Analyze the following biometric and functional assessments for a patient and write a professional, encouraging, yet thorough clinical interpretation formatted in clean HTML (use h3, p, and li tags).
+                        You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. 
+                        Analyze the following biometric and functional assessments for a patient and write a professional, encouraging, yet rigorous clinical interpretation formatted in clean HTML (use h3, p, and li tags). Do not include citation markers.
                         
                         Patient Details & Test Data:
                         {summary_context}
                         
                         Provide:
                         1. Clinical Summary & Insights
-                        2. Key Biomarker Highlights
-                        3. Tailored Lifestyle & Therapeutic Recommendations
+                        2. Key Biomarker Highlights & Asymmetry Analysis
+                        3. Tailored Lifestyle, Movement & Therapeutic Recommendations for Longevity
                         """
                         response = gemini_client.models.generate_content(
                             model="gemini-3.8-flash",
@@ -254,53 +362,78 @@ if app_mode == "Clinician Dashboard":
                     else:
                         st.warning("Gemini client is uninitialized. Defaulting to standard clinical report structure.")
 
-                    # Build individual test cards for HTML output
+                    # Build individual test result cards for HTML output
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
                         has_pdf = "📎 Official PDF Report Attached" if t.get('pdf_b64') else ""
                         tests_html += f"""
-                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px; border-radius: 4px;">
-                            <h3 style="margin-top: 0; color: #0f382b;">Test #{idx+1}: {t['type']}</h3>
-                            <p style="color: #2b6a52; font-size: 14px; font-weight: bold;">{has_pdf}</p>
-                            <ul style="margin-bottom: 0; color: #334155;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
+                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 18px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <h3 style="margin-top: 0; color: #0f382b; font-size: 18px;">Test #{idx+1}: {t['type']}</h3>
+                            <p style="color: #2b6a52; font-size: 13px; font-weight: bold; margin-bottom: 10px;">{has_pdf}</p>
+                            <ul style="margin-bottom: 0; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
                         </div>
                         """
 
                     html_output = f"""
                     <!DOCTYPE html>
-                    <html>
+                    <html lang="en">
                     <head>
                         <meta charset="utf-8">
-                        <title>Chudleigh Health Hub - AI Longevity Report</title>
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>Chudleigh Health Hub - AI Longevity Master Report</title>
                         <style>
-                            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.6; padding: 30px; max-width: 900px; margin: 0 auto; background: #ffffff; }}
-                            .header {{ background: #0f382b; color: white; padding: 25px; border-radius: 8px; text-align: center; margin-bottom: 30px; }}
-                            .section {{ background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; margin-bottom: 25px; }}
-                            h1, h2, h3 {{ color: #0f382b; }}
+                            :root {{
+                                --primary-color: #0f382b;
+                                --secondary-color: #2b6a52;
+                                --success-color: #10b981;
+                                --bg-color: #f8fafc;
+                                --card-bg: #ffffff;
+                                --text-main: #1e293b;
+                                --text-muted: #64748b;
+                                --border-color: #e2e8f0;
+                            }}
+                            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); line-height: 1.6; margin: 0; padding: 20px; }}
+                            .report-container {{ max-width: 950px; margin: 0 auto; background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); overflow: hidden; border: 1px solid var(--border-color); }}
+                            .header {{ background-color: var(--primary-color); color: white; padding: 30px; text-align: center; }}
+                            .header h1 {{ margin: 0 0 5px 0; font-size: 24px; color: white; }}
+                            .header p {{ margin: 0; color: #94a3b8; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
+                            .content {{ padding: 30px; }}
+                            .patient-meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f1f5f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
+                            .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
+                            .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
+                            .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+                            .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
+                            .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
+                            .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
                         </style>
                     </head>
                     <body>
-                        <div class="header">
-                            <h1 style="color: white; margin: 0;">Chudleigh Health Hub</h1>
-                            <p style="margin: 5px 0 0 0; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8;">AI-Powered Longevity &amp; Clinical Report</p>
-                        </div>
-                        
-                        <div class="section">
-                            <h2>Participant Executive Summary</h2>
-                            <p><b>Participant Name:</b> {participant_name}</p>
-                            <p><b>Age / Gender:</b> {age_gender if age_gender else 'Not specified'}</p>
-                            <p><b>Assessment Date:</b> {str(assessment_date)}</p>
-                            <p><b>Body Mass / Height:</b> {body_mass_height if body_mass_height else 'Not specified'}</p>
-                        </div>
+                        <div class="report-container">
+                            <div class="header">
+                                <h1>Chudleigh Health Hub</h1>
+                                <p>Diagnostic Longevity Pilot Program &bull; Master Assessment Report</p>
+                            </div>
+                            <div class="content">
+                                <div class="patient-meta">
+                                    <div class="meta-item"><label>Participant Name</label><span>{participant_name}</span></div>
+                                    <div class="meta-item"><label>Age / Gender</label><span>{age_gender if age_gender else 'Not specified'}</span></div>
+                                    <div class="meta-item"><label>Assessment Date</label><span>{str(assessment_date)}</span></div>
+                                    <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height if body_mass_height else 'Not specified'}</span></div>
+                                </div>
+                                
+                                <div class="results-card">
+                                    <h2>🤖 Gemini 3.8-Flash Clinical Interpretation & Longevity Roadmap</h2>
+                                    <div class="interpretation-text">
+                                        {ai_analysis_html}
+                                    </div>
+                                </div>
 
-                        <div class="section">
-                            <h2>🤖 Gemini 3.8-Flash Clinical Interpretation</h2>
-                            {ai_analysis_html}
+                                <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({len(st.session_state.participant_tests)})</h2>
+                                {tests_html}
+                            </div>
+                            <div class="footer">&copy; 2026 Chudleigh Health Hub. Diagnostic Longevity Pilot Program. All rights reserved.</div>
                         </div>
-
-                        <h2>Completed Diagnostic Assessments</h2>
-                        {tests_html}
                     </body>
                     </html>
                     """
