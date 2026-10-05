@@ -1,4 +1,2 @@
 streamlit
-supabase
 google-genai
-pydantic
