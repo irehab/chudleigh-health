@@ -165,7 +165,7 @@ if app_mode == "Clinician Dashboard":
 
     # Official PDF Report Uploader
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Analyzed by AI)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Embedded in Report & Analyzed by AI)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
@@ -313,24 +313,22 @@ if app_mode == "Clinician Dashboard":
             st.warning("Please enter the participant's name before adding assessments.")
         else:
             pdf_b64 = None
-            # Safely encode small PDFs; for large high-res PDFs (like Tanita), we pass bytes to AI and use lightweight references for DB stability
-            if pdf_bytes_content is not None and len(pdf_bytes_content) < 700 * 1024:
+            if pdf_bytes_content is not None:
                 pdf_b64 = base64.b64encode(pdf_bytes_content).decode("utf-8")
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
                 "pdf_filename": pdf_filename_str,
-                "pdf_b64": pdf_b64,
-                "has_pdf": pdf_bytes_content is not None
+                "pdf_b64": pdf_b64
             })
-            st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
+            st.success(f"Successfully added {assessment_type} with attached PDF to {participant_name}'s profile!")
             st.rerun()
 
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, and securely sync to Google Cloud.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, embed visual PDF viewers, and securely sync to Google Cloud.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -340,14 +338,13 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & compiling master report..."):
+            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & embedding PDF reports..."):
                 try:
                     summary_context = f"Participant: {participant_name}, Age/Gender: {age_gender}, Metrics: {body_mass_height}\n"
                     contents_payload = []
 
                     for idx, t in enumerate(st.session_state.participant_tests):
                         summary_context += f"Test {idx+1}: {t['type']} -> Data: {json.dumps(t['data'])}\n"
-                        # Send raw PDF bytes directly to Gemini for deep AI extraction
                         if t.get('pdf_b64'):
                             contents_payload.append({
                                 "inline_data": {
@@ -363,205 +360,4 @@ if app_mode == "Clinician Dashboard":
                         You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. 
                         Carefully analyze the attached official PDF reports and manually entered metrics for this participant. Drill down into every available metric, table, percentage predicted, Z-score, symmetry ratio, and graphical trend.
                         
-                        Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). Do not include citation markers.
-                        
-                        Participant Details & Test Data:
-                        {summary_context}
-                        
-                        Provide:
-                        1. Comprehensive Clinical Summary & Physiological Insights
-                        2. Granular Biomarker Breakdown (extracting deep metrics, percentiles, and asymmetries)
-                        3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap
-                        """
-                        contents_payload.append(prompt_text)
-
-                        response = gemini_client.models.generate_content(
-                            model="gemini-3.8-flash",
-                            contents=contents_payload,
-                        )
-                        if response and response.text:
-                            ai_analysis_html = response.text
-                    else:
-                        st.warning("Gemini client is uninitialized. Defaulting to standard clinical report structure.")
-
-                    # Build individual test cards with clean PDF badges and optional lightweight viewers
-                    tests_html = ""
-                    for idx, t in enumerate(st.session_state.participant_tests):
-                        data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-                        
-                        pdf_badge = ""
-                        if t.get('has_pdf'):
-                            pdf_badge = f"""
-                            <div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 12px; border-radius: 6px;">
-                                <p style="margin: 0; color: #0f382b; font-size: 14px; font-weight: bold;">
-                                    📎 Official Diagnostic Report Attached: {t.get('pdf_filename', 'Document.pdf')} (Fully processed &amp; analyzed by Gemini AI)
-                                </p>
-                            </div>
-                            """
-
-                        tests_html += f"""
-                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 18px; margin-bottom: 20px; border-radius: 8px; border: 1px solid #e2e8f0;">
-                            <h3 style="margin-top: 0; color: #0f382b; font-size: 18px;">Test #{idx+1}: {t['type']}</h3>
-                            <ul style="margin-bottom: 10px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>All metrics extracted directly via multimodal AI inspection of attached PDF.</li>"}</ul>
-                            {pdf_badge}
-                        </div>
-                        """
-
-                    html_output = f"""
-                    <!DOCTYPE html>
-                    <html lang="en">
-                    <head>
-                        <meta charset="utf-8">
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                        <title>Chudleigh Health Hub - AI Longevity Master Report</title>
-                        <style>
-                            :root {{
-                                --primary-color: #0f382b;
-                                --secondary-color: #2b6a52;
-                                --success-color: #10b981;
-                                --bg-color: #f8fafc;
-                                --card-bg: #ffffff;
-                                --text-main: #1e293b;
-                                --text-muted: #64748b;
-                                --border-color: #e2e8f0;
-                            }}
-                            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); line-height: 1.6; margin: 0; padding: 20px; }}
-                            .report-container {{ max-width: 950px; margin: 0 auto; background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); overflow: hidden; border: 1px solid var(--border-color); }}
-                            .header {{ background-color: var(--primary-color); color: white; padding: 30px; text-align: center; }}
-                            .header h1 {{ margin: 0 0 5px 0; font-size: 24px; color: white; }}
-                            .header p {{ margin: 0; color: #94a3b8; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
-                            .content {{ padding: 30px; }}
-                            .patient-meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f1f5f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
-                            .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
-                            .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
-                            .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
-                            .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
-                            .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
-                            .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
-                        </style>
-                    </head>
-                    <body>
-                        <div class="report-container">
-                            <div class="header">
-                                <h1>Chudleigh Health Hub</h1>
-                                <p>Diagnostic Longevity Pilot Program &bull; Master Assessment Report</p>
-                            </div>
-                            <div class="content">
-                                <div class="patient-meta">
-                                    <div class="meta-item"><label>Participant Name</label><span>{participant_name}</span></div>
-                                    <div class="meta-item"><label>Age / Gender</label><span>{age_gender if age_gender else 'Not specified'}</span></div>
-                                    <div class="meta-item"><label>Assessment Date</label><span>{str(assessment_date)}</span></div>
-                                    <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height if body_mass_height else 'Not specified'}</span></div>
-                                </div>
-                                
-                                <div class="results-card">
-                                    <h2>🤖 Gemini 3.8-Flash Granular Clinical Interpretation & Deep-Dive</h2>
-                                    <div class="interpretation-text">
-                                        {ai_analysis_html}
-                                    </div>
-                                </div>
-
-                                <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({len(st.session_state.participant_tests)})</h2>
-                                {tests_html}
-                            </div>
-                            <div class="footer">&copy; 2026 Chudleigh Health Hub. Diagnostic Longevity Pilot Program. All rights reserved.</div>
-                        </div>
-                    </body>
-                    </html>
-                    """
-
-                    # Sync to Google Cloud Firestore securely (guaranteed well under the 1MB document limit)
-                    if db:
-                        doc_id = participant_name.strip().lower()
-                        record = {
-                            "name_lower": doc_id,
-                            "name": participant_name,
-                            "pin": patient_pin.strip(),
-                            "assessment_date": str(assessment_date),
-                            "tests_count": len(st.session_state.participant_tests),
-                        }
-                        db.collection("longevity_reports").document(doc_id).set(record)
-                        
-                        html_record = {
-                            "html_output": html_output
-                        }
-                        db.collection("longevity_htmls").document(doc_id).set(html_record)
-
-                        st.success("✨ AI Master Report generated with deep PDF extraction and successfully synced to Google Cloud!")
-                    else:
-                        st.success("✨ AI Master Report generated successfully!")
-
-                    st.download_button(
-                        label="📥 Download Master HTML Report File",
-                        data=html_output,
-                        file_name=f"{participant_name.replace(' ', '_')}_AI_Longevity_Report.html",
-                        mime="text/html",
-                    )
-
-                    st.subheader("🔎 Live AI Master Report Preview")
-                    st.components.v1.html(html_output, height=850, scrolling=True)
-
-                except Exception as e:
-                    st.error(f"An error occurred during AI report compilation: {e}")
-
-# ==========================================
-# VIEW 2: SECURE PATIENT MOBILE PORTAL
-# ==========================================
-elif app_mode == "Secure Patient Mobile Portal":
-    st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and your secure 4-digit PIN provided by your clinician to access your records.")
-
-    col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
-    with col_l2:
-        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
-
-    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
-        lookup_key = client_lookup.strip().lower()
-        
-        try:
-            if not db:
-                st.error("Google Cloud database connection unavailable.")
-            else:
-                doc_ref = db.collection("longevity_reports").document(lookup_key)
-                doc = doc_ref.get()
-
-                if doc.exists:
-                    client_data = doc.to_dict()
-                    
-                    if client_data["pin"] == client_pin.strip():
-                        html_doc = db.collection("longevity_htmls").document(lookup_key).get()
-                        html_output = html_doc.to_dict().get("html_output", "") if html_doc.exists else "<p>Report payload not found.</p>"
-
-                        st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
-
-                        st.markdown(
-                            f"""
-                            <div class='portal-box'>
-                                <h3>📋 Your Longevity Profile Summary</h3>
-                                <p><b>Participant:</b> {client_data['name']}</p>
-                                <p><b>Last Clinical Assessment:</b> {client_data['assessment_date']}</p>
-                                <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                        st.download_button(
-                            label="📥 Download My Master AI Report",
-                            data=html_output,
-                            file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
-                            mime="text/html",
-                            use_container_width=True
-                        )
-
-                        st.subheader("🔎 Your Live Interactive AI Healthspan Dashboard")
-                        st.components.v1.html(html_output, height=800, scrolling=True)
-                    else:
-                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
-                else:
-                    st.warning("No published reports found matching that name in the Google Cloud database.")
-        
-        except Exception as e:
-            st.error(f"Error connecting to Google Cloud records: {e}")
+                        Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean
