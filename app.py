@@ -80,7 +80,8 @@ if "participant_tests" not in st.session_state:
 @st.cache_resource
 def init_firestore():
     try:
-        return firestore.Client()
+        # Connected explicitly to your 'default' Firestore database instance
+        return firestore.Client(database="default")
     except Exception:
         return None
 
@@ -160,7 +161,7 @@ if app_mode == "Clinician Dashboard":
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
-    # Universal PDF Report Uploader
+    # Universal PDF Report Uploader for every test type
     uploaded_pdf = st.file_uploader(
         f"📎 Upload Official {assessment_type} PDF Report (Optional)", 
         type=["pdf"], 
