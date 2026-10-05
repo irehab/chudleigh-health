@@ -165,7 +165,7 @@ if app_mode == "Clinician Dashboard":
 
     # Official PDF Report Uploader
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Attached for Patient Download & AI Analysis)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Analyzed by AI)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
@@ -313,22 +313,23 @@ if app_mode == "Clinician Dashboard":
             st.warning("Please enter the participant's name before adding assessments.")
         else:
             pdf_b64 = None
-            if pdf_bytes_content is not None:
+            if pdf_bytes_content is not None and len(pdf_bytes_content) < 500 * 1024:
                 pdf_b64 = base64.b64encode(pdf_bytes_content).decode("utf-8")
 
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
                 "pdf_filename": pdf_filename_str,
-                "pdf_b64": pdf_b64
+                "pdf_b64": pdf_b64,
+                "has_pdf": pdf_bytes_content is not None
             })
-            st.success(f"Successfully added {assessment_type} with attached PDF to {participant_name}'s profile!")
+            st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
 
     st.divider()
 
     st.subheader("🚀 AI Master Report Compilation & Google Cloud Publishing")
-    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, embed secure PDF download buttons, and securely sync to Google Cloud.")
+    st.markdown("Compile all queued tests, interrogate Gemini 3.8-flash with full multimodal PDF extraction, and securely sync to Google Cloud.")
 
     if st.button("Generate AI Master Report", type="primary", use_container_width=True):
         if not participant_name:
@@ -338,7 +339,7 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & formatting report..."):
+            with st.spinner("🤖 Interrogating Gemini 3.8-flash with deep multimodal analysis & compiling master report..."):
                 try:
                     summary_context = f"Participant: {participant_name}, Age/Gender: {age_gender}, Metrics: {body_mass_height}\n"
                     contents_payload = []
@@ -356,7 +357,6 @@ if app_mode == "Clinician Dashboard":
                     ai_analysis_html = "<p>Granular clinical interpretation and metric deep-dive generated successfully.</p>"
                     
                     if gemini_client:
-                        # Refactored as a clean string concatenation to avoid multiline f-string syntax issues
                         prompt_text = (
                             "You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. "
                             "Carefully analyze the attached official PDF reports and manually entered metrics for this participant. "
@@ -380,19 +380,17 @@ if app_mode == "Clinician Dashboard":
                     else:
                         st.warning("Gemini client is uninitialized. Defaulting to standard clinical report structure.")
 
-                    # Build individual test cards with secure downloadable PDF buttons
+                    # Build individual test cards with clean verification badges
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
                         
-                        pdf_download_box = ""
-                        if t.get('pdf_b64'):
+                        pdf_badge = ""
+                        if t.get('has_pdf'):
                             filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
-                            pdf_download_box = (
-                                '<div style="margin-top: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; text-align: center;">'
-                                f'<h4 style="margin-top: 0; color: #0f382b; font-size: 16px; margin-bottom: 8px;">Official Diagnostic PDF Report Available</h4>'
-                                f'<p style="font-size: 13px; color: #475569; margin-bottom: 15px;">Click below to download the complete official report ({filename}) containing all graphs, charts, and tables:</p>'
-                                f'<a href="data:application/pdf;base64,{t["pdf_b64"]}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>'
+                            pdf_badge = (
+                                '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 6px;">'
+                                f'<p style="margin: 0; color: #0f382b; font-size: 14px; font-weight: bold;">📎 Official Diagnostic PDF Analyzed: {filename}</p>'
                                 '</div>'
                             )
 
@@ -400,7 +398,7 @@ if app_mode == "Clinician Dashboard":
                             '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
                             f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t["type"]}</h3>'
                             f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via multimodal AI inspection of attached PDF.</li>"}</ul>'
-                            f'{pdf_download_box}'
+                            f'{pdf_badge}'
                             '</div>'
                         )
 
@@ -477,7 +475,7 @@ if app_mode == "Clinician Dashboard":
                         tests_html=tests_html
                     )
 
-                    # Sync metadata to Firestore
+                    # Sync lightweight report payload to Firestore (fully compliant with the 1MB document limit)
                     if db:
                         doc_id = participant_name.strip().lower()
                         record = {
@@ -494,7 +492,7 @@ if app_mode == "Clinician Dashboard":
                         }
                         db.collection("longevity_htmls").document(doc_id).set(html_record)
 
-                        st.success("✨ AI Master Report generated with secure PDF download buttons and successfully synced to Google Cloud!")
+                        st.success("✨ AI Master Report generated with deep PDF extraction and successfully synced to Google Cloud!")
                     else:
                         st.success("✨ AI Master Report generated successfully!")
 
@@ -556,7 +554,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                         )
 
                         st.download_button(
-                            label="📥 Download My Master AI Report (With Attached PDFs)",
+                            label="📥 Download My Master AI Report",
                             data=html_output,
                             file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
                             mime="text/html",
