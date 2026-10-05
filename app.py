@@ -356,20 +356,19 @@ if app_mode == "Clinician Dashboard":
                     ai_analysis_html = "<p>Granular clinical interpretation and metric deep-dive generated successfully.</p>"
                     
                     if gemini_client:
-                        prompt_text = f"""
-                        You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. 
-                        Carefully analyze the attached official PDF reports and manually entered metrics for this participant. Drill down into every available metric, table, percentage predicted, Z-score, symmetry ratio, and graphical trend.
-                        
-                        Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). Do not include citation markers.
-                        
-                        Participant Details & Test Data:
-                        {summary_context}
-                        
-                        Provide:
-                        1. Comprehensive Clinical Summary & Physiological Insights
-                        2. Granular Biomarker Breakdown (extracting deep metrics, percentiles, and asymmetries)
-                        3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap
-                        """
+                        # Refactored as a clean string concatenation to avoid multiline f-string syntax issues
+                        prompt_text = (
+                            "You are an expert clinical web developer and longevity data analyst at Chudleigh Health Hub. "
+                            "Carefully analyze the attached official PDF reports and manually entered metrics for this participant. "
+                            "Drill down into every available metric, table, percentage predicted, Z-score, symmetry ratio, and graphical trend.\n\n"
+                            "Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). "
+                            "Do not include citation markers.\n\n"
+                            f"Participant Details & Test Data:\n{summary_context}\n\n"
+                            "Provide:\n"
+                            "1. Comprehensive Clinical Summary & Physiological Insights\n"
+                            "2. Granular Biomarker Breakdown (extracting deep metrics, percentiles, and asymmetries)\n"
+                            "3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap"
+                        )
                         contents_payload.append(prompt_text)
 
                         response = gemini_client.models.generate_content(
@@ -389,21 +388,21 @@ if app_mode == "Clinician Dashboard":
                         pdf_download_box = ""
                         if t.get('pdf_b64'):
                             filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
-                            pdf_download_box = f"""
-                            <div style="margin-top: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; text-align: center;">
-                                <h4 style="margin-top: 0; color: #0f382b; font-size: 16px; margin-bottom: 8px;">Official Diagnostic PDF Report Available</h4>
-                                <p style="font-size: 13px; color: #475569; margin-bottom: 15px;">Click below to download the complete official report ({filename}) containing all graphs, charts, and tables:</p>
-                                <a href="data:application/pdf;base64,{t['pdf_b64']}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>
-                            </div>
-                            """
+                            pdf_download_box = (
+                                '<div style="margin-top: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; text-align: center;">'
+                                f'<h4 style="margin-top: 0; color: #0f382b; font-size: 16px; margin-bottom: 8px;">Official Diagnostic PDF Report Available</h4>'
+                                f'<p style="font-size: 13px; color: #475569; margin-bottom: 15px;">Click below to download the complete official report ({filename}) containing all graphs, charts, and tables:</p>'
+                                f'<a href="data:application/pdf;base64,{t["pdf_b64"]}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>'
+                                '</div>'
+                            )
 
-                        tests_html += f"""
-                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">
-                            <h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t['type']}</h3>
-                            <ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via multimodal AI inspection of attached PDF.</li>"}</ul>
-                            {pdf_download_box}
-                        </div>
-                        """
+                        tests_html += (
+                            '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
+                            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t["type"]}</h3>'
+                            f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via multimodal AI inspection of attached PDF.</li>"}</ul>'
+                            f'{pdf_download_box}'
+                            '</div>'
+                        )
 
                     html_template = """
                     <!DOCTYPE html>
