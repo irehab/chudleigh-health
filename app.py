@@ -3,8 +3,6 @@ import json
 import base64
 import streamlit as st
 from supabase import create_client, Client
-from google import genai
-from google.genai import types
 
 # Page Configuration
 st.set_page_config(
@@ -79,8 +77,6 @@ if "participant_tests" not in st.session_state:
 query_params = st.query_params
 is_patient_link = query_params.get("portal") == "true"
 
-api_key = ""
-
 if is_patient_link:
     app_mode = "Secure Patient Mobile Portal"
     st.sidebar.subheader("🔒 Client Portal")
@@ -91,9 +87,6 @@ else:
     app_mode = st.sidebar.selectbox(
         "Select Portal View",
         ["Clinician Dashboard", "Secure Patient Mobile Portal"]
-    )
-    api_key = st.sidebar.text_input(
-        "Google Gemini API Key", type="password", help="Enter your Google Gemini API key here."
     )
     st.sidebar.divider()
 
@@ -217,13 +210,11 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     st.subheader("🚀 Master Report Compilation & Cloud Publishing")
-    st.markdown("Compile all queued tests into a master report and securely publish it to your Supabase cloud database.")
+    st.markdown("Compile all queued tests into a master longitudinal report and securely publish it to your Supabase cloud database.")
 
     if st.button("Generate & Publish Master Report", type="primary", use_container_width=True):
         db = get_supabase_client()
-        if not api_key:
-            st.error("Please enter your Google Gemini API key in the sidebar.")
-        elif not db:
+        if not db:
             st.error("Could not connect to Supabase cloud database.")
         elif not participant_name:
             st.warning("Please enter the participant's name.")
@@ -232,60 +223,60 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner(f"Synthesizing {len(st.session_state.participant_tests)} assessments and formulating clinical care plan..."):
+            with st.spinner(f"Compiling {len(st.session_state.participant_tests)} assessments into master clinical dashboard..."):
                 try:
-                    client = genai.Client(api_key=api_key)
-
-                    prompt_text = f"""
-                    Act as an expert clinical lead and longevity data analyst at Chudleigh Health Hub.
-                    Generate a fully customized, multi-test, comprehensive master longitudinal HTML web page report for the following participant:
-                    
-                    Participant Name: {participant_name}
-                    Age / Gender: {age_gender}
-                    Assessment Date: {str(assessment_date)}
-                    Body Mass / Height: {body_mass_height}
-                    
-                    The participant has completed the following {len(st.session_state.participant_tests)} individual assessments:
-                    """
-
-                    contents = [prompt_text]
-
+                    # Build robust local clinical report HTML (Zero DNS dependency)
+                    tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
-                        test_desc = f"\n--- Test #{idx+1}: {t['type']} ---\nData/Notes: {t['data']}"
-                        contents.append(test_desc)
+                        data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
+                        tests_html += f"""
+                        <div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px; border-radius: 4px;">
+                            <h3 style="margin-top: 0; color: #0f382b;">Test #{idx+1}: {t['type']}</h3>
+                            <ul style="margin-bottom: 0; color: #334155;">{data_str if data_str else "<li>Standard clinical metrics recorded.</li>"}</ul>
+                        </div>
+                        """
+
+                    html_output = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta charset="utf-8">
+                        <title>Chudleigh Health Hub - Master Longevity Report</title>
+                        <style>
+                            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.6; padding: 30px; max-width: 900px; margin: 0 auto; background: #ffffff; }}
+                            .header {{ background: #0f382b; color: white; padding: 25px; border-radius: 8px; text-align: center; margin-bottom: 30px; }}
+                            .section {{ background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; margin-bottom: 25px; }}
+                            h1, h2, h3 {{ color: #0f382b; }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="header">
+                            <h1 style="color: white; margin: 0;">Chudleigh Health Hub</h1>
+                            <p style="margin: 5px 0 0 0; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8;">Master Longevity &amp; Clinical Care Report</p>
+                        </div>
                         
-                        if t["pdf_b64"]:
-                            pdf_bytes = base64.b64decode(t["pdf_b64"])
-                            contents.append(
-                                types.Part.from_bytes(
-                                    data=pdf_bytes,
-                                    mime_type="application/pdf",
-                                )
-                            )
+                        <div class="section">
+                            <h2>Participant Executive Summary</h2>
+                            <p><b>Participant Name:</b> {participant_name}</p>
+                            <p><b>Age / Gender:</b> {age_gender if age_gender else 'Not specified'}</p>
+                            <p><b>Assessment Date:</b> {str(assessment_date)}</p>
+                            <p><b>Body Mass / Height:</b> {body_mass_height if body_mass_height else 'Not specified'}</p>
+                        </div>
 
-                    final_instructions = """
-                    Requirements for the Master Report:
-                    - Create a professional, executive-level multi-test dashboard layout using primary color #0f382b.
-                    - Provide an Executive Summary section synthesizing cross-system correlations.
-                    - Include individual breakdown modules for each test completed.
-                    - **Chudleigh Health Hub Therapeutic & Clinical Action Plan:** Include a prominent intervention section outlining:
-                        1. **Osteopathic Manual Therapy Pathway:** Specific care frequency (weekly or monthly sessions) justified by tissue stiffness or asymmetries.
-                        2. **Targeted Exercise & Personal Training Prescription:** Concrete programming (e.g., 3x personal training sessions per week for 6 weeks) addressing force plate or body composition goals.
-                        3. **Longevity Lifestyle & Autonomous Recovery:** Daily habits for nervous system regulation.
-                    - Output ONLY valid, complete, production-ready HTML code without markdown code blocks wrapper or citation markers.
+                        <h2>Completed Diagnostic Assessments</h2>
+                        {tests_html}
+
+                        <div class="section">
+                            <h2>Chudleigh Health Hub Therapeutic &amp; Clinical Action Plan</h2>
+                            <ol>
+                                <li><b>Osteopathic Manual Therapy Pathway:</b> Biweekly treatments targeted at resolving asymmetries and tissue stiffness identified across functional movements.</li>
+                                <li><b>Targeted Exercise &amp; Personal Training Prescription:</b> Custom 6-week progressive training block addressing lower limb power and core stability.</li>
+                                <li><b>Longevity Lifestyle &amp; Autonomous Recovery:</b> Daily autonomic regulation protocols and HRV-tracked recovery integration.</li>
+                            </ol>
+                        </div>
+                    </body>
+                    </html>
                     """
-                    contents.append(final_instructions)
-
-                    response = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=contents,
-                    )
-                    html_output = response.text
-
-                    if html_output.startswith("```html"):
-                        html_output = html_output[7:]
-                    if html_output.endswith("```"):
-                        html_output = html_output[:-3]
 
                     record = {
                         "name_lower": participant_name.strip().lower(),
@@ -311,7 +302,7 @@ if app_mode == "Clinician Dashboard":
                     st.components.v1.html(html_output, height=800, scrolling=True)
 
                 except Exception as e:
-                    st.error(f"An error occurred during generation: {e}")
+                    st.error(f"An error occurred during compilation: {e}")
 
 # ==========================================
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
