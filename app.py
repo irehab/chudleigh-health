@@ -255,7 +255,7 @@ if app_mode == "Clinician Dashboard":
                         3. Tailored Lifestyle & Therapeutic Recommendations
                         """
                         response = gemini.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.8-flash",
                             contents=prompt,
                         )
                         if response and response.text:
