@@ -528,4 +528,101 @@ if app_mode == "Clinician Dashboard":
                     if db:
                         doc_id = participant_name.strip().lower()
                         record = {
-                            "name_lower": doc_id
+                            "name_lower": doc_id,
+                            "name": participant_name,
+                            "pin": patient_pin.strip(),
+                            "assessment_date": str(assessment_date),
+                            "tests_count": len(st.session_state.participant_tests),
+                        }
+                        db.collection("longevity_reports").document(doc_id).set(record)
+                        
+                        html_record = {
+                            "html_output": final_html_output
+                        }
+                        db.collection("longevity_htmls").document(doc_id).set(html_record)
+
+                        st.success("✨ Master Report published and successfully synced to Google Cloud Firestore!")
+                    else:
+                        st.error("Database connection unavailable.")
+                except Exception as e:
+                    st.error(f"Error publishing to cloud: {e}")
+
+        st.subheader("🔎 Live Preview of Master Report")
+        preview_tests_html = ""
+        for idx, t in enumerate(st.session_state.participant_tests):
+            data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
+            t_num = idx + 1
+            t_type = t['type']
+            preview_tests_html += f"<div style='background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px;'><h3>Test #{t_num}: {t_type}</h3><ul>{data_str}</ul></div>"
+
+        live_preview_html = f"""
+        <div style="font-family: sans-serif; padding: 20px; background: white; border-radius: 8px;">
+            <h2 style="color: #0f382b;">{participant_name} ({age_gender})</h2>
+            <div style="background: #f0fdf4; padding: 15px; border-radius: 6px;">{edited_interpretation}</div>
+            <h3 style="color: #0f382b; margin-top: 20px;">Completed Tests:</h3>
+            {preview_tests_html}
+        </div>
+        """
+        st.components.v1.html(live_preview_html, height=600, scrolling=True)
+
+# ==========================================
+# VIEW 2: SECURE PATIENT MOBILE PORTAL
+# ==========================================
+elif app_mode == "Secure Patient Mobile Portal":
+    st.subheader("📱 Participant Companion Portal")
+    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and your secure 4-digit PIN provided by your clinician to access your records.")
+
+    col_l1, col_l2 = st.columns(2)
+    with col_l1:
+        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
+    with col_l2:
+        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
+
+    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
+        lookup_key = client_lookup.strip().lower()
+        
+        try:
+            if not db:
+                st.error("Google Cloud database connection unavailable.")
+            else:
+                doc_ref = db.collection("longevity_reports").document(lookup_key)
+                doc = doc_ref.get()
+
+                if doc.exists:
+                    client_data = doc.to_dict()
+                    
+                    if client_data["pin"] == client_pin.strip():
+                        html_doc = db.collection("longevity_htmls").document(lookup_key).get()
+                        html_output = html_doc.to_dict().get("html_output", "") if html_doc.exists else "<p>Report payload not found.</p>"
+
+                        st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
+
+                        st.markdown(
+                            f"""
+                            <div class='portal-box'>
+                                <h3>📋 Your Longevity Profile Summary</h3>
+                                <p><b>Participant:</b> {client_data['name']}</p>
+                                <p><b>Last Clinical Assessment:</b> {client_data['assessment_date']}</p>
+                                <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+                        st.download_button(
+                            label="📥 Download My Master AI Report (With Attached PDFs)",
+                            data=html_output,
+                            file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
+                            mime="text/html",
+                            use_container_width=True
+                        )
+
+                        st.subheader("🔎 Your Live Interactive AI Healthspan Dashboard")
+                        st.components.v1.html(html_output, height=800, scrolling=True)
+                    else:
+                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
+                else:
+                    st.warning("No published reports found matching that name in the Google Cloud database.")
+        
+        except Exception as e:
+            st.error(f"Error connecting to Google Cloud records: {e}")
