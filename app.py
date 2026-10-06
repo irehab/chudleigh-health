@@ -379,14 +379,14 @@ if app_mode == "Clinician Dashboard":
                     if gemini_client:
                         prompt_text = (
                             "You are an expert clinical data analyst and longevity physician at Chudleigh Health Hub, powered by Health Autonomy. "
-                            "Carefully analyze the attached official PDF reports and manually entered metrics for this participant, including SpO2/pulse oximetry, oxygen saturation stability, and pulse dynamics. "
-                            "Drill down into every available metric, table, percentage distribution, oxygen levels, and graphical trends.\n\n"
+                            "Carefully analyze the attached official PDF reports and manually entered metrics for this participant, including SpO2/pulse oximetry, oxygen saturation stability, and pulse dynamics[cite: 12]. "
+                            "Drill down into every available metric, table, percentage distribution, oxygen levels, and graphical trends[cite: 12].\n\n"
                             "Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). "
                             "Do not mention any AI models, automated assistants, or third-party tools. Present the output strictly as authored by Chudleigh Health Hub / Health Autonomy clinical analytics.\n\n"
                             f"Participant Details & Test Data:\n{summary_context}\n\n"
                             "Provide:\n"
                             "1. Comprehensive Clinical Summary & Physiological Insights\n"
-                            "2. Granular Biomarker Breakdown (extracting deep metrics, oxygen saturation stability, and pulse dynamics)\n"
+                            "2. Granular Biomarker Breakdown (extracting deep metrics, oxygen saturation stability, and pulse dynamics)[cite: 12]\n"
                             "3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap"
                         )
                         contents_payload.append(prompt_text)
@@ -425,7 +425,6 @@ if app_mode == "Clinician Dashboard":
                 st.warning("Please ensure participant name is entered.")
             else:
                 try:
-                    # Build individual test cards with secure download buttons
                     tests_html = ""
                     for idx, t in enumerate(st.session_state.participant_tests):
                         data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
@@ -443,7 +442,7 @@ if app_mode == "Clinician Dashboard":
 
                         tests_html += (
                             '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
-                            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t["type']}</h3>'
+                            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t["type"]}</h3>'
                             f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via clinical PDF inspection.</li>"}</ul>'
                             f'{pdf_download_box}'
                             '</div>'
