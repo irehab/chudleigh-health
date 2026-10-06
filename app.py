@@ -443,11 +443,13 @@ if app_mode == "Clinician Dashboard":
 
                         test_type = t['type']
                         test_num = idx + 1
+                        fallback_li = "<li>Metrics extracted directly via clinical PDF inspection.</li>"
+                        list_content = data_str if data_str else fallback_li
 
                         tests_html += (
                             '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
                             f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{test_num}: {test_type}</h3>'
-                            f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via clinical PDF inspection.</li>"}</ul>'
+                            f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
                             f'{pdf_download_box}'
                             '</div>'
                         )
