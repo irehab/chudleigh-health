@@ -379,20 +379,20 @@ if app_mode == "Clinician Dashboard":
                     if gemini_client:
                         prompt_text = (
                             "You are an expert clinical data analyst and longevity physician at Chudleigh Health Hub, powered by Health Autonomy. "
-                            "Carefully analyze the attached official PDF reports and manually entered metrics for this participant, including SpO2/pulse oximetry, oxygen saturation stability, and pulse dynamics[cite: 12]. "
-                            "Drill down into every available metric, table, percentage distribution, oxygen levels, and graphical trends[cite: 12].\n\n"
+                            "Carefully analyze the attached official PDF reports and manually entered metrics for this participant, including SpO2/pulse oximetry, oxygen saturation stability, and pulse dynamics. "
+                            "Drill down into every available metric, table, percentage distribution, oxygen levels, and graphical trends.\n\n"
                             "Write an exhaustive, highly rigorous, and professional clinical interpretation formatted in clean HTML (use h3, p, and li tags). "
                             "Do not mention any AI models, automated assistants, or third-party tools. Present the output strictly as authored by Chudleigh Health Hub / Health Autonomy clinical analytics.\n\n"
                             f"Participant Details & Test Data:\n{summary_context}\n\n"
                             "Provide:\n"
                             "1. Comprehensive Clinical Summary & Physiological Insights\n"
-                            "2. Granular Biomarker Breakdown (extracting deep metrics, oxygen saturation stability, and pulse dynamics)[cite: 12]\n"
+                            "2. Granular Biomarker Breakdown (extracting deep metrics, oxygen saturation stability, and pulse dynamics)\n"
                             "3. Tailored Lifestyle, Movement, and Longevity Therapeutic Roadmap"
                         )
                         contents_payload.append(prompt_text)
 
                         response = gemini_client.models.generate_content(
-                            model="gemini-3.8-flash",
+                            model="gemini-2.5-flash",
                             contents=contents_payload,
                         )
                         if response and response.text:
@@ -432,17 +432,21 @@ if app_mode == "Clinician Dashboard":
                         pdf_download_box = ""
                         if t.get('pdf_b64'):
                             filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
+                            pdf_b64_val = t['pdf_b64']
                             pdf_download_box = (
                                 '<div style="margin-top: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; text-align: center;">'
                                 f'<h4 style="margin-top: 0; color: #0f382b; font-size: 16px; margin-bottom: 8px;">Official Diagnostic PDF Report Available</h4>'
                                 f'<p style="font-size: 13px; color: #475569; margin-bottom: 15px;">Click below to download the complete official report ({filename}) containing all graphs, charts, and tables:</p>'
-                                f'<a href="data:application/pdf;base64,{t["pdf_b64"]}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>'
+                                f'<a href="data:application/pdf;base64,{pdf_b64_val}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>'
                                 '</div>'
                             )
 
+                        test_type = t['type']
+                        test_num = idx + 1
+
                         tests_html += (
                             '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
-                            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx+1}: {t["type"]}</h3>'
+                            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{test_num}: {test_type}</h3>'
                             f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{data_str if data_str else "<li>Metrics extracted directly via clinical PDF inspection.</li>"}</ul>'
                             f'{pdf_download_box}'
                             '</div>'
@@ -524,99 +528,4 @@ if app_mode == "Clinician Dashboard":
                     if db:
                         doc_id = participant_name.strip().lower()
                         record = {
-                            "name_lower": doc_id,
-                            "name": participant_name,
-                            "pin": patient_pin.strip(),
-                            "assessment_date": str(assessment_date),
-                            "tests_count": len(st.session_state.participant_tests),
-                        }
-                        db.collection("longevity_reports").document(doc_id).set(record)
-                        
-                        html_record = {
-                            "html_output": final_html_output
-                        }
-                        db.collection("longevity_htmls").document(doc_id).set(html_record)
-
-                        st.success("✨ Master Report published and successfully synced to Google Cloud Firestore!")
-                    else:
-                        st.error("Database connection unavailable.")
-                except Exception as e:
-                    st.error(f"Error publishing to cloud: {e}")
-
-        st.subheader("🔎 Live Preview of Master Report")
-        preview_tests_html = ""
-        for idx, t in enumerate(st.session_state.participant_tests):
-            data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-            preview_tests_html += f"<div style='background: #f8fafc; border-left: 4px solid #0f382b; padding: 15px; margin-bottom: 15px;'><h3>Test #{idx+1}: {t['type']}</h3><ul>{data_str}</ul></div>"
-
-        live_preview_html = f"""
-        <div style="font-family: sans-serif; padding: 20px; background: white; border-radius: 8px;">
-            <h2 style="color: #0f382b;">{participant_name} ({age_gender})</h2>
-            <div style="background: #f0fdf4; padding: 15px; border-radius: 6px;">{edited_interpretation}</div>
-            <h3 style="color: #0f382b; margin-top: 20px;">Completed Tests:</h3>
-            {preview_tests_html}
-        </div>
-        """
-        st.components.v1.html(live_preview_html, height=600, scrolling=True)
-
-# ==========================================
-# VIEW 2: SECURE PATIENT MOBILE PORTAL
-# ==========================================
-elif app_mode == "Secure Patient Mobile Portal":
-    st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and your secure 4-digit PIN provided by your clinician to access your records.")
-
-    col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
-    with col_l2:
-        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
-
-    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
-        lookup_key = client_lookup.strip().lower()
-        
-        try:
-            if not db:
-                st.error("Google Cloud database connection unavailable.")
-            else:
-                doc_ref = db.collection("longevity_reports").document(lookup_key)
-                doc = doc_ref.get()
-
-                if doc.exists:
-                    client_data = doc.to_dict()
-                    
-                    if client_data["pin"] == client_pin.strip():
-                        html_doc = db.collection("longevity_htmls").document(lookup_key).get()
-                        html_output = html_doc.to_dict().get("html_output", "") if html_doc.exists else "<p>Report payload not found.</p>"
-
-                        st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
-
-                        st.markdown(
-                            f"""
-                            <div class='portal-box'>
-                                <h3>📋 Your Longevity Profile Summary</h3>
-                                <p><b>Participant:</b> {client_data['name']}</p>
-                                <p><b>Last Clinical Assessment:</b> {client_data['assessment_date']}</p>
-                                <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-
-                        st.download_button(
-                            label="📥 Download My Master AI Report (With Attached PDFs)",
-                            data=html_output,
-                            file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
-                            mime="text/html",
-                            use_container_width=True
-                        )
-
-                        st.subheader("🔎 Your Live Interactive AI Healthspan Dashboard")
-                        st.components.v1.html(html_output, height=800, scrolling=True)
-                    else:
-                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
-                else:
-                    st.warning("No published reports found matching that name in the Google Cloud database.")
-        
-        except Exception as e:
-            st.error(f"Error connecting to Google Cloud records: {e}")
+                            "name_lower": doc_id
