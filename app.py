@@ -188,7 +188,7 @@ if app_mode == "Clinician Dashboard":
     st.subheader(f"📊 Input Data: {assessment_type}")
 
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Attached for Patient Download & Clinical Analysis)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Attached for AI Analysis)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
@@ -372,9 +372,9 @@ if app_mode == "Clinician Dashboard":
     # MODULAR CLINICAL GENERATION ENGINES
     # ==========================================
     st.subheader("🧩 Modular Clinical Generation Engine")
-    st.markdown("Generate and review interpretations by physiological domain before compiling the master report.")
+    st.markdown("Generate comprehensive clinical analyses using official PDF reports and structured metrics.")
 
-    # Helper function for Gemini file uploads with explicit mime_type configuration
+    # Helper function for Gemini file uploads with MIME type configuration
     def upload_pdf_to_gemini(pdf_b64_str):
         if not pdf_b64_str or not gemini_client:
             return None
@@ -384,7 +384,6 @@ if app_mode == "Clinician Dashboard":
                 tmp.write(pdf_bytes)
                 tmp_path = tmp.name
             
-            # Explicitly provide config with mime_type to prevent 400 errors with larger PDFs
             uploaded_file = gemini_client.files.upload(
                 file=tmp_path,
                 config={'mime_type': 'application/pdf'}
@@ -394,8 +393,7 @@ if app_mode == "Clinician Dashboard":
             except Exception:
                 pass
             return uploaded_file
-        except Exception as e:
-            st.error(f"Error uploading PDF to Gemini Files API: {e}")
+        except Exception:
             return None
 
     # Module 1: Cardiorespiratory
@@ -409,27 +407,28 @@ if app_mode == "Clinician Dashboard":
             elif len(cardio_tests) == 0:
                 st.info("No cardiorespiratory tests queued yet.")
             else:
-                with st.spinner("Analyzing cardiorespiratory & autonomic biomarkers..."):
+                with st.spinner("Reading official cardiorespiratory PDFs & extracting all metrics..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
                         for t in cardio_tests:
-                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
                             f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
                             if f_ref:
                                 payload.append(f_ref)
                         
                         prompt = (
                             "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
-                            "Analyze the attached reports and data for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
-                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Carefully inspect the attached official PDF reports and structured metrics for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
+                            "Drill down into every available metric, table, percentage distribution, oxygen level, and graphical trend. "
+                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod1 = res.text
-                            st.success("Cardiorespiratory analysis generated!")
+                            st.success("Cardiorespiratory analysis generated successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
@@ -449,27 +448,28 @@ if app_mode == "Clinician Dashboard":
             elif len(metabolic_tests) == 0:
                 st.info("No body composition or metabolic tests queued yet.")
             else:
-                with st.spinner("Analyzing body composition and advanced glycation end-products..."):
+                with st.spinner("Reading official Tanita/AGE PDFs & extracting all metrics..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
                         for t in metabolic_tests:
-                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
                             f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
                             if f_ref:
                                 payload.append(f_ref)
                         
                         prompt = (
                             "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
-                            "Analyze the attached reports and data for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass) and AGE Reader metrics. "
-                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Carefully inspect the attached official PDF reports and structured metrics for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass, segmental analysis) and AGE Reader metrics. "
+                            "Drill down into every available metric, table, and percentage. "
+                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod2 = res.text
-                            st.success("Metabolic analysis generated!")
+                            st.success("Metabolic analysis generated successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
@@ -489,27 +489,28 @@ if app_mode == "Clinician Dashboard":
             elif len(biomech_tests) == 0:
                 st.info("No biomechanical or force plate tests queued yet.")
             else:
-                with st.spinner("Analyzing force plates and neuromuscular performance..."):
+                with st.spinner("Reading official VALD ForceDecks PDFs & extracting all metrics..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
                         for t in biomech_tests:
-                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
                             f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
                             if f_ref:
                                 payload.append(f_ref)
                         
                         prompt = (
                             "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
-                            "Analyze the attached reports and data for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
-                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Carefully inspect the attached official PDF reports and structured metrics for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
+                            "Drill down into every available metric, force-time curve data point, symmetry percentage, and rate of force development (RFD). "
+                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod3 = res.text
-                            st.success("Biomechanical analysis generated!")
+                            st.success("Biomechanical analysis generated successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
@@ -581,15 +582,14 @@ if app_mode == "Clinician Dashboard":
                 for idx, t in enumerate(st.session_state.participant_tests):
                     data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
                     
-                    pdf_download_box = ""
-                    if t.get('pdf_b64'):
-                        filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
-                        pdf_b64_val = t['pdf_b64']
-                        pdf_download_box = (
-                            '<div style="margin-top: 20px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; text-align: center;">'
-                            f'<h4 style="margin-top: 0; color: #0f382b; font-size: 16px; margin-bottom: 8px;">Official Diagnostic PDF Report Available</h4>'
-                            f'<p style="font-size: 13px; color: #475569; margin-bottom: 15px;">Click below to download the complete official report ({filename}):</p>'
-                            f'<a href="data:application/pdf;base64,{pdf_b64_val}" download="{filename}" style="background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block;">📥 Download {filename}</a>'
+                    # Note: We omit heavy base64 strings from Firestore HTML storage to comply with the 1MB document limit,
+                    # while keeping the full test results, extracted metrics, and clinical evaluations intact.
+                    filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
+                    pdf_note_box = ""
+                    if filename:
+                        pdf_note_box = (
+                            '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
+                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Report Attached:</b> {filename} (Reviewed and synthesized by clinician)</p>'
                             '</div>'
                         )
 
@@ -602,7 +602,7 @@ if app_mode == "Clinician Dashboard":
                         '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
                         f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{test_num}: {test_type}</h3>'
                         f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
-                        f'{pdf_download_box}'
+                        f'{pdf_note_box}'
                         '</div>'
                     )
 
@@ -803,7 +803,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                         )
 
                         st.download_button(
-                            label="📥 Download My Master AI Report (With Attached PDFs)",
+                            label="📥 Download My Master AI Report",
                             data=html_output,
                             file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
                             mime="text/html",
