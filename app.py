@@ -78,6 +78,8 @@ if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
 if "editable_clinical_text" not in st.session_state:
     st.session_state.editable_clinical_text = ""
+if "editable_plain_english_text" not in st.session_state:
+    st.session_state.editable_plain_english_text = ""
 
 # --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
 @st.cache_resource
@@ -126,6 +128,7 @@ if app_mode == "Clinician Dashboard":
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
         st.session_state.participant_tests = []
         st.session_state.editable_clinical_text = ""
+        st.session_state.editable_plain_english_text = ""
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
@@ -407,19 +410,55 @@ if app_mode == "Clinician Dashboard":
                 except Exception as e:
                     st.error(f"An error occurred during report compilation: {e}")
 
-    # --- EDITABLE CLINICAL TEXT AREA & PUBLISH ---
+    # --- EDITABLE CLINICAL TEXT AREA & PLAIN ENGLISH ENGINE ---
     if st.session_state.editable_clinical_text:
         st.divider()
-        st.subheader("✏️ Edit Clinical Interpretation & Recommendations")
-        st.markdown("Modify, refine, or add notes to the clinical evaluation below before publishing to the patient portal:")
+        st.subheader("✏️ Step 1: Edit Clinical Interpretation & Recommendations")
+        st.markdown("Modify or refine the professional clinical evaluation below:")
 
         edited_interpretation = st.text_area(
             "Clinical Interpretation Text (HTML format)",
             value=st.session_state.editable_clinical_text,
-            height=350,
+            height=300,
             key="clinical_text_editor"
         )
 
+        st.divider()
+        st.subheader("🗣️ Step 2: Plain English 'What This Means For You' Engine")
+        st.markdown("Generate a motivating, jargon-free patient breakdown based on the clinical findings above.")
+
+        if st.button("🎙️ Generate Plain English Patient Summary", use_container_width=True):
+            if gemini_client:
+                with st.spinner("Translating clinical findings into plain English..."):
+                    pe_prompt = (
+                        "You are an empathetic, expert longevity physician and health coach at Chudleigh Health Hub. "
+                        "Based on the following clinical interpretation, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant. "
+                        "Format the output in clean HTML (using h3, p, and li tags) covering exactly these three sections:\n"
+                        "1. What this all means for you (The big picture summary in plain English)\n"
+                        "2. What is good and why this will help (Positive reinforcement of strong metrics and robust physiological markers)\n"
+                        "3. What you need to work on (Clear, actionable, prioritized focus areas for their healthspan)\n\n"
+                        f"Clinical Interpretation:\n{edited_interpretation}"
+                    )
+                    pe_response = gemini_client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=pe_prompt,
+                    )
+                    if pe_response and pe_response.text:
+                        st.session_state.editable_plain_english_text = pe_response.text
+                        st.success("✨ Plain English summary generated successfully!")
+                        st.rerun()
+            else:
+                st.warning("Gemini client uninitialized.")
+
+        # Editable Plain English Text Area
+        edited_plain_english = st.text_area(
+            "Plain English Summary Text (HTML format)",
+            value=st.session_state.editable_plain_english_text,
+            height=300,
+            key="plain_english_editor"
+        )
+
+        st.divider()
         if st.button("💾 Publish & Sync Master Report to Google Cloud", type="primary", use_container_width=True):
             if not participant_name:
                 st.warning("Please ensure participant name is entered.")
@@ -481,11 +520,39 @@ if app_mode == "Clinician Dashboard":
                             .patient-meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f1f5f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
                             .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
                             .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
+                            
+                            /* Tab Switcher Styling */
+                            .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; }}
+                            .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
+                            .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+
                             .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
                             .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
+                            .plain-english-card {{ background: linear-gradient(to bottom right, #f8fafc, #f1f5f9); border: 2px solid var(--secondary-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+                            .plain-english-card h2 {{ margin-top: 0; color: var(--primary-color); font-size: 20px; }}
                             .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
                             .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
                         </style>
+                        <script>
+                            function switchView(viewName) {{
+                                const clinicalCard = document.getElementById('card-clinical');
+                                const plainCard = document.getElementById('card-plain');
+                                const btnClinical = document.getElementById('btn-clinical');
+                                const btnPlain = document.getElementById('btn-plain');
+
+                                if (viewName === 'clinical') {{
+                                    clinicalCard.style.display = 'block';
+                                    plainCard.style.display = 'none';
+                                    btnClinical.classList.add('active');
+                                    btnPlain.classList.remove('active');
+                                }} else {{
+                                    clinicalCard.style.display = 'none';
+                                    plainCard.style.display = 'block';
+                                    btnPlain.classList.add('active');
+                                    btnClinical.classList.remove('active');
+                                }}
+                            }}
+                        </script>
                     </head>
                     <body>
                         <div class="report-container">
@@ -501,10 +568,25 @@ if app_mode == "Clinician Dashboard":
                                     <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height}</span></div>
                                 </div>
                                 
-                                <div class="results-card">
-                                    <h2>🩺 Clinical Interpretation & Health Autonomy Roadmap</h2>
+                                <!-- Interactive View Switcher Tabs -->
+                                <div class="view-switcher">
+                                    <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
+                                    <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
+                                </div>
+
+                                <!-- Clinical Report View -->
+                                <div id="card-clinical" class="results-card">
+                                    <h2>🩺 Professional Clinical Interpretation &amp; Analysis</h2>
                                     <div class="interpretation-text">
                                         {ai_analysis_html}
+                                    </div>
+                                </div>
+
+                                <!-- Plain English Breakdown View -->
+                                <div id="card-plain" class="plain-english-card" style="display: none;">
+                                    <h2>🗣️ What This Means For You &amp; Your Action Plan</h2>
+                                    <div class="interpretation-text">
+                                        {plain_english_html}
                                     </div>
                                 </div>
 
@@ -523,6 +605,7 @@ if app_mode == "Clinician Dashboard":
                         assessment_date=str(assessment_date),
                         body_mass_height=body_mass_height if body_mass_height else 'Not specified',
                         ai_analysis_html=edited_interpretation,
+                        plain_english_html=edited_plain_english if edited_plain_english else '<p>Plain English summary pending.</p>',
                         tests_count=len(st.session_state.participant_tests),
                         tests_html=tests_html
                     )
@@ -560,12 +643,19 @@ if app_mode == "Clinician Dashboard":
         live_preview_html = f"""
         <div style="font-family: sans-serif; padding: 20px; background: white; border-radius: 8px;">
             <h2 style="color: #0f382b;">{participant_name} ({age_gender})</h2>
-            <div style="background: #f0fdf4; padding: 15px; border-radius: 6px;">{edited_interpretation}</div>
+            <div style="background: #f0fdf4; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+                <h3 style="color: #2b6a52; margin-top:0;">Clinical Interpretation</h3>
+                {edited_interpretation}
+            </div>
+            <div style="background: #f1f5f9; padding: 15px; border-radius: 6px;">
+                <h3 style="color: #0f382b; margin-top:0;">Plain English Breakdown</h3>
+                {edited_plain_english}
+            </div>
             <h3 style="color: #0f382b; margin-top: 20px;">Completed Tests:</h3>
             {preview_tests_html}
         </div>
         """
-        st.components.v1.html(live_preview_html, height=600, scrolling=True)
+        st.components.v1.html(live_preview_html, height=700, scrolling=True)
 
 # ==========================================
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
