@@ -374,7 +374,7 @@ if app_mode == "Clinician Dashboard":
     st.subheader("🧩 Modular Clinical Generation Engine")
     st.markdown("Generate and review interpretations by physiological domain before compiling the master report.")
 
-    # Helper function for Gemini file uploads
+    # Helper function for Gemini file uploads with explicit mime_type configuration
     def upload_pdf_to_gemini(pdf_b64_str):
         if not pdf_b64_str or not gemini_client:
             return None
@@ -383,13 +383,19 @@ if app_mode == "Clinician Dashboard":
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(pdf_bytes)
                 tmp_path = tmp.name
-            uploaded_file = gemini_client.files.upload(file=tmp_path)
+            
+            # Explicitly provide config with mime_type to prevent 400 errors with larger PDFs
+            uploaded_file = gemini_client.files.upload(
+                file=tmp_path,
+                config={'mime_type': 'application/pdf'}
+            )
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
             return uploaded_file
-        except Exception:
+        except Exception as e:
+            st.error(f"Error uploading PDF to Gemini Files API: {e}")
             return None
 
     # Module 1: Cardiorespiratory
@@ -404,26 +410,29 @@ if app_mode == "Clinician Dashboard":
                 st.info("No cardiorespiratory tests queued yet.")
             else:
                 with st.spinner("Analyzing cardiorespiratory & autonomic biomarkers..."):
-                    payload = []
-                    context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                    for t in cardio_tests:
-                        context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
-                        f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                        if f_ref:
-                            payload.append(f_ref)
-                    
-                    prompt = (
-                        "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
-                        "Analyze the attached reports and data for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
-                        "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
-                        f"Patient Data:\n{context_str}"
-                    )
-                    payload.append(prompt)
-                    res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                    if res and res.text:
-                        st.session_state.ta_mod1 = res.text
-                        st.success("Cardiorespiratory analysis generated!")
-                        st.rerun()
+                    try:
+                        payload = []
+                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
+                        for t in cardio_tests:
+                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
+                            if f_ref:
+                                payload.append(f_ref)
+                        
+                        prompt = (
+                            "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
+                            "Analyze the attached reports and data for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
+                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            f"Patient Data:\n{context_str}"
+                        )
+                        payload.append(prompt)
+                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
+                        if res and res.text:
+                            st.session_state.ta_mod1 = res.text
+                            st.success("Cardiorespiratory analysis generated!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation error: {e}")
 
         st.text_area("Edit Cardiorespiratory Analysis (HTML)", height=180, key="ta_mod1")
 
@@ -441,26 +450,29 @@ if app_mode == "Clinician Dashboard":
                 st.info("No body composition or metabolic tests queued yet.")
             else:
                 with st.spinner("Analyzing body composition and advanced glycation end-products..."):
-                    payload = []
-                    context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                    for t in metabolic_tests:
-                        context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
-                        f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                        if f_ref:
-                            payload.append(f_ref)
-                    
-                    prompt = (
-                        "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
-                        "Analyze the attached reports and data for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass) and AGE Reader metrics. "
-                        "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
-                        f"Patient Data:\n{context_str}"
-                    )
-                    payload.append(prompt)
-                    res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                    if res and res.text:
-                        st.session_state.ta_mod2 = res.text
-                        st.success("Metabolic analysis generated!")
-                        st.rerun()
+                    try:
+                        payload = []
+                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
+                        for t in metabolic_tests:
+                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
+                            if f_ref:
+                                payload.append(f_ref)
+                        
+                        prompt = (
+                            "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
+                            "Analyze the attached reports and data for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass) and AGE Reader metrics. "
+                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            f"Patient Data:\n{context_str}"
+                        )
+                        payload.append(prompt)
+                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
+                        if res and res.text:
+                            st.session_state.ta_mod2 = res.text
+                            st.success("Metabolic analysis generated!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation error: {e}")
 
         st.text_area("Edit Body Comp & Metabolic Analysis (HTML)", height=180, key="ta_mod2")
 
@@ -478,26 +490,29 @@ if app_mode == "Clinician Dashboard":
                 st.info("No biomechanical or force plate tests queued yet.")
             else:
                 with st.spinner("Analyzing force plates and neuromuscular performance..."):
-                    payload = []
-                    context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                    for t in biomech_tests:
-                        context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
-                        f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                        if f_ref:
-                            payload.append(f_ref)
-                    
-                    prompt = (
-                        "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
-                        "Analyze the attached reports and data for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
-                        "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
-                        f"Patient Data:\n{context_str}"
-                    )
-                    payload.append(prompt)
-                    res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                    if res and res.text:
-                        st.session_state.ta_mod3 = res.text
-                        st.success("Biomechanical analysis generated!")
-                        st.rerun()
+                    try:
+                        payload = []
+                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
+                        for t in biomech_tests:
+                            context_str += f"Test: {t['type']} -> Data: {json.dumps(t['data'])}\n"
+                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
+                            if f_ref:
+                                payload.append(f_ref)
+                        
+                        prompt = (
+                            "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
+                            "Analyze the attached reports and data for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
+                            "Write a rigorous, professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            f"Patient Data:\n{context_str}"
+                        )
+                        payload.append(prompt)
+                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
+                        if res and res.text:
+                            st.session_state.ta_mod3 = res.text
+                            st.success("Biomechanical analysis generated!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation error: {e}")
 
         st.text_area("Edit Biomechanical Analysis (HTML)", height=180, key="ta_mod3")
 
@@ -512,36 +527,42 @@ if app_mode == "Clinician Dashboard":
         with col_gen1:
             if st.button("✨ Generate Master Executive Synthesis", use_container_width=True, key="btn_master"):
                 with st.spinner("Synthesizing all clinical modules..."):
-                    master_prompt = (
-                        "You are the lead longevity physician at Chudleigh Health Hub. "
-                        "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical synthesis formatted in clean HTML (h3, p, li tags):\n\n"
-                        f"Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
-                        f"Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
-                        f"Biomechanical Module:\n{st.session_state.ta_mod3}"
-                    )
-                    res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=master_prompt)
-                    if res and res.text:
-                        st.session_state.ta_master = res.text
-                        st.success("Master synthesis generated!")
-                        st.rerun()
+                    try:
+                        master_prompt = (
+                            "You are the lead longevity physician at Chudleigh Health Hub. "
+                            "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical synthesis formatted in clean HTML (h3, p, li tags):\n\n"
+                            f"Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
+                            f"Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
+                            f"Biomechanical Module:\n{st.session_state.ta_mod3}"
+                        )
+                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=master_prompt)
+                        if res and res.text:
+                            st.session_state.ta_master = res.text
+                            st.success("Master synthesis generated!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation error: {e}")
 
         with col_gen2:
             if st.button("🗣️ Generate Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
                 with st.spinner("Translating into plain English coaching guide..."):
-                    pe_prompt = (
-                        "You are an empathetic longevity coach at Chudleigh Health Hub. "
-                        "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant. "
-                        "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
-                        "1. What this all means for you (The big picture summary in plain English)\n"
-                        "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
-                        "3. What you need to work on (Clear, actionable, prioritized focus areas)\n\n"
-                        f"Master Clinical Summary:\n{st.session_state.ta_master}"
-                    )
-                    res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=pe_prompt)
-                    if res and res.text:
-                        st.session_state.ta_pe = res.text
-                        st.success("Plain English summary generated!")
-                        st.rerun()
+                    try:
+                        pe_prompt = (
+                            "You are an empathetic longevity coach at Chudleigh Health Hub. "
+                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant. "
+                            "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
+                            "1. What this all means for you (The big picture summary in plain English)\n"
+                            "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
+                            "3. What you need to work on (Clear, actionable, prioritized focus areas)\n\n"
+                            f"Master Clinical Summary:\n{st.session_state.ta_master}"
+                        )
+                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=pe_prompt)
+                        if res and res.text:
+                            st.session_state.ta_pe = res.text
+                            st.success("Plain English summary generated!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Generation error: {e}")
 
         st.text_area("Edit Master Executive Synthesis (HTML)", height=220, key="ta_master")
         st.text_area("Edit Plain English Breakdown (HTML)", height=220, key="ta_pe")
