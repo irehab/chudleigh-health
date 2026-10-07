@@ -84,16 +84,16 @@ st.markdown(
 # --- SESSION STATE INITIALIZATION ---
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
-if "mod1_cardio" not in st.session_state:
-    st.session_state.mod1_cardio = ""
-if "mod2_metabolic" not in st.session_state:
-    st.session_state.mod2_metabolic = ""
-if "mod3_biomech" not in st.session_state:
-    st.session_state.mod3_biomech = ""
-if "mod4_master" not in st.session_state:
-    st.session_state.mod4_master = ""
-if "plain_english_text" not in st.session_state:
-    st.session_state.plain_english_text = ""
+if "ta_mod1" not in st.session_state:
+    st.session_state.ta_mod1 = ""
+if "ta_mod2" not in st.session_state:
+    st.session_state.ta_mod2 = ""
+if "ta_mod3" not in st.session_state:
+    st.session_state.ta_mod3 = ""
+if "ta_master" not in st.session_state:
+    st.session_state.ta_master = ""
+if "ta_pe" not in st.session_state:
+    st.session_state.ta_pe = ""
 
 # --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
 @st.cache_resource
@@ -141,11 +141,11 @@ if app_mode == "Clinician Dashboard":
 
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
         st.session_state.participant_tests = []
-        st.session_state.mod1_cardio = ""
-        st.session_state.mod2_metabolic = ""
-        st.session_state.mod3_biomech = ""
-        st.session_state.mod4_master = ""
-        st.session_state.plain_english_text = ""
+        st.session_state.ta_mod1 = ""
+        st.session_state.ta_mod2 = ""
+        st.session_state.ta_mod3 = ""
+        st.session_state.ta_master = ""
+        st.session_state.ta_pe = ""
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
@@ -397,7 +397,7 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### 🫀 Module 1: Cardiorespiratory & Autonomic")
         cardio_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["SpO2", "Spirometry", "ECG", "Autonomic / HRV"])]
         
-        if st.button("Generate Cardiorespiratory Analysis", use_container_width=True):
+        if st.button("Generate Cardiorespiratory Analysis", use_container_width=True, key="btn_mod1"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(cardio_tests) == 0:
@@ -421,10 +421,11 @@ if app_mode == "Clinician Dashboard":
                     payload.append(prompt)
                     res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                     if res and res.text:
-                        st.session_state.mod1_cardio = res.text
+                        st.session_state.ta_mod1 = res.text
                         st.success("Cardiorespiratory analysis generated!")
+                        st.rerun()
 
-        st.session_state.mod1_cardio = st.text_area("Edit Cardiorespiratory Analysis (HTML)", value=st.session_state.mod1_cardio, height=180, key="ta_mod1")
+        st.text_area("Edit Cardiorespiratory Analysis (HTML)", height=180, key="ta_mod1")
 
     st.divider()
 
@@ -433,7 +434,7 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### ⚖️ Module 2: Body Composition & Metabolic Age")
         metabolic_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["Tanita", "AGE Reader"])]
         
-        if st.button("Generate Body Comp & Metabolic Analysis", use_container_width=True):
+        if st.button("Generate Body Comp & Metabolic Analysis", use_container_width=True, key="btn_mod2"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(metabolic_tests) == 0:
@@ -457,10 +458,11 @@ if app_mode == "Clinician Dashboard":
                     payload.append(prompt)
                     res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                     if res and res.text:
-                        st.session_state.mod2_metabolic = res.text
+                        st.session_state.ta_mod2 = res.text
                         st.success("Metabolic analysis generated!")
+                        st.rerun()
 
-        st.session_state.mod2_metabolic = st.text_area("Edit Body Comp & Metabolic Analysis (HTML)", value=st.session_state.mod2_metabolic, height=180, key="ta_mod2")
+        st.text_area("Edit Body Comp & Metabolic Analysis (HTML)", height=180, key="ta_mod2")
 
     st.divider()
 
@@ -469,7 +471,7 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### 🏋️ Module 3: Biomechanical & Neuromuscular Function")
         biomech_tests = [t for t in st.session_state.participant_tests if "VALD" in t['type'] or "Push-Up" in t['type']]
         
-        if st.button("Generate Biomechanical Analysis", use_container_width=True):
+        if st.button("Generate Biomechanical Analysis", use_container_width=True, key="btn_mod3"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(biomech_tests) == 0:
@@ -493,10 +495,11 @@ if app_mode == "Clinician Dashboard":
                     payload.append(prompt)
                     res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                     if res and res.text:
-                        st.session_state.mod3_biomech = res.text
+                        st.session_state.ta_mod3 = res.text
                         st.success("Biomechanical analysis generated!")
+                        st.rerun()
 
-        st.session_state.mod3_biomech = st.text_area("Edit Biomechanical Analysis (HTML)", value=st.session_state.mod3_biomech, height=180, key="ta_mod3")
+        st.text_area("Edit Biomechanical Analysis (HTML)", height=180, key="ta_mod3")
 
     st.divider()
 
@@ -507,23 +510,23 @@ if app_mode == "Clinician Dashboard":
 
         col_gen1, col_gen2 = st.columns(2)
         with col_gen1:
-            if st.button("✨ Generate Master Executive Synthesis", use_container_width=True):
+            if st.button("✨ Generate Master Executive Synthesis", use_container_width=True, key="btn_master"):
                 with st.spinner("Synthesizing all clinical modules..."):
                     master_prompt = (
                         "You are the lead longevity physician at Chudleigh Health Hub. "
                         "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical synthesis formatted in clean HTML (h3, p, li tags):\n\n"
-                        f"Cardiorespiratory Module:\n{st.session_state.mod1_cardio}\n\n"
-                        f"Body Composition & Metabolic Module:\n{st.session_state.mod2_metabolic}\n\n"
-                        f"Biomechanical Module:\n{st.session_state.mod3_biomech}"
+                        f"Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
+                        f"Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
+                        f"Biomechanical Module:\n{st.session_state.ta_mod3}"
                     )
                     res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=master_prompt)
                     if res and res.text:
-                        st.session_state.mod4_master = res.text
+                        st.session_state.ta_master = res.text
                         st.success("Master synthesis generated!")
                         st.rerun()
 
         with col_gen2:
-            if st.button("🗣️ Generate Plain English Patient Breakdown", use_container_width=True):
+            if st.button("🗣️ Generate Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
                 with st.spinner("Translating into plain English coaching guide..."):
                     pe_prompt = (
                         "You are an empathetic longevity coach at Chudleigh Health Hub. "
@@ -532,16 +535,16 @@ if app_mode == "Clinician Dashboard":
                         "1. What this all means for you (The big picture summary in plain English)\n"
                         "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
                         "3. What you need to work on (Clear, actionable, prioritized focus areas)\n\n"
-                        f"Master Clinical Summary:\n{st.session_state.mod4_master}"
+                        f"Master Clinical Summary:\n{st.session_state.ta_master}"
                     )
                     res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=pe_prompt)
                     if res and res.text:
-                        st.session_state.plain_english_text = res.text
+                        st.session_state.ta_pe = res.text
                         st.success("Plain English summary generated!")
                         st.rerun()
 
-        st.session_state.mod4_master = st.text_area("Edit Master Executive Synthesis (HTML)", value=st.session_state.mod4_master, height=220, key="ta_master")
-        st.session_state.plain_english_text = st.text_area("Edit Plain English Breakdown (HTML)", value=st.session_state.plain_english_text, height=220, key="ta_pe")
+        st.text_area("Edit Master Executive Synthesis (HTML)", height=220, key="ta_master")
+        st.text_area("Edit Plain English Breakdown (HTML)", height=220, key="ta_pe")
 
     st.divider()
 
@@ -703,11 +706,11 @@ if app_mode == "Clinician Dashboard":
                     age_gender=age_gender if age_gender else 'Not specified',
                     assessment_date=str(assessment_date),
                     body_mass_height=body_mass_height if body_mass_height else 'Not specified',
-                    master_html=st.session_state.mod4_master if st.session_state.mod4_master else '<p>Master summary pending.</p>',
-                    mod1_html=st.session_state.mod1_cardio if st.session_state.mod1_cardio else '<p>Cardiorespiratory module pending.</p>',
-                    mod2_html=st.session_state.mod2_metabolic if st.session_state.mod2_metabolic else '<p>Metabolic module pending.</p>',
-                    mod3_html=st.session_state.mod3_biomech if st.session_state.mod3_biomech else '<p>Biomechanical module pending.</p>',
-                    plain_english_html=st.session_state.plain_english_text if st.session_state.plain_english_text else '<p>Plain English summary pending.</p>',
+                    master_html=st.session_state.ta_master if st.session_state.ta_master else '<p>Master summary pending.</p>',
+                    mod1_html=st.session_state.ta_mod1 if st.session_state.ta_mod1 else '<p>Cardiorespiratory module pending.</p>',
+                    mod2_html=st.session_state.ta_mod2 if st.session_state.ta_mod2 else '<p>Metabolic module pending.</p>',
+                    mod3_html=st.session_state.ta_mod3 if st.session_state.ta_mod3 else '<p>Biomechanical module pending.</p>',
+                    plain_english_html=st.session_state.ta_pe if st.session_state.ta_pe else '<p>Plain English summary pending.</p>',
                     tests_count=len(st.session_state.participant_tests),
                     tests_html=tests_html
                 )
