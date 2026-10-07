@@ -2,6 +2,7 @@ import os
 import datetime
 import json
 import base64
+import tempfile
 import streamlit as st
 from google.cloud import firestore
 from google import genai
@@ -362,20 +363,25 @@ if app_mode == "Clinician Dashboard":
         elif len(st.session_state.participant_tests) == 0:
             st.warning("Please add at least one test assessment to the profile.")
         else:
-            with st.spinner("🩺 Running clinical analytics engine & drafting comprehensive report..."):
+            with st.spinner("🩺 Running clinical analytics engine & uploading large reports to Gemini Files API..."):
                 try:
                     summary_context = f"Participant: {participant_name}, Age/Gender: {age_gender}, Metrics: {body_mass_height}\n"
                     contents_payload = []
+                    temp_files_to_cleanup = []
 
                     for idx, t in enumerate(st.session_state.participant_tests):
                         summary_context += f"Test {idx+1}: {t['type']} -> Data: {json.dumps(t['data'])}\n"
                         if t.get('pdf_b64'):
-                            contents_payload.append({
-                                "inline_data": {
-                                    "mime_type": "application/pdf",
-                                    "data": t['pdf_b64']
-                                }
-                            })
+                            # Use Gemini Files API to handle large PDFs seamlessly
+                            pdf_bytes = base64.b64decode(t['pdf_b64'])
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                                tmp.write(pdf_bytes)
+                                tmp_path = tmp.name
+                                temp_files_to_cleanup.append(tmp_path)
+                            
+                            if gemini_client:
+                                uploaded_gemini_file = gemini_client.files.upload(file=tmp_path)
+                                contents_payload.append(uploaded_gemini_file)
 
                     draft_interpretation = "<p>Clinical interpretation generated successfully.</p>"
                     
@@ -402,6 +408,13 @@ if app_mode == "Clinician Dashboard":
                             draft_interpretation = response.text
                     else:
                         st.warning("Clinical analytics client uninitialized.")
+
+                    # Cleanup temporary files
+                    for tf in temp_files_to_cleanup:
+                        try:
+                            os.unlink(tf)
+                        except Exception:
+                            pass
 
                     st.session_state.editable_clinical_text = draft_interpretation
                     st.success("✨ Clinical report drafted successfully! Review and edit the clinical text below before publishing.")
