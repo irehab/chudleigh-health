@@ -402,6 +402,16 @@ def build_plan_section(raw_plans: dict, unlocked: dict, price_labels: dict) -> s
 _CHECKOUT_ID_RE = re.compile(r"cs_[A-Za-z0-9_]{10,255}")
 
 
+def stripe_field(obj, key):
+    """Read a field from a Stripe object; newer stripe-python versions don't support .get()."""
+    if obj is None:
+        return None
+    try:
+        return obj[key]
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
 def create_checkout_url(key: str, tier: str, price: Decimal) -> str:
     session = stripe.checkout.Session.create(
         line_items=[{
@@ -435,13 +445,13 @@ def handle_stripe_return(session_id: str):
         fail("We couldn't verify your payment right now. Please contact Chudleigh Health Hub.", "Stripe session retrieve failed")
         return
 
-    if cs.payment_status != "paid":
+    if stripe_field(cs, "payment_status") != "paid":
         st.warning("Your payment hasn't completed yet. If you were charged, please contact Chudleigh Health Hub.")
         return
 
-    metadata = cs.metadata or {}
-    key = metadata.get("patient_key")
-    tier = metadata.get("tier")
+    metadata = stripe_field(cs, "metadata")
+    key = stripe_field(metadata, "patient_key")
+    tier = stripe_field(metadata, "tier")
     if tier not in TIERS or not key or patient_key(key) != key:
         log.warning("Paid Stripe session without valid metadata: %s", session_id)
         st.error(f"We couldn't match this payment to a plan. Please contact Chudleigh Health Hub quoting: {session_id[-12:]}")
@@ -457,8 +467,8 @@ def handle_stripe_return(session_id: str):
         db.collection("payments").document(session_id).set({
             "patient_key": key,
             "tier": tier,
-            "amount_total": cs.amount_total,
-            "currency": cs.currency,
+            "amount_total": stripe_field(cs, "amount_total"),
+            "currency": stripe_field(cs, "currency"),
             "processed_at": firestore.SERVER_TIMESTAMP,
         }, merge=True)
     except Exception:
@@ -1153,7 +1163,10 @@ elif app_mode == "Secure Patient Mobile Portal":
     # Returning from Stripe checkout: verify payment, then strip the ID from the URL.
     stripe_session_id = st.query_params.get("session_id")
     if stripe_session_id:
-        handle_stripe_return(stripe_session_id)
+        try:
+            handle_stripe_return(stripe_session_id)
+        except Exception:
+            fail("We couldn't verify your payment right now. Please contact Chudleigh Health Hub.", "Stripe return handling failed")
         st.query_params.clear()
         st.query_params["portal"] = "true"
 
