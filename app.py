@@ -877,7 +877,37 @@ elif app_mode == "Secure Patient Mobile Portal":
                 lookup_key = verified_patient.strip().lower()
                 update_field = f"unlock_{verified_tier}"
                 
+                # 1. Update flag in Firestore record
                 db.collection("longevity_reports").document(lookup_key).update({update_field: True})
+                
+                # 2. Fetch client data and cached HTML to swap the locked card with the unlocked plan content
+                doc_ref = db.collection("longevity_reports").document(lookup_key)
+                client_data = doc_ref.get().to_dict()
+                
+                html_doc_ref = db.collection("longevity_htmls").document(lookup_key)
+                html_doc = html_doc_ref.get()
+                if html_doc.exists:
+                    html_output = html_doc.to_dict().get("html_output", "")
+                    tier_price = client_data.get(f"price_{verified_tier}", "49")
+                    raw_plan = client_data.get(f"plan_{verified_tier}_raw", "")
+                    
+                    if verified_tier == "30":
+                        locked_str = f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{tier_price}</b>.</p></div>'
+                        unlocked_str = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{raw_plan}'
+                    elif verified_tier == "60":
+                        locked_str = f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{tier_price}</b>.</p></div>'
+                        unlocked_str = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{raw_plan}'
+                    elif verified_tier == "90":
+                        locked_str = f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{tier_price}</b>.</p></div>'
+                        unlocked_str = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{raw_plan}'
+                    else:
+                        locked_str = ""
+                        unlocked_str = ""
+
+                    if locked_str in html_output:
+                        html_output = html_output.replace(locked_str, unlocked_str)
+                        html_doc_ref.set({"html_output": html_output})
+
                 st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
         except Exception as e:
             st.error(f"Payment verification error: {e}")
@@ -926,7 +956,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                         app_url = "https://chudleigh-health-66895860161.europe-west2.run.app"
 
                         stripe_url_30 = ""
-                        if not client_data.get("unlock_30", True):
+                        if not client_data.get("unlock_30", False):
                             p_30 = client_data.get('price_30', '49')
                             cs_30 = stripe.checkout.Session.create(
                                 line_items=[{
@@ -979,7 +1009,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                             )
                             stripe_url_90 = cs_90.url
 
-                        # Inject dynamic unlock buttons into the locked cards
+                        # Inject dynamic unlock buttons into the locked cards if still locked
                         if stripe_url_30:
                             html_output = html_output.replace(
                                 '🔒 30-Day Foundation Sprint (Locked)', 
