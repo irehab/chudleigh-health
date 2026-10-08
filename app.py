@@ -215,7 +215,6 @@ if app_mode == "Clinician Dashboard":
         pdf_filename_str = uploaded_pdf.name
         st.success(f"PDF Loaded Successfully: {pdf_filename_str} ({len(pdf_bytes_content) / 1024:.1f} KB)")
 
-    # Form inputs for quick overrides or supplementary metrics
     if assessment_type == "SpO2 / Pulse Oximetry (ViHealth)":
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -562,7 +561,7 @@ if app_mode == "Clinician Dashboard":
                     try:
                         pe_prompt = (
                             "You are an empathetic longevity physician and health coach at Chudleigh Health Hub. "
-                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed toête participant as authored by Chudleigh Health Hub clinicians. "
+                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant as authored by Chudleigh Health Hub clinicians. "
                             "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
                             "1. What this all means for you (The big picture summary in plain English)\n"
                             "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
@@ -678,7 +677,6 @@ if app_mode == "Clinician Dashboard":
                         '</div>'
                     )
 
-                # Store plan content in Firestore document so portal can verify or display
                 html_template = """
                 <!DOCTYPE html>
                 <html lang="en">
@@ -806,7 +804,6 @@ if app_mode == "Clinician Dashboard":
                 </html>
                 """
 
-                # Build locked vs unlocked HTML for storage
                 p30_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{st.session_state.ta_plan_30}' if unlock_30_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b>.</p></div>'
                 p60_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{st.session_state.ta_plan_60}' if unlock_60_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b>.</p></div>'
                 p90_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{st.session_state.ta_plan_90}' if unlock_90_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{price_90}</b>.</p></div>'
@@ -870,28 +867,18 @@ elif app_mode == "Secure Patient Mobile Portal":
     verified_patient = query_params.get("patient")
     verified_tier = query_params.get("tier")
 
-    if stripe_session_id and verified_patient and verified_tier and stripe.api_key:
+    if stripe_session_id and verified_patient and verified_tier:
         try:
+            if not stripe.api_key:
+                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+            
             session = stripe.checkout.Session.retrieve(stripe_session_id)
             if session.payment_status == "paid":
                 lookup_key = verified_patient.strip().lower()
                 update_field = f"unlock_{verified_tier}"
                 
-                # Update Firestore unlock flag
                 db.collection("longevity_reports").document(lookup_key).update({update_field: True})
-                
-                # Re-fetch updated record and rebuild HTML
-                doc_ref = db.collection("longevity_reports").document(lookup_key)
-                client_data = doc_ref.get().to_dict()
-                
-                if client_data:
-                    # Rebuild HTML with newly unlocked tier
-                    p30_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{client_data.get("plan_30_raw", "")}' if client_data.get("unlock_30") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3></div>'
-                    p60_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{client_data.get("plan_60_raw", "")}' if client_data.get("unlock_60") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3></div>'
-                    p90_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{client_data.get("plan_90_raw", "")}' if client_data.get("unlock_90") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3></div>'
-                    
-                    # (Note: full HTML update logic can reference these updated variables)
-                    st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
+                st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
         except Exception as e:
             st.error(f"Payment verification error: {e}")
 
@@ -932,26 +919,80 @@ elif app_mode == "Secure Patient Mobile Portal":
                             unsafe_allow_html=True,
                         )
 
-                        # If Stripe API key is set, we can generate dynamic checkout buttons for locked tiers right here in Streamlit!
-                        if stripe.api_key and not client_data.get("unlock_30", True):
-                            price_val = int(float(client_data.get("price_30", "49")) * 100)
-                            if st.button(f"💳 Unlock 30-Day Plan Now (£{client_data.get('price_30', '49')})"):
-                                app_url = st.get_option("server.baseUrlPath") or "https://chudleigh-health-66895860161.europe-west2.run.app"
-                                checkout_session = stripe.checkout.Session.create(
-                                    payment_method_types=['card'],
-                                    line_items=[{
-                                        'price_data': {
-                                            'currency': 'gbp',
-                                            'product_data': {'name': 'Chudleigh Health Hub - 30-Day Action Plan'},
-                                            'unit_amount': price_val,
-                                        },
-                                        'quantity': 1,
-                                    }],
-                                    mode='payment',
-                                    success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=30",
-                                    cancel_url=f"{app_url}/?portal=true",
-                                )
-                                st.markdown(f'<meta http-equiv="refresh" content="0;url={checkout_session.url}">', unsafe_allow_html=True)
+                        # --- STRIPE CHECKOUT BUTTONS FOR LOCKED TIERS ---
+                        if not stripe.api_key:
+                            stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+                        app_url = "https://chudleigh-health-66895860161.europe-west2.run.app"
+
+                        # 30-Day Tier Checkout Button
+                        if not client_data.get("unlock_30", True):
+                            p_30 = client_data.get('price_30', '49')
+                            if st.button(f"💳 Unlock 30-Day Foundation Sprint (£{p_30})", key="pay_30"):
+                                try:
+                                    cs = stripe.checkout.Session.create(
+                                        payment_method_types=['card'],
+                                        line_items=[{
+                                            'price_data': {
+                                                'currency': 'gbp',
+                                                'product_data': {'name': 'Chudleigh Health Hub - 30-Day Action Plan'},
+                                                'unit_amount': int(float(p_30) * 100),
+                                            },
+                                            'quantity': 1,
+                                        }],
+                                        mode='payment',
+                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=30",
+                                        cancel_url=f"{app_url}/?portal=true",
+                                    )
+                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
+                                except Exception as err:
+                                    st.error(f"Checkout error: {err}")
+
+                        # 60-Day Tier Checkout Button
+                        if not client_data.get("unlock_60", False):
+                            p_60 = client_data.get('price_60', '89')
+                            if st.button(f"💳 Unlock 60-Day Progression Plan (£{p_60})", key="pay_60"):
+                                try:
+                                    cs = stripe.checkout.Session.create(
+                                        payment_method_types=['card'],
+                                        line_items=[{
+                                            'price_data': {
+                                                'currency': 'gbp',
+                                                'product_data': {'name': 'Chudleigh Health Hub - 60-Day Action Plan'},
+                                                'unit_amount': int(float(p_60) * 100),
+                                            },
+                                            'quantity': 1,
+                                        }],
+                                        mode='payment',
+                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=60",
+                                        cancel_url=f"{app_url}/?portal=true",
+                                    )
+                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
+                                except Exception as err:
+                                    st.error(f"Checkout error: {err}")
+
+                        # 90-Day Tier Checkout Button
+                        if not client_data.get("unlock_90", False):
+                            p_90 = client_data.get('price_90', '129')
+                            if st.button(f"💳 Unlock 90-Day Mastery Plan (£{p_90})", key="pay_90"):
+                                try:
+                                    cs = stripe.checkout.Session.create(
+                                        payment_method_types=['card'],
+                                        line_items=[{
+                                            'price_data': {
+                                                'currency': 'gbp',
+                                                'product_data': {'name': 'Chudleigh Health Hub - 90-Day Mastery Plan'},
+                                                'unit_amount': int(float(p_90) * 100),
+                                            },
+                                            'quantity': 1,
+                                        }],
+                                        mode='payment',
+                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=90",
+                                        cancel_url=f"{app_url}/?portal=true",
+                                    )
+                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
+                                except Exception as err:
+                                    st.error(f"Checkout error: {err}")
 
                         st.download_button(
                             label="📥 Download My Expert Clinical Report",
