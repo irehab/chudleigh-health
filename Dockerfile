@@ -35,5 +35,5 @@ CMD ["streamlit", "run", "app.py", \
      "--server.maxUploadSize=20", \
      "--server.enableXsrfProtection=true", \
      "--browser.gatherUsageStats=false", \
-     "--client.showErrorDetails=false", \
+     "--client.showErrorDetails=none", \
      "--client.toolbarMode=viewer"]
