@@ -1004,4 +1004,12 @@ elif app_mode == "Secure Patient Mobile Portal":
                             use_container_width=True,
                         )
 
-                        st.subheader("🔎
+                        st.subheader("🔎 Your Live Interactive Clinical Healthspan Dashboard")
+                        st.components.v1.html(html_output, height=800, scrolling=True)
+                    else:
+                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
+                else:
+                    st.warning("No published reports found matching that name in the Google Cloud database.")
+        
+        except Exception as e:
+            st.error(f"Error connecting to Cloud records: {e}")
