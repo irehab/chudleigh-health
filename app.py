@@ -583,10 +583,10 @@ if app_mode == "Clinician Dashboard":
     st.divider()
 
     # ==========================================
-    # STEP 1: 30 / 60 / 90-DAY TIERED ACTION PLAN BUILDER
+    # STEP 1 & 2: ACTION PLAN BUILDER & UNLOCK CONTROLS
     # ==========================================
-    st.subheader("🚀 Step 1: Tiered 30 / 60 / 90-Day Action Plan Engine")
-    st.markdown("Configure tier pricing and generate a progressive roadmap that prioritizes the patient's biggest vulnerabilities first.")
+    st.subheader("🚀 Step 1 & 2: Tiered Action Plans & Portal Access Control")
+    st.markdown("Configure tier pricing, generate progressive roadmaps, and select which tiers are unlocked for the participant.")
 
     col_p1, col_p2, col_p3 = st.columns(3)
     with col_p1:
@@ -637,6 +637,12 @@ if app_mode == "Clinician Dashboard":
     st.markdown("#### 90-Day Mastery Plan (Long-Term Optimization)")
     st.text_area("Edit 90-Day Plan (HTML)", height=180, key="ta_plan_90")
 
+    st.markdown("---")
+    st.markdown("#### 🔓 Patient Portal Unlock Tiers")
+    unlock_30_flag = st.checkbox("Unlock 30-Day Plan in Patient Portal", value=True, key="chk_unl_30")
+    unlock_60_flag = st.checkbox("Unlock 60-Day Plan in Patient Portal", value=False, key="chk_unl_60")
+    unlock_90_flag = st.checkbox("Unlock 90-Day Plan in Patient Portal", value=False, key="chk_unl_90")
+
     st.divider()
 
     # --- PUBLISH & SYNC TO GOOGLE CLOUD ---
@@ -671,6 +677,40 @@ if app_mode == "Clinician Dashboard":
                         f'{pdf_note_box}'
                         '</div>'
                     )
+
+                # Generate dynamic HTML for 30/60/90 plans based on unlock state
+                p30_content = (
+                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint (High-Priority Focus)</h3>'
+                    f'{st.session_state.ta_plan_30}'
+                ) if unlock_30_flag else (
+                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;">'
+                    '<h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3>'
+                    f'<p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b> to address your most critical health priorities first.</p>'
+                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2030-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_30 + ')</a>'
+                    '</div>'
+                )
+
+                p60_content = (
+                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>'
+                    f'{st.session_state.ta_plan_60}'
+                ) if unlock_60_flag else (
+                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">'
+                    '<h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3>'
+                    f'<p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b> to integrate secondary habit changes and performance tracking.</p>'
+                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2060-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_60 + ')</a>'
+                    '</div>'
+                )
+
+                p90_content = (
+                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>'
+                    f'{st.session_state.ta_plan_90}'
+                ) if unlock_90_flag else (
+                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">'
+                    '<h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3>'
+                    f'<p style="color: #475569; font-size: 14px;">Unlock the complete 90-day mastery roadmap for <b>£{price_90}</b> for long-term healthspan autonomy.</p>'
+                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2090-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_90 + ')</a>'
+                    '</div>'
+                )
 
                 html_template = """
                 <!DOCTYPE html>
@@ -794,14 +834,9 @@ if app_mode == "Clinician Dashboard":
                             <div id="card-plan" class="plan-card" style="display: none;">
                                 <h2>🚀 Your Tailored 30 / 60 / 90-Day Longevity Roadmaps</h2>
                                 <div class="interpretation-text">
-                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint (High-Priority Focus)</h3>
-                                    {plan_30_html}
-
-                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>
-                                    {plan_60_html}
-
-                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>
-                                    {plan_90_html}
+                                    {p30_html}
+                                    {p60_html}
+                                    {p90_html}
                                 </div>
                             </div>
 
@@ -824,9 +859,9 @@ if app_mode == "Clinician Dashboard":
                     mod2_html=st.session_state.ta_mod2 if st.session_state.ta_mod2 else '<p>Metabolic module pending.</p>',
                     mod3_html=st.session_state.ta_mod3 if st.session_state.ta_mod3 else '<p>Biomechanical module pending.</p>',
                     plain_english_html=st.session_state.ta_pe if st.session_state.ta_pe else '<p>Plain English summary pending.</p>',
-                    plan_30_html=st.session_state.ta_plan_30 if st.session_state.ta_plan_30 else '<p>30-day plan pending.</p>',
-                    plan_60_html=st.session_state.ta_plan_60 if st.session_state.ta_plan_60 else '<p>60-day plan pending.</p>',
-                    plan_90_html=st.session_state.ta_plan_90 if st.session_state.ta_plan_90 else '<p>90-day plan pending.</p>',
+                    p30_html=p30_content,
+                    p60_html=p60_content,
+                    p90_html=p90_content,
                     tests_count=len(st.session_state.participant_tests),
                     tests_html=tests_html
                 )
@@ -839,21 +874,18 @@ if app_mode == "Clinician Dashboard":
                         "pin": patient_pin.strip(),
                         "assessment_date": str(assessment_date),
                         "tests_count": len(st.session_state.participant_tests),
-                        "price_30": price_30,
-                        "price_60": price_60,
-                        "price_90": price_90,
+                        "unlock_30": unlock_30_flag,
+                        "unlock_60": unlock_60_flag,
+                        "unlock_90": unlock_90_flag,
                     }
                     db.collection("longevity_reports").document(doc_id).set(record)
                     
                     html_record = {
                         "html_output": final_html_output,
-                        "plan_30": st.session_state.ta_plan_30,
-                        "plan_60": st.session_state.ta_plan_60,
-                        "plan_90": st.session_state.ta_plan_90,
                     }
                     db.collection("longevity_htmls").document(doc_id).set(html_record)
 
-                    st.success("✨ Expert Clinical Report & Tiered Plans published to Cloud!")
+                    st.success("✨ Expert Clinical Report & Unlock Access Tiers published to Cloud!")
                 else:
                     st.error("Database connection unavailable.")
             except Exception as e:
@@ -900,7 +932,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                                 <p><b>Total Assessments On File:</b> {client_data['tests_count']}</p>
                             </div>
                             """,
-                            unsafe_allow_html=True
+                            unsafe_allow_html=True,
                         )
 
                         st.download_button(
@@ -908,7 +940,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                             data=html_output,
                             file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
                             mime="text/html",
-                            use_container_width=True
+                            use_container_width=True,
                         )
 
                         st.subheader("🔎 Your Live Interactive Clinical Healthspan Dashboard")
