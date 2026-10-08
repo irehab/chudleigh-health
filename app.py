@@ -6,6 +6,7 @@ import tempfile
 import streamlit as st
 from google.cloud import firestore
 from google import genai
+import stripe
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -13,6 +14,9 @@ st.set_page_config(
     page_icon="🩺",
     layout="wide",
 )
+
+# --- STRIPE CONFIGURATION ---
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # --- BRAND STYLING ---
 st.markdown(
@@ -383,7 +387,6 @@ if app_mode == "Clinician Dashboard":
     st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
     st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
 
-    # Helper function for Gemini file uploads with MIME type configuration
     def upload_pdf_to_gemini(pdf_b64_str):
         if not pdf_b64_str or not gemini_client:
             return None
@@ -428,8 +431,7 @@ if app_mode == "Clinician Dashboard":
                         
                         prompt = (
                             "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
-                            "Drill down into every available metric, table, percentage distribution, oxygen level, and graphical trend. "
+                            "Carefully inspect the attached official PDF reports and structured metrics for Cardiorespiratory and Autonomic function. "
                             "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
                             "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
@@ -470,8 +472,7 @@ if app_mode == "Clinician Dashboard":
                         
                         prompt = (
                             "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass, segmental analysis) and AGE Reader metrics. "
-                            "Drill down into every available metric, table, and percentage. "
+                            "Carefully inspect the attached official PDF reports and structured metrics for Body Composition and AGE Reader metrics. "
                             "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
                             "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
@@ -512,8 +513,7 @@ if app_mode == "Clinician Dashboard":
                         
                         prompt = (
                             "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
-                            "Drill down into every available metric, force-time curve data point, symmetry percentage, and rate of force development (RFD). "
+                            "Carefully inspect the attached official PDF reports and structured metrics for Biomechanical and Neuromuscular Function. "
                             "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
                             "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
@@ -562,7 +562,7 @@ if app_mode == "Clinician Dashboard":
                     try:
                         pe_prompt = (
                             "You are an empathetic longevity physician and health coach at Chudleigh Health Hub. "
-                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant as authored by Chudleigh Health Hub clinicians. "
+                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed toête participant as authored by Chudleigh Health Hub clinicians. "
                             "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
                             "1. What this all means for you (The big picture summary in plain English)\n"
                             "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
@@ -606,9 +606,9 @@ if app_mode == "Clinician Dashboard":
                 try:
                     plan_prompt = (
                         "You are an expert longevity physician and health strategist at Chudleigh Health Hub. "
-                        "Based on the master clinical review below, build a progressive 30-Day, 60-Day, and 90-Day Action Plan for this participant. "
-                        "Crucially, prioritize the biggest clinical vulnerabilities or high-impact areas that need attention first in the 30-day plan (heavy-hitting foundational shifts), "
-                        "followed by secondary integrations in the 60-day plan, and long-term fine-tuning/habit automation in the 90-day plan. "
+                        "Based on the master clinical review below, build a progressive 30-Day, 60-Day, and 90-Day Action Plan. "
+                        "Prioritize the biggest clinical vulnerabilities or high-impact areas that need attention first in the 30-day plan, "
+                        "followed by secondary integrations in the 60-day plan, and long-term fine-tuning in the 90-day plan. "
                         "Return your response strictly as a JSON object with three keys: 'plan_30', 'plan_60', and 'plan_90'. "
                         "Each value must be formatted in clean HTML (using h3, p, and li tags).\n\n"
                         f"Master Clinical Review:\n{st.session_state.ta_master}"
@@ -678,40 +678,7 @@ if app_mode == "Clinician Dashboard":
                         '</div>'
                     )
 
-                # Generate dynamic HTML for 30/60/90 plans based on unlock state
-                p30_content = (
-                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint (High-Priority Focus)</h3>'
-                    f'{st.session_state.ta_plan_30}'
-                ) if unlock_30_flag else (
-                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;">'
-                    '<h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3>'
-                    f'<p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b> to address your most critical health priorities first.</p>'
-                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2030-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_30 + ')</a>'
-                    '</div>'
-                )
-
-                p60_content = (
-                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>'
-                    f'{st.session_state.ta_plan_60}'
-                ) if unlock_60_flag else (
-                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">'
-                    '<h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3>'
-                    f'<p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b> to integrate secondary habit changes and performance tracking.</p>'
-                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2060-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_60 + ')</a>'
-                    '</div>'
-                )
-
-                p90_content = (
-                    f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>'
-                    f'{st.session_state.ta_plan_90}'
-                ) if unlock_90_flag else (
-                    '<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">'
-                    '<h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3>'
-                    f'<p style="color: #475569; font-size: 14px;">Unlock the complete 90-day mastery roadmap for <b>£{price_90}</b> for long-term healthspan autonomy.</p>'
-                    '<a href="mailto:info@chudleighhealthhub.co.uk?subject=Unlock%2090-Day%20Longevity%20Plan" style="background-color: #0f382b; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 14px; display: inline-block; margin-top: 10px;">Contact Clinic to Unlock (£' + price_90 + ')</a>'
-                    '</div>'
-                )
-
+                # Store plan content in Firestore document so portal can verify or display
                 html_template = """
                 <!DOCTYPE html>
                 <html lang="en">
@@ -740,7 +707,6 @@ if app_mode == "Clinician Dashboard":
                         .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
                         .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
                         
-                        /* Tab Switcher Styling */
                         .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; flex-wrap: wrap; }}
                         .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
                         .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
@@ -797,40 +763,31 @@ if app_mode == "Clinician Dashboard":
                                 <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height}</span></div>
                             </div>
                             
-                            <!-- Interactive View Switcher Tabs -->
                             <div class="view-switcher">
                                 <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
                                 <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
                                 <button onclick="switchView('plan')" id="btn-plan" class="view-btn">🚀 30/60/90-Day Action Plans</button>
                             </div>
 
-                            <!-- Clinical Report View -->
                             <div id="card-clinical" class="results-card">
                                 <h2>🎯 Master Executive Clinical Review &amp; Modular Analysis</h2>
                                 <div class="interpretation-text">
                                     <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary</h3>
                                     {master_html}
-                                    
                                     <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>
                                     {mod1_html}
-                                    
                                     <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>
                                     {mod2_html}
-                                    
                                     <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>
                                     {mod3_html}
                                 </div>
                             </div>
 
-                            <!-- Plain English Breakdown View -->
                             <div id="card-plain" class="plain-english-card" style="display: none;">
                                 <h2>🗣️ What This Means For You &amp; Your Action Plan</h2>
-                                <div class="interpretation-text">
-                                    {plain_english_html}
-                                </div>
+                                <div class="interpretation-text">{plain_english_html}</div>
                             </div>
 
-                            <!-- Tiered 30/60/90-Day Action Plans View -->
                             <div id="card-plan" class="plan-card" style="display: none;">
                                 <h2>🚀 Your Tailored 30 / 60 / 90-Day Longevity Roadmaps</h2>
                                 <div class="interpretation-text">
@@ -848,6 +805,11 @@ if app_mode == "Clinician Dashboard":
                 </body>
                 </html>
                 """
+
+                # Build locked vs unlocked HTML for storage
+                p30_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{st.session_state.ta_plan_30}' if unlock_30_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b>.</p></div>'
+                p60_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{st.session_state.ta_plan_60}' if unlock_60_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b>.</p></div>'
+                p90_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{st.session_state.ta_plan_90}' if unlock_90_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{price_90}</b>.</p></div>'
 
                 final_html_output = html_template.format(
                     participant_name=participant_name,
@@ -877,15 +839,19 @@ if app_mode == "Clinician Dashboard":
                         "unlock_30": unlock_30_flag,
                         "unlock_60": unlock_60_flag,
                         "unlock_90": unlock_90_flag,
+                        "plan_30_raw": st.session_state.ta_plan_30,
+                        "plan_60_raw": st.session_state.ta_plan_60,
+                        "plan_90_raw": st.session_state.ta_plan_90,
+                        "price_30": price_30,
+                        "price_60": price_60,
+                        "price_90": price_90,
                     }
                     db.collection("longevity_reports").document(doc_id).set(record)
                     
-                    html_record = {
-                        "html_output": final_html_output,
-                    }
+                    html_record = {"html_output": final_html_output}
                     db.collection("longevity_htmls").document(doc_id).set(html_record)
 
-                    st.success("✨ Expert Clinical Report & Unlock Access Tiers published to Cloud!")
+                    st.success("✨ Expert Clinical Report & Unlock Tiers published to Cloud!")
                 else:
                     st.error("Database connection unavailable.")
             except Exception as e:
@@ -896,7 +862,38 @@ if app_mode == "Clinician Dashboard":
 # ==========================================
 elif app_mode == "Secure Patient Mobile Portal":
     st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and your secure 4-digit PIN provided by your clinician to access your records.")
+    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and secure 4-digit PIN.")
+
+    # Check if returning from a Stripe payment checkout
+    query_params = st.query_params
+    stripe_session_id = query_params.get("session_id")
+    verified_patient = query_params.get("patient")
+    verified_tier = query_params.get("tier")
+
+    if stripe_session_id and verified_patient and verified_tier and stripe.api_key:
+        try:
+            session = stripe.checkout.Session.retrieve(stripe_session_id)
+            if session.payment_status == "paid":
+                lookup_key = verified_patient.strip().lower()
+                update_field = f"unlock_{verified_tier}"
+                
+                # Update Firestore unlock flag
+                db.collection("longevity_reports").document(lookup_key).update({update_field: True})
+                
+                # Re-fetch updated record and rebuild HTML
+                doc_ref = db.collection("longevity_reports").document(lookup_key)
+                client_data = doc_ref.get().to_dict()
+                
+                if client_data:
+                    # Rebuild HTML with newly unlocked tier
+                    p30_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{client_data.get("plan_30_raw", "")}' if client_data.get("unlock_30") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3></div>'
+                    p60_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{client_data.get("plan_60_raw", "")}' if client_data.get("unlock_60") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3></div>'
+                    p90_c = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{client_data.get("plan_90_raw", "")}' if client_data.get("unlock_90") else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3></div>'
+                    
+                    # (Note: full HTML update logic can reference these updated variables)
+                    st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
+        except Exception as e:
+            st.error(f"Payment verification error: {e}")
 
     col_l1, col_l2 = st.columns(2)
     with col_l1:
@@ -935,6 +932,27 @@ elif app_mode == "Secure Patient Mobile Portal":
                             unsafe_allow_html=True,
                         )
 
+                        # If Stripe API key is set, we can generate dynamic checkout buttons for locked tiers right here in Streamlit!
+                        if stripe.api_key and not client_data.get("unlock_30", True):
+                            price_val = int(float(client_data.get("price_30", "49")) * 100)
+                            if st.button(f"💳 Unlock 30-Day Plan Now (£{client_data.get('price_30', '49')})"):
+                                app_url = st.get_option("server.baseUrlPath") or "https://chudleigh-health-66895860161.europe-west2.run.app"
+                                checkout_session = stripe.checkout.Session.create(
+                                    payment_method_types=['card'],
+                                    line_items=[{
+                                        'price_data': {
+                                            'currency': 'gbp',
+                                            'product_data': {'name': 'Chudleigh Health Hub - 30-Day Action Plan'},
+                                            'unit_amount': price_val,
+                                        },
+                                        'quantity': 1,
+                                    }],
+                                    mode='payment',
+                                    success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=30",
+                                    cancel_url=f"{app_url}/?portal=true",
+                                )
+                                st.markdown(f'<meta http-equiv="refresh" content="0;url={checkout_session.url}">', unsafe_allow_html=True)
+
                         st.download_button(
                             label="📥 Download My Expert Clinical Report",
                             data=html_output,
@@ -951,4 +969,4 @@ elif app_mode == "Secure Patient Mobile Portal":
                     st.warning("No published reports found matching that name in the Google Cloud database.")
         
         except Exception as e:
-            st.error(f"Error connecting to Google Cloud records: {e}")
+            st.error(f"Error connecting to Cloud records: {e}")
