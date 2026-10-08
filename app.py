@@ -75,7 +75,7 @@ st.markdown(
     """
     <div class="main-header">
         <h1>Chudleigh Health Hub</h1>
-        <p>Health Autonomy &amp; Clinical Longevity Portal</p>
+        <p>Health Autonomy &amp; Expert Clinical Longevity Portal</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -94,6 +94,12 @@ if "ta_master" not in st.session_state:
     st.session_state.ta_master = ""
 if "ta_pe" not in st.session_state:
     st.session_state.ta_pe = ""
+if "ta_plan_30" not in st.session_state:
+    st.session_state.ta_plan_30 = ""
+if "ta_plan_60" not in st.session_state:
+    st.session_state.ta_plan_60 = ""
+if "ta_plan_90" not in st.session_state:
+    st.session_state.ta_plan_90 = ""
 
 # --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
 @st.cache_resource
@@ -146,6 +152,9 @@ if app_mode == "Clinician Dashboard":
         st.session_state.ta_mod3 = ""
         st.session_state.ta_master = ""
         st.session_state.ta_pe = ""
+        st.session_state.ta_plan_30 = ""
+        st.session_state.ta_plan_60 = ""
+        st.session_state.ta_plan_90 = ""
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
@@ -188,7 +197,7 @@ if app_mode == "Clinician Dashboard":
     st.subheader(f"📊 Input Data: {assessment_type}")
 
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Attached for AI Analysis)", 
+        f"📎 Upload Official {assessment_type} PDF Report (Attached for Clinical Review)", 
         type=["pdf"], 
         key=f"pdf_{assessment_type}"
     )
@@ -371,8 +380,8 @@ if app_mode == "Clinician Dashboard":
     # ==========================================
     # MODULAR CLINICAL GENERATION ENGINES
     # ==========================================
-    st.subheader("🧩 Modular Clinical Generation Engine")
-    st.markdown("Generate comprehensive clinical analyses using official PDF reports and structured metrics.")
+    st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
+    st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
 
     # Helper function for Gemini file uploads with MIME type configuration
     def upload_pdf_to_gemini(pdf_b64_str):
@@ -401,13 +410,13 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### 🫀 Module 1: Cardiorespiratory & Autonomic")
         cardio_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["SpO2", "Spirometry", "ECG", "Autonomic / HRV"])]
         
-        if st.button("Generate Cardiorespiratory Analysis", use_container_width=True, key="btn_mod1"):
+        if st.button("Draft Cardiorespiratory Review", use_container_width=True, key="btn_mod1"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(cardio_tests) == 0:
                 st.info("No cardiorespiratory tests queued yet.")
             else:
-                with st.spinner("Reading official cardiorespiratory PDFs & extracting all metrics..."):
+                with st.spinner("Synthesizing cardiorespiratory clinical review..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
@@ -421,19 +430,20 @@ if app_mode == "Clinician Dashboard":
                             "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
                             "Carefully inspect the attached official PDF reports and structured metrics for Cardiorespiratory and Autonomic function (SpO2, O2 saturation stability, pulse dynamics, pulmonary function/spirometry, 12-lead ECG, HRV, and blood pressure). "
                             "Drill down into every available metric, table, percentage distribution, oxygen level, and graphical trend. "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
+                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod1 = res.text
-                            st.success("Cardiorespiratory analysis generated successfully!")
+                            st.success("Cardiorespiratory review drafted successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
 
-        st.text_area("Edit Cardiorespiratory Analysis (HTML)", height=180, key="ta_mod1")
+        st.text_area("Edit Cardiorespiratory Clinical Review (HTML)", height=180, key="ta_mod1")
 
     st.divider()
 
@@ -442,13 +452,13 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### ⚖️ Module 2: Body Composition & Metabolic Age")
         metabolic_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["Tanita", "AGE Reader"])]
         
-        if st.button("Generate Body Comp & Metabolic Analysis", use_container_width=True, key="btn_mod2"):
+        if st.button("Draft Body Comp & Metabolic Review", use_container_width=True, key="btn_mod2"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(metabolic_tests) == 0:
                 st.info("No body composition or metabolic tests queued yet.")
             else:
-                with st.spinner("Reading official Tanita/AGE PDFs & extracting all metrics..."):
+                with st.spinner("Synthesizing metabolic and body composition clinical review..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
@@ -462,19 +472,20 @@ if app_mode == "Clinician Dashboard":
                             "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
                             "Carefully inspect the attached official PDF reports and structured metrics for Body Composition (Tanita MC-780MA: visceral fat, phase angle, ECW/TBW ratio, muscle mass, segmental analysis) and AGE Reader metrics. "
                             "Drill down into every available metric, table, and percentage. "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
+                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod2 = res.text
-                            st.success("Metabolic analysis generated successfully!")
+                            st.success("Metabolic review drafted successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
 
-        st.text_area("Edit Body Comp & Metabolic Analysis (HTML)", height=180, key="ta_mod2")
+        st.text_area("Edit Body Comp & Metabolic Clinical Review (HTML)", height=180, key="ta_mod2")
 
     st.divider()
 
@@ -483,13 +494,13 @@ if app_mode == "Clinician Dashboard":
         st.markdown("### 🏋️ Module 3: Biomechanical & Neuromuscular Function")
         biomech_tests = [t for t in st.session_state.participant_tests if "VALD" in t['type'] or "Push-Up" in t['type']]
         
-        if st.button("Generate Biomechanical Analysis", use_container_width=True, key="btn_mod3"):
+        if st.button("Draft Biomechanical Review", use_container_width=True, key="btn_mod3"):
             if not participant_name:
                 st.warning("Please enter participant name.")
             elif len(biomech_tests) == 0:
                 st.info("No biomechanical or force plate tests queued yet.")
             else:
-                with st.spinner("Reading official VALD ForceDecks PDFs & extracting all metrics..."):
+                with st.spinner("Synthesizing biomechanical and neuromuscular review..."):
                     try:
                         payload = []
                         context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
@@ -503,35 +514,36 @@ if app_mode == "Clinician Dashboard":
                             "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
                             "Carefully inspect the attached official PDF reports and structured metrics for Biomechanical and Neuromuscular Function (VALD ForceDecks jump, squat, balance, sit-to-stand, and push-up assessments). "
                             "Drill down into every available metric, force-time curve data point, symmetry percentage, and rate of force development (RFD). "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown formatted in clean HTML (h3, p, li tags).\n\n"
+                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
+                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
                             f"Patient Data:\n{context_str}"
                         )
                         payload.append(prompt)
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
                         if res and res.text:
                             st.session_state.ta_mod3 = res.text
-                            st.success("Biomechanical analysis generated successfully!")
+                            st.success("Biomechanical review drafted successfully!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
 
-        st.text_area("Edit Biomechanical Analysis (HTML)", height=180, key="ta_mod3")
+        st.text_area("Edit Biomechanical Clinical Review (HTML)", height=180, key="ta_mod3")
 
     st.divider()
 
     # Module 4: Master Synthesis & Plain English Breakdown
     with st.container():
         st.subheader("🎯 Module 4: Master Synthesis & Plain English Translation")
-        st.markdown("Synthesize all modules into an overarching clinical summary and generate the patient-friendly Plain English breakdown.")
+        st.markdown("Synthesize all modules into an overarching clinician review and generate the patient-friendly Plain English coaching guide.")
 
         col_gen1, col_gen2 = st.columns(2)
         with col_gen1:
-            if st.button("✨ Generate Master Executive Synthesis", use_container_width=True, key="btn_master"):
-                with st.spinner("Synthesizing all clinical modules..."):
+            if st.button("✨ Draft Master Executive Synthesis", use_container_width=True, key="btn_master"):
+                with st.spinner("Synthesizing master executive review..."):
                     try:
                         master_prompt = (
                             "You are the lead longevity physician at Chudleigh Health Hub. "
-                            "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical synthesis formatted in clean HTML (h3, p, li tags):\n\n"
+                            "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical review authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags):\n\n"
                             f"Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
                             f"Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
                             f"Biomechanical Module:\n{st.session_state.ta_mod3}"
@@ -539,18 +551,18 @@ if app_mode == "Clinician Dashboard":
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=master_prompt)
                         if res and res.text:
                             st.session_state.ta_master = res.text
-                            st.success("Master synthesis generated!")
+                            st.success("Master executive synthesis drafted!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
 
         with col_gen2:
-            if st.button("🗣️ Generate Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
-                with st.spinner("Translating into plain English coaching guide..."):
+            if st.button("🗣️ Draft Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
+                with st.spinner("Drafting plain English coaching guide..."):
                     try:
                         pe_prompt = (
-                            "You are an empathetic longevity coach at Chudleigh Health Hub. "
-                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant. "
+                            "You are an empathetic longevity physician and health coach at Chudleigh Health Hub. "
+                            "Based on the clinical findings below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant as authored by Chudleigh Health Hub clinicians. "
                             "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
                             "1. What this all means for you (The big picture summary in plain English)\n"
                             "2. What is good and why this will help (Positive reinforcement of strong metrics)\n"
@@ -560,7 +572,7 @@ if app_mode == "Clinician Dashboard":
                         res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=pe_prompt)
                         if res and res.text:
                             st.session_state.ta_pe = res.text
-                            st.success("Plain English summary generated!")
+                            st.success("Plain English breakdown drafted!")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Generation error: {e}")
@@ -570,8 +582,65 @@ if app_mode == "Clinician Dashboard":
 
     st.divider()
 
+    # ==========================================
+    # STEP 1: 30 / 60 / 90-DAY TIERED ACTION PLAN BUILDER
+    # ==========================================
+    st.subheader("🚀 Step 1: Tiered 30 / 60 / 90-Day Action Plan Engine")
+    st.markdown("Configure tier pricing and generate a progressive roadmap that prioritizes the patient's biggest vulnerabilities first.")
+
+    col_p1, col_p2, col_p3 = st.columns(3)
+    with col_p1:
+        price_30 = st.text_input("30-Day Tier Price (£)", value="49", key="p_30")
+    with col_p2:
+        price_60 = st.text_input("60-Day Tier Price (£)", value="89", key="p_60")
+    with col_p3:
+        price_90 = st.text_input("90-Day Tier Price (£)", value="129", key="p_90")
+
+    if st.button("✨ Draft Prioritized 30/60/90-Day Tiered Plans", use_container_width=True, key="btn_tier_plans"):
+        if not participant_name:
+            st.warning("Please enter participant name.")
+        elif not st.session_state.ta_master:
+            st.warning("Please generate the Master Executive Synthesis first.")
+        else:
+            with st.spinner("Building prioritized tiered action plans..."):
+                try:
+                    plan_prompt = (
+                        "You are an expert longevity physician and health strategist at Chudleigh Health Hub. "
+                        "Based on the master clinical review below, build a progressive 30-Day, 60-Day, and 90-Day Action Plan for this participant. "
+                        "Crucially, prioritize the biggest clinical vulnerabilities or high-impact areas that need attention first in the 30-day plan (heavy-hitting foundational shifts), "
+                        "followed by secondary integrations in the 60-day plan, and long-term fine-tuning/habit automation in the 90-day plan. "
+                        "Return your response strictly as a JSON object with three keys: 'plan_30', 'plan_60', and 'plan_90'. "
+                        "Each value must be formatted in clean HTML (using h3, p, and li tags).\n\n"
+                        f"Master Clinical Review:\n{st.session_state.ta_master}"
+                    )
+                    res = gemini_client.models.generate_content(
+                        model="gemini-3.8-flash", 
+                        contents=plan_prompt,
+                        config={"response_mime_type": "application/json"}
+                    )
+                    if res and res.text:
+                        plan_data = json.loads(res.text)
+                        st.session_state.ta_plan_30 = plan_data.get("plan_30", "")
+                        st.session_state.ta_plan_60 = plan_data.get("plan_60", "")
+                        st.session_state.ta_plan_90 = plan_data.get("plan_90", "")
+                        st.success("Tiered 30/60/90-day action plans drafted successfully!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error generating tiered plans: {e}")
+
+    st.markdown("#### 30-Day Foundation Sprint (High-Priority Fixes)")
+    st.text_area("Edit 30-Day Plan (HTML)", height=180, key="ta_plan_30")
+
+    st.markdown("#### 60-Day Progression Plan (Secondary Integration)")
+    st.text_area("Edit 60-Day Plan (HTML)", height=180, key="ta_plan_60")
+
+    st.markdown("#### 90-Day Mastery Plan (Long-Term Optimization)")
+    st.text_area("Edit 90-Day Plan (HTML)", height=180, key="ta_plan_90")
+
+    st.divider()
+
     # --- PUBLISH & SYNC TO GOOGLE CLOUD ---
-    if st.button("💾 Publish & Sync Modular Master Report to Google Cloud", type="primary", use_container_width=True):
+    if st.button("💾 Publish & Sync Expert Clinical Report & Tiered Plans to Cloud", type="primary", use_container_width=True):
         if not participant_name:
             st.warning("Please ensure participant name is entered.")
         elif not patient_pin or len(patient_pin) < 4:
@@ -581,21 +650,18 @@ if app_mode == "Clinician Dashboard":
                 tests_html = ""
                 for idx, t in enumerate(st.session_state.participant_tests):
                     data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-                    
-                    # Note: We omit heavy base64 strings from Firestore HTML storage to comply with the 1MB document limit,
-                    # while keeping the full test results, extracted metrics, and clinical evaluations intact.
                     filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
                     pdf_note_box = ""
                     if filename:
                         pdf_note_box = (
                             '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
-                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Report Attached:</b> {filename} (Reviewed and synthesized by clinician)</p>'
+                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {filename} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
                             '</div>'
                         )
 
                     test_type = t['type']
                     test_num = idx + 1
-                    fallback_li = "<li>Metrics extracted directly via clinical PDF inspection.</li>"
+                    fallback_li = "<li>Metrics extracted directly via clinical inspection.</li>"
                     list_content = data_str if data_str else fallback_li
 
                     tests_html += (
@@ -612,7 +678,7 @@ if app_mode == "Clinician Dashboard":
                 <head>
                     <meta charset="utf-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Chudleigh Health Hub - Longevity Master Report</title>
+                    <title>Chudleigh Health Hub - Expert Clinical Longevity Report</title>
                     <style>
                         :root {{
                             --primary-color: #0f382b;
@@ -635,7 +701,7 @@ if app_mode == "Clinician Dashboard":
                         .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
                         
                         /* Tab Switcher Styling */
-                        .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; }}
+                        .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; flex-wrap: wrap; }}
                         .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
                         .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
 
@@ -643,6 +709,8 @@ if app_mode == "Clinician Dashboard":
                         .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
                         .plain-english-card {{ background: linear-gradient(to bottom right, #f8fafc, #f1f5f9); border: 2px solid var(--secondary-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
                         .plain-english-card h2 {{ margin-top: 0; color: var(--primary-color); font-size: 20px; }}
+                        .plan-card {{ background: linear-gradient(to bottom right, #fffbeb, #fef3c7); border: 2px solid #f59e0b; border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+                        .plan-card h2 {{ margin-top: 0; color: #b45309; font-size: 20px; }}
                         .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
                         .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
                     </style>
@@ -650,19 +718,27 @@ if app_mode == "Clinician Dashboard":
                         function switchView(viewName) {{
                             const clinicalCard = document.getElementById('card-clinical');
                             const plainCard = document.getElementById('card-plain');
+                            const planCard = document.getElementById('card-plan');
                             const btnClinical = document.getElementById('btn-clinical');
                             const btnPlain = document.getElementById('btn-plain');
+                            const btnPlan = document.getElementById('btn-plan');
+
+                            clinicalCard.style.display = 'none';
+                            plainCard.style.display = 'none';
+                            planCard.style.display = 'none';
+                            btnClinical.classList.remove('active');
+                            btnPlain.classList.remove('active');
+                            btnPlan.classList.remove('active');
 
                             if (viewName === 'clinical') {{
                                 clinicalCard.style.display = 'block';
-                                plainCard.style.display = 'none';
                                 btnClinical.classList.add('active');
-                                btnPlain.classList.remove('active');
-                            }} else {{
-                                clinicalCard.style.display = 'none';
+                            }} else if (viewName === 'plain') {{
                                 plainCard.style.display = 'block';
                                 btnPlain.classList.add('active');
-                                btnClinical.classList.remove('active');
+                            }} else if (viewName === 'plan') {{
+                                planCard.style.display = 'block';
+                                btnPlan.classList.add('active');
                             }}
                         }}
                     </script>
@@ -671,7 +747,7 @@ if app_mode == "Clinician Dashboard":
                     <div class="report-container">
                         <div class="header">
                             <h1>Chudleigh Health Hub</h1>
-                            <p>Health Autonomy &bull; Clinical Longevity Report</p>
+                            <p>Expert Clinical Review &bull; Longevity Master Report</p>
                         </div>
                         <div class="content">
                             <div class="patient-meta">
@@ -685,11 +761,12 @@ if app_mode == "Clinician Dashboard":
                             <div class="view-switcher">
                                 <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
                                 <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
+                                <button onclick="switchView('plan')" id="btn-plan" class="view-btn">🚀 30/60/90-Day Action Plans</button>
                             </div>
 
                             <!-- Clinical Report View -->
                             <div id="card-clinical" class="results-card">
-                                <h2>🎯 Master Executive Synthesis &amp; Modular Analysis</h2>
+                                <h2>🎯 Master Executive Clinical Review &amp; Modular Analysis</h2>
                                 <div class="interpretation-text">
                                     <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary</h3>
                                     {master_html}
@@ -713,10 +790,25 @@ if app_mode == "Clinician Dashboard":
                                 </div>
                             </div>
 
+                            <!-- Tiered 30/60/90-Day Action Plans View -->
+                            <div id="card-plan" class="plan-card" style="display: none;">
+                                <h2>🚀 Your Tailored 30 / 60 / 90-Day Longevity Roadmaps</h2>
+                                <div class="interpretation-text">
+                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint (High-Priority Focus)</h3>
+                                    {plan_30_html}
+
+                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>
+                                    {plan_60_html}
+
+                                    <h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>
+                                    {plan_90_html}
+                                </div>
+                            </div>
+
                             <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
                             {tests_html}
                         </div>
-                        <div class="footer">&copy; 2026 Chudleigh Health Hub. Health Autonomy Longevity Platform. All rights reserved.</div>
+                        <div class="footer">&copy; 2026 Chudleigh Health Hub. Expert Clinical Longevity Platform. All rights reserved.</div>
                     </div>
                 </body>
                 </html>
@@ -732,6 +824,9 @@ if app_mode == "Clinician Dashboard":
                     mod2_html=st.session_state.ta_mod2 if st.session_state.ta_mod2 else '<p>Metabolic module pending.</p>',
                     mod3_html=st.session_state.ta_mod3 if st.session_state.ta_mod3 else '<p>Biomechanical module pending.</p>',
                     plain_english_html=st.session_state.ta_pe if st.session_state.ta_pe else '<p>Plain English summary pending.</p>',
+                    plan_30_html=st.session_state.ta_plan_30 if st.session_state.ta_plan_30 else '<p>30-day plan pending.</p>',
+                    plan_60_html=st.session_state.ta_plan_60 if st.session_state.ta_plan_60 else '<p>60-day plan pending.</p>',
+                    plan_90_html=st.session_state.ta_plan_90 if st.session_state.ta_plan_90 else '<p>90-day plan pending.</p>',
                     tests_count=len(st.session_state.participant_tests),
                     tests_html=tests_html
                 )
@@ -744,15 +839,21 @@ if app_mode == "Clinician Dashboard":
                         "pin": patient_pin.strip(),
                         "assessment_date": str(assessment_date),
                         "tests_count": len(st.session_state.participant_tests),
+                        "price_30": price_30,
+                        "price_60": price_60,
+                        "price_90": price_90,
                     }
                     db.collection("longevity_reports").document(doc_id).set(record)
                     
                     html_record = {
-                        "html_output": final_html_output
+                        "html_output": final_html_output,
+                        "plan_30": st.session_state.ta_plan_30,
+                        "plan_60": st.session_state.ta_plan_60,
+                        "plan_90": st.session_state.ta_plan_90,
                     }
                     db.collection("longevity_htmls").document(doc_id).set(html_record)
 
-                    st.success("✨ Modular Master Report published and synced to Google Cloud Firestore!")
+                    st.success("✨ Expert Clinical Report & Tiered Plans published to Cloud!")
                 else:
                     st.error("Database connection unavailable.")
             except Exception as e:
@@ -803,14 +904,14 @@ elif app_mode == "Secure Patient Mobile Portal":
                         )
 
                         st.download_button(
-                            label="📥 Download My Master AI Report",
+                            label="📥 Download My Expert Clinical Report",
                             data=html_output,
                             file_name=f"{client_data['name'].replace(' ', '_')}_Healthspan_Report.html",
                             mime="text/html",
                             use_container_width=True
                         )
 
-                        st.subheader("🔎 Your Live Interactive AI Healthspan Dashboard")
+                        st.subheader("🔎 Your Live Interactive Clinical Healthspan Dashboard")
                         st.components.v1.html(html_output, height=800, scrolling=True)
                     else:
                         st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
