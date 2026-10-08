@@ -1,12 +1,78 @@
 import os
-import datetime
+import io
+import re
 import json
-import base64
-import tempfile
-import streamlit as st
-from google.cloud import firestore
-from google import genai
+import html
+import hmac
+import math
+import time
+import secrets
+import hashlib
+import logging
+import datetime
+from decimal import Decimal, InvalidOperation
+
+import nh3
 import stripe
+import streamlit as st
+import streamlit.components.v1 as components
+from google import genai
+from google.genai import errors as genai_errors
+from google.cloud import firestore
+
+# --- LOGGING (stdout -> Cloud Logging). Never log patient names, PINs or clinical content. ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("chudleigh")
+
+# --- SERVER CONFIGURATION (set via environment / Secret Manager) ---
+APP_URL = os.environ.get("APP_URL", "https://chudleigh-health-66895860161.europe-west2.run.app").rstrip("/")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE", "default")
+CLINICIAN_PASSWORD = os.environ.get("CLINICIAN_PASSWORD", "")
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+# --- SECURITY SETTINGS ---
+MIN_NEW_PIN_LENGTH = 6          # new / reset PINs
+LEGACY_MIN_PIN_LENGTH = 4       # existing 4-digit PINs can still sign in
+MAX_PIN_LENGTH = 8
+PIN_HASH_ITERATIONS = 310_000
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_SECONDS = 15 * 60
+PATIENT_SESSION_SECONDS = 30 * 60
+CLINICIAN_SESSION_SECONDS = 60 * 60
+MAX_PDF_BYTES = 20 * 1024 * 1024
+MAX_FIRESTORE_DOC_BYTES = 950_000
+
+REPORTS = "longevity_reports"
+TIERS = ("30", "60", "90")
+TIER_INFO = {
+    "30": {
+        "title": "30-Day Foundation Sprint",
+        "editor_heading": "#### 30-Day Foundation Sprint (High-Priority Fixes)",
+        "unlock_text": "Unlock this foundational sprint for",
+        "product": "Chudleigh Health Hub - 30-Day Action Plan",
+        "default_price": "49",
+        "default_unlocked": True,
+    },
+    "60": {
+        "title": "60-Day Progression Plan",
+        "editor_heading": "#### 60-Day Progression Plan (Secondary Integration)",
+        "unlock_text": "Unlock this progression tier for",
+        "product": "Chudleigh Health Hub - 60-Day Progression Plan",
+        "default_price": "89",
+        "default_unlocked": False,
+    },
+    "90": {
+        "title": "90-Day Mastery Plan",
+        "editor_heading": "#### 90-Day Mastery Plan (Long-Term Optimization)",
+        "unlock_text": "Unlock the complete 90-day roadmap for",
+        "product": "Chudleigh Health Hub - 90-Day Mastery Plan",
+        "default_price": "129",
+        "default_unlocked": False,
+    },
+}
+PLAN_START = "<!-- PLAN_SECTION_START -->"
+PLAN_END = "<!-- PLAN_SECTION_END -->"
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -14,9 +80,6 @@ st.set_page_config(
     page_icon="🩺",
     layout="wide",
 )
-
-# --- STRIPE CONFIGURATION ---
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # --- BRAND STYLING ---
 st.markdown(
@@ -94,49 +157,594 @@ st.markdown(
 )
 
 # --- SESSION STATE INITIALIZATION ---
+TEXT_KEYS = ["ta_mod1", "ta_mod2", "ta_mod3", "ta_master", "ta_pe", "ta_plan_30", "ta_plan_60", "ta_plan_90"]
 if "participant_tests" not in st.session_state:
     st.session_state.participant_tests = []
-if "ta_mod1" not in st.session_state:
-    st.session_state.ta_mod1 = ""
-if "ta_mod2" not in st.session_state:
-    st.session_state.ta_mod2 = ""
-if "ta_mod3" not in st.session_state:
-    st.session_state.ta_mod3 = ""
-if "ta_master" not in st.session_state:
-    st.session_state.ta_master = ""
-if "ta_pe" not in st.session_state:
-    st.session_state.ta_pe = ""
-if "ta_plan_30" not in st.session_state:
-    st.session_state.ta_plan_30 = ""
-if "ta_plan_60" not in st.session_state:
-    st.session_state.ta_plan_60 = ""
-if "ta_plan_90" not in st.session_state:
-    st.session_state.ta_plan_90 = ""
+for _k in TEXT_KEYS:
+    if _k not in st.session_state:
+        st.session_state[_k] = ""
+
 
 # --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
 @st.cache_resource
 def init_firestore():
     try:
-        return firestore.Client(database="default")
+        return firestore.Client(database=FIRESTORE_DATABASE)
     except Exception:
+        log.exception("Firestore initialisation failed")
         return None
+
 
 @st.cache_resource
 def init_gemini():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
+        log.warning("GEMINI_API_KEY not set; AI drafting disabled")
         return None
     try:
         return genai.Client(api_key=api_key)
     except Exception:
+        log.exception("Gemini initialisation failed")
         return None
+
 
 db = init_firestore()
 gemini_client = init_gemini()
 
+
+# ==========================================
+# HELPERS
+# ==========================================
+def esc(value) -> str:
+    """Escape any user/DB-supplied value before placing it in HTML."""
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+_FENCE_RE = re.compile(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$")
+
+
+def strip_code_fences(text: str) -> str:
+    return _FENCE_RE.sub("", text or "").strip()
+
+
+def clean_html(fragment: str) -> str:
+    """Sanitise AI-generated or clinician-edited HTML (removes scripts, event handlers, etc.)."""
+    return nh3.clean(strip_code_fences(fragment))
+
+
+def fail(user_msg: str, context: str):
+    """Call from inside an except block: logs the traceback, shows a generic message with a reference."""
+    ref = secrets.token_hex(4)
+    log.exception("%s [ref=%s]", context, ref)
+    st.error(f"{user_msg} (reference: {ref})")
+
+
+def patient_key(name: str):
+    """Firestore document ID for a participant. Returns None for names that can't be used safely."""
+    key = (name or "").strip().lower()
+    if not key or len(key) > 200 or "/" in key or key in (".", ".."):
+        return None
+    if key.startswith("__") and key.endswith("__"):
+        return None
+    return key
+
+
+def parse_price(value):
+    try:
+        d = Decimal(str(value).strip().lstrip("£").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    if not d.is_finite() or d < Decimal("0.50") or d > Decimal("10000"):
+        return None
+    return d.quantize(Decimal("0.01"))
+
+
+def fmt_price(d) -> str:
+    if d is None:
+        return "—"
+    return str(int(d)) if d == d.to_integral_value() else f"{d:.2f}"
+
+
+def strip_pdf_payloads(tests):
+    """Remove raw PDF data so records stay under Firestore's 1 MiB limit and out of prompts."""
+    return [{k: v for k, v in t.items() if k not in ("pdf_b64", "pdf_bytes")} for t in (tests or [])]
+
+
+# --- PIN hashing (PBKDF2-SHA256, per-user salt) ---
+def hash_pin(pin: str, salt: bytes = None, iterations: int = PIN_HASH_ITERATIONS):
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, iterations)
+    return salt.hex(), digest.hex()
+
+
+def pin_fields(pin: str) -> dict:
+    salt, digest = hash_pin(pin)
+    return {
+        "pin_hash": digest,
+        "pin_salt": salt,
+        "pin_iterations": PIN_HASH_ITERATIONS,
+        "pin": firestore.DELETE_FIELD,  # remove any legacy plaintext PIN
+    }
+
+
+def verify_pin(pin: str, record) -> bool:
+    if not record:
+        hash_pin(pin)  # equalise timing so unknown names can't be detected
+        return False
+    if record.get("pin_hash") and record.get("pin_salt"):
+        _, digest = hash_pin(pin, bytes.fromhex(record["pin_salt"]), int(record.get("pin_iterations", PIN_HASH_ITERATIONS)))
+        return hmac.compare_digest(digest, record["pin_hash"])
+    legacy = record.get("pin")
+    if legacy is not None:
+        hash_pin(pin)
+        return hmac.compare_digest(str(legacy).strip().encode(), pin.encode())
+    return False
+
+
+# --- Brute-force protection (shared across all app instances via Firestore) ---
+def _attempt_ref(scope: str, identifier: str):
+    doc_id = hashlib.sha256(f"{scope}:{identifier}".encode("utf-8")).hexdigest()
+    return db.collection("auth_attempts").document(doc_id)
+
+
+def lockout_remaining(scope: str, identifier: str) -> int:
+    if not db:
+        return 0
+    try:
+        snap = _attempt_ref(scope, identifier).get()
+        if snap.exists:
+            return max(0, int(snap.to_dict().get("locked_until", 0) - time.time()))
+    except Exception:
+        log.exception("Lockout check failed")
+    return 0
+
+
+def record_failed_attempt(scope: str, identifier: str):
+    time.sleep(1)  # slow down automated guessing
+    if not db:
+        return
+    try:
+        ref = _attempt_ref(scope, identifier)
+        snap = ref.get()
+        now = time.time()
+        data = snap.to_dict() if snap.exists else {}
+        if now - data.get("window_start", 0) > LOCKOUT_SECONDS:
+            data = {"window_start": now, "count": 0}
+        data["count"] = data.get("count", 0) + 1
+        if data["count"] >= MAX_LOGIN_ATTEMPTS:
+            data = {"window_start": now, "count": 0, "locked_until": now + LOCKOUT_SECONDS}
+        ref.set(data)
+    except Exception:
+        log.exception("Failed to record login attempt")
+
+
+def clear_attempts(scope: str, identifier: str):
+    if not db:
+        return
+    try:
+        _attempt_ref(scope, identifier).delete()
+    except Exception:
+        log.exception("Failed to clear login attempts")
+
+
+# --- Gemini ---
+def generate(contents, json_mode: bool = False) -> str:
+    if not gemini_client:
+        raise RuntimeError("Gemini client not configured")
+    config = {"response_mime_type": "application/json"} if json_mode else None
+    for attempt in range(3):
+        try:
+            res = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config)
+            text = (res.text or "") if res else ""
+            if not text.strip():
+                raise RuntimeError("Empty response from model")
+            return text
+        except genai_errors.APIError as e:
+            if getattr(e, "code", None) in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(2 * (2 ** attempt))
+                continue
+            raise
+    raise RuntimeError("Model unavailable")
+
+
+def upload_pdfs(tests):
+    refs = []
+    for t in tests:
+        data = t.get("pdf_bytes")
+        if not data:
+            continue
+        try:
+            refs.append(gemini_client.files.upload(file=io.BytesIO(data), config={"mime_type": "application/pdf"}))
+        except Exception:
+            log.exception("PDF upload to Gemini failed")
+            st.warning(f"Could not attach the PDF for {t['type']}; drafting from the entered metrics only.")
+    return refs
+
+
+def delete_uploaded(refs):
+    for f in refs:
+        try:
+            gemini_client.files.delete(name=f.name)
+        except Exception:
+            log.warning("Could not delete uploaded Gemini file")
+
+
+def gemini_ready() -> bool:
+    if not gemini_client:
+        st.error("AI drafting is unavailable: GEMINI_API_KEY is not configured on the server.")
+        return False
+    return True
+
+
+# --- Report building ---
+def build_plan_section(raw_plans: dict, unlocked: dict, price_labels: dict) -> str:
+    parts = []
+    for i, tier in enumerate(TIERS):
+        info = TIER_INFO[tier]
+        if unlocked.get(tier):
+            margin = "" if i == 0 else " margin-top: 30px;"
+            parts.append(
+                f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;{margin}">{info["title"]}</h3>'
+                f'{clean_html(raw_plans.get(tier, ""))}'
+            )
+        else:
+            margin = "" if i == 0 else " margin-top: 20px;"
+            parts.append(
+                f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;{margin}">'
+                f'<h3 style="color: #b45309; margin-top: 0;">🔒 {info["title"]} (Locked)</h3>'
+                f'<p style="color: #475569; font-size: 14px;">{info["unlock_text"]} <b>£{esc(price_labels.get(tier, ""))}</b> '
+                'in your Chudleigh Health Hub patient portal.</p></div>'
+            )
+    return f'{PLAN_START}<div class="interpretation-text">{"".join(parts)}</div>{PLAN_END}'
+
+
+# --- Stripe ---
+_CHECKOUT_ID_RE = re.compile(r"cs_[A-Za-z0-9_]{10,255}")
+
+
+def create_checkout_url(key: str, tier: str, price: Decimal) -> str:
+    session = stripe.checkout.Session.create(
+        line_items=[{
+            "price_data": {
+                "currency": "gbp",
+                "product_data": {"name": TIER_INFO[tier]["product"]},
+                "unit_amount": int(price * 100),
+            },
+            "quantity": 1,
+        }],
+        mode="payment",
+        client_reference_id=key,
+        # Patient and tier are bound server-side; the return URL carries only the session ID.
+        metadata={"patient_key": key, "tier": tier},
+        success_url=f"{APP_URL}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{APP_URL}/?portal=true",
+    )
+    return session.url
+
+
+def handle_stripe_return(session_id: str):
+    if not _CHECKOUT_ID_RE.fullmatch(session_id or ""):
+        st.error("Invalid payment reference.")
+        return
+    if not stripe.api_key or not db:
+        st.error("Payment verification is temporarily unavailable. Please contact Chudleigh Health Hub.")
+        return
+    try:
+        cs = stripe.checkout.Session.retrieve(session_id)
+    except Exception:
+        fail("We couldn't verify your payment right now. Please contact Chudleigh Health Hub.", "Stripe session retrieve failed")
+        return
+
+    if cs.payment_status != "paid":
+        st.warning("Your payment hasn't completed yet. If you were charged, please contact Chudleigh Health Hub.")
+        return
+
+    metadata = cs.metadata or {}
+    key = metadata.get("patient_key")
+    tier = metadata.get("tier")
+    if tier not in TIERS or not key or patient_key(key) != key:
+        log.warning("Paid Stripe session without valid metadata: %s", session_id)
+        st.error(f"We couldn't match this payment to a plan. Please contact Chudleigh Health Hub quoting: {session_id[-12:]}")
+        return
+
+    try:
+        profile_ref = db.collection(REPORTS).document(key)
+        if not profile_ref.get().exists:
+            log.warning("Paid Stripe session for missing profile: %s", session_id)
+            st.error(f"We couldn't find your record. Please contact Chudleigh Health Hub quoting: {session_id[-12:]}")
+            return
+        profile_ref.update({f"unlock_{tier}": True})
+        db.collection("payments").document(session_id).set({
+            "patient_key": key,
+            "tier": tier,
+            "amount_total": cs.amount_total,
+            "currency": cs.currency,
+            "processed_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+    except Exception:
+        fail("Your payment was received but we couldn't unlock your plan automatically. Please contact Chudleigh Health Hub.",
+             "Unlock after payment failed")
+        return
+
+    st.success(f"🎉 Payment verified! Your {tier}-Day Action Plan has been unlocked. Sign in below to view it.")
+
+
+# ==========================================
+# ASSESSMENT INPUT DEFINITIONS
+# Each assessment is a list of columns; each field is (label, default, payload key).
+# ==========================================
+ASSESSMENTS = {
+    "SpO2 / Pulse Oximetry (ViHealth)": {
+        "columns": [
+            [("Highest SpO2 (%)", "98", "Highest SpO2"), ("Average SpO2 (%)", "96", "Average SpO2")],
+            [("Lowest SpO2 (%)", "94", "Lowest SpO2"), ("Highest Pulse Rate (BPM)", "59", "Highest Pulse Rate")],
+            [("Average Pulse Rate (BPM)", "54", "Average Pulse Rate"), ("Lowest Pulse Rate (BPM)", "49", "Lowest Pulse Rate")],
+        ],
+        "full_width": [("Duration / Time Window", "00:04:48", "Duration")],
+    },
+    "Tanita Body Composition (MC-780MA)": {
+        "columns": [
+            [("Weight (kg)", "78.0", "Weight"), ("Fat Percentage (%)", "18.5", "Fat %"), ("Fat-Free Mass (kg)", "63.5", "FFM")],
+            [("Muscle Mass (kg)", "60.2", "Muscle Mass"), ("Total Body Water (kg / %)", "48.2 kg (61.8%)", "TBW"), ("ECW / TBW Ratio", "0.378", "ECW/TBW")],
+            [("Visceral Fat Rating", "6", "Visceral Fat"), ("Metabolic Age", "42", "Metabolic Age"), ("Phase Angle", "6.8°", "Phase Angle")],
+        ],
+    },
+    "Push-Up Assessment (VALD ForceDecks)": {
+        "columns": [
+            [("Peak Push Force (N)", "520 N", "Peak Push Force"), ("Concentric Impulse (Ns)", "310 Ns", "Concentric Impulse")],
+            [("Left/Right Symmetry (%)", "96.5%", "L/R Symmetry"), ("Peak Power Output (W)", "680 W", "Peak Power")],
+        ],
+    },
+    "Spirometry (Pulmonary Function)": {
+        "columns": [
+            [("FVC (L / % Pred)", "4.85 L (104%)", "FVC"), ("FEV1 (L / % Pred)", "3.92 L (102%)", "FEV1")],
+            [("FEV1 / FVC Ratio (%)", "80.8%", "FEV1/FVC Ratio"), ("PEF (L/m / % Pred)", "9.4 L/s (98%)", "PEF")],
+            [("FEF 25-75% (L/s)", "4.21 L/s", "FEF 25-75"), ("FEF 75% (L/s)", "1.85 L/s", "FEF 75")],
+        ],
+    },
+    "AGE Reader (Advanced Glycation End-Products)": {
+        "columns": [
+            [("BodyAge", "44 yrs", "BodyAge")],
+            [("AGE Level Score", "1.9 AU", "AGE Level Score")],
+            [("Variance vs. Average", "-8%", "Variance")],
+        ],
+    },
+    "12-Lead ECG (Electrocardiogram)": {
+        "columns": [
+            [("Heart Rate (BPM)", "58 BPM", "Heart Rate"), ("PR Interval (ms)", "162 ms", "PR Interval")],
+            [("QRS Duration (ms)", "92 ms", "QRS Duration"), ("QTc Interval (ms)", "410 ms", "QTc Interval")],
+            [("Rhythm & Axis", "Normal Sinus Rhythm, Normal Axis", "Rhythm & Axis")],
+        ],
+    },
+    "Autonomic / HRV (3-Min Rest, BP, Respiration)": {
+        "columns": [
+            [("RMSSD (ms)", "52 ms", "RMSSD"), ("SDNN (ms)", "64 ms", "SDNN")],
+            [("Respiration Rate (breaths/min)", "12 breaths/min", "Respiration Rate"), ("Blood Pressure (mmHg)", "118/76 mmHg", "Blood Pressure")],
+        ],
+    },
+    "VALD ForceDecks - Sit-to-Stand": {
+        "columns": [
+            [("Peak Concentric Force (N)", "780 N", "Peak Concentric Force"), ("Transition Time (s)", "0.62 s", "Transition Time")],
+            [("Concentric RFD (N/s)", "1450 N/s", "Concentric RFD"), ("Limb Asymmetry (%)", "4.2%", "Limb Asymmetry")],
+        ],
+    },
+    "VALD ForceDecks - Multi-Rep Squat": {
+        "columns": [
+            [("Peak Force (N)", "849 N", "Peak Force"), ("Concentric Impulse (Ns)", "412 Ns", "Concentric Impulse")],
+            [("Eccentric Impulse (Ns)", "405 Ns", "Eccentric Impulse"), ("Left/Right Asymmetry (%)", "13.0%", "L/R Asymmetry")],
+        ],
+    },
+    "VALD ForceDecks - Single Leg Stance / Balance": {
+        "columns": [
+            [("Left Sway Velocity (mm/s)", "14.2 mm/s", "Left Sway Velocity"), ("Right Sway Velocity (mm/s)", "12.8 mm/s", "Right Sway Velocity")],
+            [("Left Ellipse Area (mm²)", "185 mm²", "Left Ellipse Area"), ("Right Ellipse Area (mm²)", "160 mm²", "Right Ellipse Area")],
+        ],
+    },
+    "VALD ForceDecks - Countermovement Jump (CMJ)": {
+        "columns": [
+            [("Jump Height (cm)", "34.5 cm", "Jump Height"), ("Peak Power / Mass (W/kg)", "48.2 W/kg", "Peak Power/Mass")],
+            [("Modified RSI", "0.58", "Modified RSI"), ("Peak Force Asymmetry (%)", "3.8%", "Peak Force Asymmetry")],
+            [("Eccentric Peak Force (N)", "1420 N", "Eccentric Peak Force"), ("Eccentric RFD (N/s)", "4200 N/s", "Eccentric RFD")],
+        ],
+    },
+    "VALD ForceDecks - Quiet Stand (Balance)": {
+        "columns": [
+            [("Total Path Length (mm)", "310 mm", "Total Path Length"), ("Mean Velocity (mm/s)", "5.2 mm/s", "Mean Velocity")],
+            [("AP Sway Range (mm)", "24.5 mm", "AP Sway Range"), ("Weight Distribution Asymmetry (%)", "2.1%", "Weight Distribution Asymmetry")],
+        ],
+    },
+}
+
+MODULES = [
+    {
+        "state_key": "ta_mod1",
+        "heading": "### 🫀 Module 1: Cardiorespiratory & Autonomic",
+        "match": lambda t: any(x in t for x in ["SpO2", "Spirometry", "ECG", "Autonomic / HRV"]),
+        "button": "Draft Cardiorespiratory Review",
+        "button_key": "btn_mod1",
+        "empty_msg": "No cardiorespiratory tests queued yet.",
+        "spinner": "Synthesizing cardiorespiratory clinical review...",
+        "role": "an expert clinical cardiologist and longevity physician",
+        "domain": "Cardiorespiratory and Autonomic function",
+        "success": "Cardiorespiratory review drafted successfully!",
+        "edit_label": "Edit Cardiorespiratory Clinical Review (HTML)",
+    },
+    {
+        "state_key": "ta_mod2",
+        "heading": "### ⚖️ Module 2: Body Composition & Metabolic Age",
+        "match": lambda t: any(x in t for x in ["Tanita", "AGE Reader"]),
+        "button": "Draft Body Comp & Metabolic Review",
+        "button_key": "btn_mod2",
+        "empty_msg": "No body composition or metabolic tests queued yet.",
+        "spinner": "Synthesizing metabolic and body composition clinical review...",
+        "role": "an expert clinical metabolic specialist and longevity physician",
+        "domain": "Body Composition and AGE Reader metrics",
+        "success": "Metabolic review drafted successfully!",
+        "edit_label": "Edit Body Comp & Metabolic Clinical Review (HTML)",
+    },
+    {
+        "state_key": "ta_mod3",
+        "heading": "### 🏋️ Module 3: Biomechanical & Neuromuscular Function",
+        "match": lambda t: "VALD" in t or "Push-Up" in t,
+        "button": "Draft Biomechanical Review",
+        "button_key": "btn_mod3",
+        "empty_msg": "No biomechanical or force plate tests queued yet.",
+        "spinner": "Synthesizing biomechanical and neuromuscular review...",
+        "role": "an expert clinical biomechanist and sports physiologist",
+        "domain": "Biomechanical and Neuromuscular Function",
+        "success": "Biomechanical review drafted successfully!",
+        "edit_label": "Edit Biomechanical Clinical Review (HTML)",
+    },
+]
+
+REPORT_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chudleigh Health Hub - Expert Clinical Longevity Report</title>
+    <style>
+        :root {{
+            --primary-color: #0f382b;
+            --secondary-color: #2b6a52;
+            --success-color: #10b981;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+        }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); line-height: 1.6; margin: 0; padding: 20px; }}
+        .report-container {{ max-width: 950px; margin: 0 auto; background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); overflow: hidden; border: 1px solid var(--border-color); }}
+        .header {{ background-color: var(--primary-color); color: white; padding: 30px; text-align: center; }}
+        .header h1 {{ margin: 0 0 5px 0; font-size: 24px; color: white; }}
+        .header p {{ margin: 0; color: #94a3b8; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
+        .content {{ padding: 30px; }}
+        .patient-meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f1f5f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
+        .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
+        .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
+
+        .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; flex-wrap: wrap; }}
+        .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
+        .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+
+        .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+        .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
+        .plain-english-card {{ background: linear-gradient(to bottom right, #f8fafc, #f1f5f9); border: 2px solid var(--secondary-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+        .plain-english-card h2 {{ margin-top: 0; color: var(--primary-color); font-size: 20px; }}
+        .plan-card {{ background: linear-gradient(to bottom right, #fffbeb, #fef3c7); border: 2px solid #f59e0b; border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+        .plan-card h2 {{ margin-top: 0; color: #b45309; font-size: 20px; }}
+        .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
+        .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
+    </style>
+    <script>
+        function switchView(viewName) {{
+            const views = ['clinical', 'plain', 'plan'];
+            views.forEach(function (v) {{
+                document.getElementById('card-' + v).style.display = (v === viewName) ? 'block' : 'none';
+                document.getElementById('btn-' + v).classList.toggle('active', v === viewName);
+            }});
+        }}
+    </script>
+</head>
+<body>
+    <div class="report-container">
+        <div class="header">
+            <h1>Chudleigh Health Hub</h1>
+            <p>Expert Clinical Review &bull; Longevity Master Report</p>
+        </div>
+        <div class="content">
+            <div class="patient-meta">
+                <div class="meta-item"><label>Participant Name</label><span>{participant_name}</span></div>
+                <div class="meta-item"><label>Age / Gender</label><span>{age_gender}</span></div>
+                <div class="meta-item"><label>Assessment Date</label><span>{assessment_date}</span></div>
+                <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height}</span></div>
+            </div>
+
+            <div class="view-switcher">
+                <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
+                <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
+                <button onclick="switchView('plan')" id="btn-plan" class="view-btn">🚀 30/60/90-Day Action Plans</button>
+            </div>
+
+            <div id="card-clinical" class="results-card">
+                <h2>🎯 Master Executive Clinical Review &amp; Longitudinal Progress</h2>
+                <div class="interpretation-text">
+                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>
+                    {master_html}
+                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>
+                    {mod1_html}
+                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>
+                    {mod2_html}
+                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>
+                    {mod3_html}
+                </div>
+            </div>
+
+            <div id="card-plain" class="plain-english-card" style="display: none;">
+                <h2>🗣️ What This Means For You &amp; Your Action Plan</h2>
+                <div class="interpretation-text">{plain_english_html}</div>
+            </div>
+
+            <div id="card-plan" class="plan-card" style="display: none;">
+                <h2>🚀 Your Tailored 30 / 60 / 90-Day Longevity Roadmaps</h2>
+                {plan_section}
+            </div>
+
+            <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
+            {tests_html}
+        </div>
+        <div class="footer">&copy; {year} Chudleigh Health Hub. Expert Clinical Longevity Platform. All rights reserved.</div>
+    </div>
+</body>
+</html>
+"""
+
+
+# ==========================================
+# CLINICIAN AUTHENTICATION
+# ==========================================
+def clinician_gate() -> bool:
+    if not CLINICIAN_PASSWORD:
+        st.error("The clinician dashboard is disabled because CLINICIAN_PASSWORD is not configured on the server.")
+        return False
+
+    authed_at = st.session_state.get("clinician_auth_at")
+    if authed_at and time.time() - authed_at < CLINICIAN_SESSION_SECONDS:
+        st.session_state.clinician_auth_at = time.time()  # sliding idle timeout
+        return True
+    if authed_at:
+        st.session_state.pop("clinician_auth_at", None)
+        st.info("Your clinician session timed out. Please sign in again.")
+
+    st.subheader("🔐 Clinician Sign-In")
+    with st.form("clinician_login"):
+        password = st.text_input("Clinician password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+
+    if submitted:
+        remaining = lockout_remaining("clinician", "dashboard")
+        if remaining:
+            st.error(f"Too many failed attempts. Try again in {math.ceil(remaining / 60)} minute(s).")
+            return False
+        ok = hmac.compare_digest(
+            hashlib.sha256(password.encode("utf-8")).digest(),
+            hashlib.sha256(CLINICIAN_PASSWORD.encode("utf-8")).digest(),
+        )
+        if ok:
+            clear_attempts("clinician", "dashboard")
+            st.session_state.clinician_auth_at = time.time()
+            log.info("Clinician signed in")
+            st.rerun()
+        record_failed_attempt("clinician", "dashboard")
+        log.warning("Failed clinician sign-in")
+        st.error("Incorrect password.")
+    return False
+
+
 # --- URL ROUTING & NAVIGATION ---
-query_params = st.query_params
-is_patient_link = query_params.get("portal") == "true"
+is_patient_link = st.query_params.get("portal") == "true"
 
 if is_patient_link:
     app_mode = "Secure Patient Mobile Portal"
@@ -154,254 +762,121 @@ else:
 # ==========================================
 # VIEW 1: CLINICIAN DASHBOARD
 # ==========================================
-if app_mode == "Clinician Dashboard":
+if app_mode == "Clinician Dashboard" and clinician_gate():
+    if st.sidebar.button("🚪 Sign out", use_container_width=True):
+        for k in ["clinician_auth_at", "participant_tests", *TEXT_KEYS]:
+            st.session_state.pop(k, None)
+        st.rerun()
+
     st.sidebar.subheader("Active Participant Queue")
 
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
         st.session_state.participant_tests = []
-        st.session_state.ta_mod1 = ""
-        st.session_state.ta_mod2 = ""
-        st.session_state.ta_mod3 = ""
-        st.session_state.ta_master = ""
-        st.session_state.ta_pe = ""
-        st.session_state.ta_plan_30 = ""
-        st.session_state.ta_plan_60 = ""
-        st.session_state.ta_plan_90 = ""
+        for k in TEXT_KEYS:
+            st.session_state[k] = ""
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
     for idx, t in enumerate(st.session_state.participant_tests):
-        st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {t['type']}</b></div>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {esc(t['type'])}</b></div>", unsafe_allow_html=True)
 
     st.subheader("📋 Participant Metadata & Security PIN")
     col1, col2 = st.columns(2)
 
     with col1:
-        participant_name = st.text_input("Participant Full Name", placeholder="e.g. John Evans", key="p_name")
-        age_gender = st.text_input("Age / Gender / DOB", placeholder="e.g. 48 yrs / Male / 15/03/1978", key="p_ag")
+        participant_name = st.text_input("Participant Full Name", placeholder="e.g. John Evans", key="p_name", max_chars=120)
+        age_gender = st.text_input("Age / Gender / DOB", placeholder="e.g. 48 yrs / Male / 15/03/1978", key="p_ag", max_chars=120)
 
     with col2:
         assessment_date = st.date_input("Assessment Date", value=datetime.date.today(), key="p_date")
-        patient_pin = st.text_input("Patient Secure PIN (4 digits)", type="password", placeholder="1234", key="p_pin")
+        patient_pin = st.text_input(
+            f"Patient Secure PIN ({MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits)",
+            type="password", placeholder="••••••", key="p_pin", max_chars=MAX_PIN_LENGTH,
+            help="Required for new participants. For existing participants, leave blank to keep their current PIN.",
+        )
 
-    body_mass_height = st.text_input("Body Mass / Height / BMI", placeholder="e.g. 78 kg / 175 cm / 25.4", key="p_bm")
+    body_mass_height = st.text_input("Body Mass / Height / BMI", placeholder="e.g. 78 kg / 175 cm / 25.4", key="p_bm", max_chars=120)
 
-    # --- LONGITUDINAL HISTORY CHECK ---
+    # --- EXISTING PROFILE & LONGITUDINAL HISTORY CHECK ---
+    c_key = patient_key(participant_name)
+    if participant_name and not c_key:
+        st.warning("This name can't be used as a record key (it must not contain '/' and must be under 200 characters).")
+
+    existing_profile = False
     previous_scan = None
-    if participant_name and db:
+    if c_key and db:
         try:
-            c_key = participant_name.strip().lower()
-            scans_ref = db.collection("longevity_reports").document(c_key).collection("scans")
-            past_docs = list(scans_ref.order_by("assessment_date", direction=firestore.Query.DESCENDING).limit(1).stream())
+            profile_ref = db.collection(REPORTS).document(c_key)
+            existing_profile = profile_ref.get().exists
+            past_docs = list(
+                profile_ref.collection("scans")
+                .order_by("assessment_date", direction=firestore.Query.DESCENDING)
+                .limit(1)
+                .stream()
+            )
             if past_docs:
                 previous_scan = past_docs[0].to_dict()
                 st.markdown(
                     f"""
                     <div class='history-box'>
-                        <b>📈 Longitudinal History Detected:</b> Found previous assessment on <b>{previous_scan.get('assessment_date')}</b> with {previous_scan.get('tests_count')} test(s) on file. Comparative progress analysis will be integrated into the synthesis.
+                        <b>📈 Longitudinal History Detected:</b> Found previous assessment on <b>{esc(previous_scan.get('assessment_date'))}</b> with {esc(previous_scan.get('tests_count'))} test(s) on file. Comparative progress analysis will be integrated into the synthesis.
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
+            if existing_profile:
+                st.info(
+                    "An existing record matches this name. Publishing will add a scan to that record. "
+                    "Check this is the same person — records are matched by name only."
+                )
         except Exception:
-            pass
+            log.exception("History lookup failed")
+            st.warning("Could not check for previous scans.")
 
     st.divider()
 
-    assessment_type = st.selectbox(
-        "Select Diagnostic Assessment Type",
-        [
-            "SpO2 / Pulse Oximetry (ViHealth)",
-            "Tanita Body Composition (MC-780MA)",
-            "Push-Up Assessment (VALD ForceDecks)",
-            "Spirometry (Pulmonary Function)",
-            "AGE Reader (Advanced Glycation End-Products)",
-            "12-Lead ECG (Electrocardiogram)",
-            "Autonomic / HRV (3-Min Rest, BP, Respiration)",
-            "VALD ForceDecks - Sit-to-Stand",
-            "VALD ForceDecks - Multi-Rep Squat",
-            "VALD ForceDecks - Single Leg Stance / Balance",
-            "VALD ForceDecks - Countermovement Jump (CMJ)",
-            "VALD ForceDecks - Quiet Stand (Balance)",
-        ],
-    )
+    assessment_type = st.selectbox("Select Diagnostic Assessment Type", list(ASSESSMENTS.keys()))
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
     uploaded_pdf = st.file_uploader(
-        f"📎 Upload Official {assessment_type} PDF Report (Attached for Clinical Review)", 
-        type=["pdf"], 
+        f"📎 Upload Official {assessment_type} PDF Report (Attached for Clinical Review)",
+        type=["pdf"],
         key=f"pdf_{assessment_type}"
     )
 
-    test_payload_data = {}
     pdf_bytes_content = None
     pdf_filename_str = None
 
     if uploaded_pdf is not None:
-        pdf_bytes_content = uploaded_pdf.getvalue()
-        pdf_filename_str = uploaded_pdf.name
-        st.success(f"PDF Loaded Successfully: {pdf_filename_str} ({len(pdf_bytes_content) / 1024:.1f} KB)")
+        data = uploaded_pdf.getvalue()
+        if len(data) > MAX_PDF_BYTES:
+            st.error(f"PDF is too large ({len(data) / 1024 / 1024:.1f} MB). Maximum is {MAX_PDF_BYTES // 1024 // 1024} MB.")
+        elif not data.startswith(b"%PDF-"):
+            st.error("That file doesn't look like a valid PDF.")
+        else:
+            pdf_bytes_content = data
+            pdf_filename_str = os.path.basename(uploaded_pdf.name)[:150]
+            st.success(f"PDF Loaded Successfully: {pdf_filename_str} ({len(data) / 1024:.1f} KB)")
 
-    if assessment_type == "SpO2 / Pulse Oximetry (ViHealth)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            spo2_high = st.text_input("Highest SpO2 (%)", "98")
-            spo2_avg = st.text_input("Average SpO2 (%)", "96")
-        with c2:
-            spo2_low = st.text_input("Lowest SpO2 (%)", "94")
-            pr_high = st.text_input("Highest Pulse Rate (BPM)", "59")
-        with c3:
-            pr_avg = st.text_input("Average Pulse Rate (BPM)", "54")
-            pr_low = st.text_input("Lowest Pulse Rate (BPM)", "49")
-        spo2_dur = st.text_input("Duration / Time Window", "00:04:48")
-        test_payload_data = {
-            "Highest SpO2": spo2_high, "Average SpO2": spo2_avg, "Lowest SpO2": spo2_low,
-            "Highest Pulse Rate": pr_high, "Average Pulse Rate": pr_avg, "Lowest Pulse Rate": pr_low,
-            "Duration": spo2_dur
-        }
-
-    elif assessment_type == "Tanita Body Composition (MC-780MA)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            t_weight = st.text_input("Weight (kg)", "78.0")
-            t_fat_pct = st.text_input("Fat Percentage (%)", "18.5")
-            t_ffm = st.text_input("Fat-Free Mass (kg)", "63.5")
-        with c2:
-            t_muscle = st.text_input("Muscle Mass (kg)", "60.2")
-            t_tbw = st.text_input("Total Body Water (kg / %)", "48.2 kg (61.8%)")
-            t_ecw_tbw = st.text_input("ECW / TBW Ratio", "0.378")
-        with c3:
-            t_visceral = st.text_input("Visceral Fat Rating", "6")
-            t_met_age = st.text_input("Metabolic Age", "42")
-            t_phase_angle = st.text_input("Phase Angle", "6.8°")
-        test_payload_data = {"Weight": t_weight, "Fat %": t_fat_pct, "FFM": t_ffm, "Muscle Mass": t_muscle, "TBW": t_tbw, "ECW/TBW": t_ecw_tbw, "Visceral Fat": t_visceral, "Metabolic Age": t_met_age, "Phase Angle": t_phase_angle}
-
-    elif assessment_type == "Push-Up Assessment (VALD ForceDecks)":
-        c1, c2 = st.columns(2)
-        with c1:
-            pu_force = st.text_input("Peak Push Force (N)", "520 N")
-            pu_impulse = st.text_input("Concentric Impulse (Ns)", "310 Ns")
-        with c2:
-            pu_sym = st.text_input("Left/Right Symmetry (%)", "96.5%")
-            pu_power = st.text_input("Peak Power Output (W)", "680 W")
-        test_payload_data = {"Peak Push Force": pu_force, "Concentric Impulse": pu_impulse, "L/R Symmetry": pu_sym, "Peak Power": pu_power}
-
-    elif assessment_type == "Spirometry (Pulmonary Function)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            sp_fvc = st.text_input("FVC (L / % Pred)", "4.85 L (104%)")
-            sp_fev1 = st.text_input("FEV1 (L / % Pred)", "3.92 L (102%)")
-        with c2:
-            sp_ratio = st.text_input("FEV1 / FVC Ratio (%)", "80.8%")
-            sp_pef = st.text_input("PEF (L/m / % Pred)", "9.4 L/s (98%)")
-        with c3:
-            sp_fef2575 = st.text_input("FEF 25-75% (L/s)", "4.21 L/s")
-            sp_fef75 = st.text_input("FEF 75% (L/s)", "1.85 L/s")
-        test_payload_data = {"FVC": sp_fvc, "FEV1": sp_fev1, "FEV1/FVC Ratio": sp_ratio, "PEF": sp_pef, "FEF 25-75": sp_fef2575, "FEF 75": sp_fef75}
-
-    elif assessment_type == "AGE Reader (Advanced Glycation End-Products)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            ag_bodyage = st.text_input("BodyAge", "44 yrs")
-        with c2:
-            ag_level = st.text_input("AGE Level Score", "1.9 AU")
-        with c3:
-            ag_var = st.text_input("Variance vs. Average", "-8%")
-        test_payload_data = {"BodyAge": ag_bodyage, "AGE Level Score": ag_level, "Variance": ag_var}
-
-    elif assessment_type == "12-Lead ECG (Electrocardiogram)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            ecg_hr = st.text_input("Heart Rate (BPM)", "58 BPM")
-            ecg_pr = st.text_input("PR Interval (ms)", "162 ms")
-        with c2:
-            ecg_qrs = st.text_input("QRS Duration (ms)", "92 ms")
-            ecg_qtc = st.text_input("QTc Interval (ms)", "410 ms")
-        with c3:
-            ecg_rhythm = st.text_input("Rhythm & Axis", "Normal Sinus Rhythm, Normal Axis")
-        test_payload_data = {"Heart Rate": ecg_hr, "PR Interval": ecg_pr, "QRS Duration": ecg_qrs, "QTc Interval": ecg_qtc, "Rhythm & Axis": ecg_rhythm}
-
-    elif assessment_type == "Autonomic / HRV (3-Min Rest, BP, Respiration)":
-        c1, c2 = st.columns(2)
-        with c1:
-            hrv_rmssd = st.text_input("RMSSD (ms)", "52 ms")
-            hrv_sdnn = st.text_input("SDNN (ms)", "64 ms")
-        with c2:
-            hrv_resp = st.text_input("Respiration Rate (breaths/min)", "12 breaths/min")
-            hrv_bp = st.text_input("Blood Pressure (mmHg)", "118/76 mmHg")
-        test_payload_data = {"RMSSD": hrv_rmssd, "SDNN": hrv_sdnn, "Respiration Rate": hrv_resp, "Blood Pressure": hrv_bp}
-
-    elif assessment_type == "VALD ForceDecks - Sit-to-Stand":
-        c1, c2 = st.columns(2)
-        with c1:
-            sts_force = st.text_input("Peak Concentric Force (N)", "780 N")
-            sts_time = st.text_input("Transition Time (s)", "0.62 s")
-        with c2:
-            sts_rfd = st.text_input("Concentric RFD (N/s)", "1450 N/s")
-            sts_asym = st.text_input("Limb Asymmetry (%)", "4.2%")
-        test_payload_data = {"Peak Concentric Force": sts_force, "Transition Time": sts_time, "Concentric RFD": sts_rfd, "Limb Asymmetry": sts_asym}
-
-    elif assessment_type == "VALD ForceDecks - Multi-Rep Squat":
-        c1, c2 = st.columns(2)
-        with c1:
-            sq_force = st.text_input("Peak Force (N)", "849 N")
-            sq_c_imp = st.text_input("Concentric Impulse (Ns)", "412 Ns")
-        with c2:
-            sq_e_imp = st.text_input("Eccentric Impulse (Ns)", "405 Ns")
-            sq_asym = st.text_input("Left/Right Asymmetry (%)", "13.0%")
-        test_payload_data = {"Peak Force": sq_force, "Concentric Impulse": sq_c_imp, "Eccentric Impulse": sq_e_imp, "L/R Asymmetry": sq_asym}
-
-    elif assessment_type == "VALD ForceDecks - Single Leg Stance / Balance":
-        c1, c2 = st.columns(2)
-        with c1:
-            sls_l_sway = st.text_input("Left Sway Velocity (mm/s)", "14.2 mm/s")
-            sls_r_sway = st.text_input("Right Sway Velocity (mm/s)", "12.8 mm/s")
-        with c2:
-            sls_l_ell = st.text_input("Left Ellipse Area (mm²)", "185 mm²")
-            sls_r_ell = st.text_input("Right Ellipse Area (mm²)", "160 mm²")
-        test_payload_data = {"Left Sway Velocity": sls_l_sway, "Right Sway Velocity": sls_r_sway, "Left Ellipse Area": sls_l_ell, "Right Ellipse Area": sls_r_ell}
-
-    elif assessment_type == "VALD ForceDecks - Countermovement Jump (CMJ)":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            cmj_height = st.text_input("Jump Height (cm)", "34.5 cm")
-            cmj_power = st.text_input("Peak Power / Mass (W/kg)", "48.2 W/kg")
-        with c2:
-            cmj_rsi = st.text_input("Modified RSI", "0.58")
-            cmj_asym = st.text_input("Peak Force Asymmetry (%)", "3.8%")
-        with c3:
-            cmj_eforce = st.text_input("Eccentric Peak Force (N)", "1420 N")
-            cmj_erfd = st.text_input("Eccentric RFD (N/s)", "4200 N/s")
-        test_payload_data = {"Jump Height": cmj_height, "Peak Power/Mass": cmj_power, "Modified RSI": cmj_rsi, "Peak Force Asymmetry": cmj_asym, "Eccentric Peak Force": cmj_eforce, "Eccentric RFD": cmj_erfd}
-
-    elif assessment_type == "VALD ForceDecks - Quiet Stand (Balance)":
-        c1, c2 = st.columns(2)
-        with c1:
-            qs_path = st.text_input("Total Path Length (mm)", "310 mm")
-            qs_vel = st.text_input("Mean Velocity (mm/s)", "5.2 mm/s")
-        with c2:
-            qs_ap = st.text_input("AP Sway Range (mm)", "24.5 mm")
-            qs_asym = st.text_input("Weight Distribution Asymmetry (%)", "2.1%")
-        test_payload_data = {"Total Path Length": qs_path, "Mean Velocity": qs_vel, "AP Sway Range": qs_ap, "Weight Distribution Asymmetry": qs_asym}
-
-    else:
-        raw_notes = st.text_area("Clinical Observations / Metrics", placeholder="Enter notes or raw data...")
-        test_payload_data = {"Raw Data / Notes": raw_notes}
+    spec = ASSESSMENTS[assessment_type]
+    test_payload_data = {}
+    for col, fields in zip(st.columns(len(spec["columns"])), spec["columns"]):
+        with col:
+            for label, default, payload_key in fields:
+                test_payload_data[payload_key] = st.text_input(label, default, key=f"in::{assessment_type}::{label}", max_chars=200)
+    for label, default, payload_key in spec.get("full_width", []):
+        test_payload_data[payload_key] = st.text_input(label, default, key=f"in::{assessment_type}::{label}", max_chars=200)
 
     if st.button("➕ Add Assessment to Participant Profile", use_container_width=True):
         if not participant_name:
             st.warning("Please enter the participant's name before adding assessments.")
         else:
-            pdf_b64 = None
-            if pdf_bytes_content is not None:
-                pdf_b64 = base64.b64encode(pdf_bytes_content).decode("utf-8")
-
             st.session_state.participant_tests.append({
                 "type": assessment_type,
                 "data": test_payload_data,
                 "pdf_filename": pdf_filename_str,
-                "pdf_b64": pdf_b64
+                "pdf_bytes": pdf_bytes_content,
             })
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
@@ -414,149 +889,45 @@ if app_mode == "Clinician Dashboard":
     st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
     st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
 
-    def upload_pdf_to_gemini(pdf_b64_str):
-        if not pdf_b64_str or not gemini_client:
-            return None
-        try:
-            pdf_bytes = base64.b64decode(pdf_b64_str)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_bytes)
-                tmp_path = tmp.name
-            
-            uploaded_file = gemini_client.files.upload(
-                file=tmp_path,
-                config={'mime_type': 'application/pdf'}
-            )
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
-            return uploaded_file
-        except Exception:
-            return None
+    for mod in MODULES:
+        with st.container():
+            st.markdown(mod["heading"])
+            mod_tests = [t for t in st.session_state.participant_tests if mod["match"](t["type"])]
 
-    # Module 1: Cardiorespiratory
-    with st.container():
-        st.markdown("### 🫀 Module 1: Cardiorespiratory & Autonomic")
-        cardio_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["SpO2", "Spirometry", "ECG", "Autonomic / HRV"])]
-        
-        if st.button("Draft Cardiorespiratory Review", use_container_width=True, key="btn_mod1"):
-            if not participant_name:
-                st.warning("Please enter participant name.")
-            elif len(cardio_tests) == 0:
-                st.info("No cardiorespiratory tests queued yet.")
-            else:
-                with st.spinner("Synthesizing cardiorespiratory clinical review..."):
-                    try:
-                        payload = []
-                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                        for t in cardio_tests:
-                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
-                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                            if f_ref:
-                                payload.append(f_ref)
-                        
-                        prompt = (
-                            "You are an expert clinical cardiologist and longevity physician at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Cardiorespiratory and Autonomic function. "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
-                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
-                            f"Patient Data:\n{context_str}"
-                        )
-                        payload.append(prompt)
-                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                        if res and res.text:
-                            st.session_state.ta_mod1 = res.text
-                            st.success("Cardiorespiratory review drafted successfully!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation error: {e}")
+            if st.button(mod["button"], use_container_width=True, key=mod["button_key"]):
+                if not participant_name:
+                    st.warning("Please enter participant name.")
+                elif not mod_tests:
+                    st.info(mod["empty_msg"])
+                elif gemini_ready():
+                    drafted = False
+                    with st.spinner(mod["spinner"]):
+                        file_refs = []
+                        try:
+                            context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
+                            for t in mod_tests:
+                                context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
+                            file_refs = upload_pdfs(mod_tests)
+                            prompt = (
+                                f"You are {mod['role']} at Chudleigh Health Hub. "
+                                f"Carefully inspect the attached official PDF reports and structured metrics for {mod['domain']}. "
+                                "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
+                                "Do not mention any AI models, automated assistants, or third-party tools. "
+                                "Return only the HTML fragment, without markdown code fences.\n\n"
+                                f"Patient Data:\n{context_str}"
+                            )
+                            st.session_state[mod["state_key"]] = strip_code_fences(generate([*file_refs, prompt]))
+                            drafted = True
+                        except Exception:
+                            fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}")
+                        finally:
+                            delete_uploaded(file_refs)
+                    if drafted:
+                        st.rerun()
 
-        st.text_area("Edit Cardiorespiratory Clinical Review (HTML)", height=180, key="ta_mod1")
+            st.text_area(mod["edit_label"], height=180, key=mod["state_key"])
 
-    st.divider()
-
-    # Module 2: Body Composition & Metabolic Age
-    with st.container():
-        st.markdown("### ⚖️ Module 2: Body Composition & Metabolic Age")
-        metabolic_tests = [t for t in st.session_state.participant_tests if any(x in t['type'] for x in ["Tanita", "AGE Reader"])]
-        
-        if st.button("Draft Body Comp & Metabolic Review", use_container_width=True, key="btn_mod2"):
-            if not participant_name:
-                st.warning("Please enter participant name.")
-            elif len(metabolic_tests) == 0:
-                st.info("No body composition or metabolic tests queued yet.")
-            else:
-                with st.spinner("Synthesizing metabolic and body composition clinical review..."):
-                    try:
-                        payload = []
-                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                        for t in metabolic_tests:
-                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
-                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                            if f_ref:
-                                payload.append(f_ref)
-                        
-                        prompt = (
-                            "You are an expert clinical metabolic specialist and longevity physician at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Body Composition and AGE Reader metrics. "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
-                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
-                            f"Patient Data:\n{context_str}"
-                        )
-                        payload.append(prompt)
-                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                        if res and res.text:
-                            st.session_state.ta_mod2 = res.text
-                            st.success("Metabolic review drafted successfully!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation error: {e}")
-
-        st.text_area("Edit Body Comp & Metabolic Clinical Review (HTML)", height=180, key="ta_mod2")
-
-    st.divider()
-
-    # Module 3: Biomechanical & Neuromuscular Function
-    with st.container():
-        st.markdown("### 🏋️ Module 3: Biomechanical & Neuromuscular Function")
-        biomech_tests = [t for t in st.session_state.participant_tests if "VALD" in t['type'] or "Push-Up" in t['type']]
-        
-        if st.button("Draft Biomechanical Review", use_container_width=True, key="btn_mod3"):
-            if not participant_name:
-                st.warning("Please enter participant name.")
-            elif len(biomech_tests) == 0:
-                st.info("No biomechanical or force plate tests queued yet.")
-            else:
-                with st.spinner("Synthesizing biomechanical and neuromuscular review..."):
-                    try:
-                        payload = []
-                        context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
-                        for t in biomech_tests:
-                            context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
-                            f_ref = upload_pdf_to_gemini(t.get('pdf_b64'))
-                            if f_ref:
-                                payload.append(f_ref)
-                        
-                        prompt = (
-                            "You are an expert clinical biomechanist and sports physiologist at Chudleigh Health Hub. "
-                            "Carefully inspect the attached official PDF reports and structured metrics for Biomechanical and Neuromuscular Function. "
-                            "Write a rigorous, exhaustive, and professional clinical breakdown authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
-                            "Do not mention any AI models, automated assistants, or third-party tools.\n\n"
-                            f"Patient Data:\n{context_str}"
-                        )
-                        payload.append(prompt)
-                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=payload)
-                        if res and res.text:
-                            st.session_state.ta_mod3 = res.text
-                            st.success("Biomechanical review drafted successfully!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation error: {e}")
-
-        st.text_area("Edit Biomechanical Clinical Review (HTML)", height=180, key="ta_mod3")
-
-    st.divider()
+        st.divider()
 
     # Module 4: Master Synthesis & Plain English Breakdown
     with st.container():
@@ -566,53 +937,60 @@ if app_mode == "Clinician Dashboard":
         col_gen1, col_gen2 = st.columns(2)
         with col_gen1:
             if st.button("✨ Draft Master Executive Synthesis & Delta Analysis", use_container_width=True, key="btn_master"):
-                with st.spinner("Synthesizing master executive review and tracking longitudinal progress..."):
-                    try:
-                        history_context = ""
-                        if previous_scan:
-                            history_context = (
-                                f"\n\nPREVIOUS SCAN HISTORY (Date: {previous_scan.get('assessment_date')}):\n"
-                                f"Previous Metrics / Summary: {json.dumps(previous_scan.get('tests', []))}\n"
-                                f"Previous Master Summary: {previous_scan.get('master_html', 'None')}\n"
-                            )
+                if not any(st.session_state[k].strip() for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
+                    st.warning("Please draft at least one module review first.")
+                elif gemini_ready():
+                    drafted = False
+                    with st.spinner("Synthesizing master executive review and tracking longitudinal progress..."):
+                        try:
+                            history_context = ""
+                            if previous_scan:
+                                history_context = (
+                                    f"\n\nPREVIOUS SCAN HISTORY (Date: {previous_scan.get('assessment_date')}):\n"
+                                    f"Previous Metrics / Summary: {json.dumps(strip_pdf_payloads(previous_scan.get('tests', [])), default=str)}\n"
+                                    f"Previous Master Summary: {previous_scan.get('master_html', 'None')}\n"
+                                )
 
-                        master_prompt = (
-                            "You are the lead longevity physician at Chudleigh Health Hub. "
-                            "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical review authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
-                            f"{history_context}\n"
-                            "If historical scan data is provided above, you MUST include a dedicated subsection titled '📈 Longitudinal Progress & Delta Analysis' detailing how metrics have shifted since the last scan, evaluating the efficacy of the previous period's focus areas.\n\n"
-                            f"Current Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
-                            f"Current Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
-                            f"Current Biomechanical Module:\n{st.session_state.ta_mod3}"
-                        )
-                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=master_prompt)
-                        if res and res.text:
-                            st.session_state.ta_master = res.text
-                            st.success("Master executive synthesis & longitudinal delta drafted!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation error: {e}")
+                            master_prompt = (
+                                "You are the lead longevity physician at Chudleigh Health Hub. "
+                                "Synthesize the following modular clinical evaluations into a cohesive, overarching executive clinical review authored strictly by Chudleigh Health Hub clinical analytics, formatted in clean HTML (h3, p, li tags). "
+                                "Return only the HTML fragment, without markdown code fences."
+                                f"{history_context}\n"
+                                "If historical scan data is provided above, you MUST include a dedicated subsection titled '📈 Longitudinal Progress & Delta Analysis' detailing how metrics have shifted since the last scan, evaluating the efficacy of the previous period's focus areas.\n\n"
+                                f"Current Cardiorespiratory Module:\n{st.session_state.ta_mod1}\n\n"
+                                f"Current Body Composition & Metabolic Module:\n{st.session_state.ta_mod2}\n\n"
+                                f"Current Biomechanical Module:\n{st.session_state.ta_mod3}"
+                            )
+                            st.session_state.ta_master = strip_code_fences(generate(master_prompt))
+                            drafted = True
+                        except Exception:
+                            fail("Drafting failed. Please try again.", "Generation error in master synthesis")
+                    if drafted:
+                        st.rerun()
 
         with col_gen2:
             if st.button("🗣️ Draft Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
-                with st.spinner("Drafting plain English coaching guide..."):
-                    try:
-                        pe_prompt = (
-                            "You are an empathetic longevity physician and health coach at Chudleigh Health Hub. "
-                            "Based on the clinical findings and progress deltas below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant as authored by Chudleigh Health Hub clinicians. "
-                            "Format the output in clean HTML (h3, p, li tags) covering exactly these three sections:\n"
-                            "1. What this all means for you & your progress over time (The big picture summary)\n"
-                            "2. What is good and why this will help (Positive reinforcement of strong metrics or improvements)\n"
-                            "3. What you need to work on next (Clear, actionable, prioritized focus areas)\n\n"
-                            f"Master Clinical Summary:\n{st.session_state.ta_master}"
-                        )
-                        res = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=pe_prompt)
-                        if res and res.text:
-                            st.session_state.ta_pe = res.text
-                            st.success("Plain English breakdown drafted!")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Generation error: {e}")
+                if not st.session_state.ta_master.strip():
+                    st.warning("Please generate the Master Executive Synthesis first.")
+                elif gemini_ready():
+                    drafted = False
+                    with st.spinner("Drafting plain English coaching guide..."):
+                        try:
+                            pe_prompt = (
+                                "You are an empathetic longevity physician and health coach at Chudleigh Health Hub. "
+                                "Based on the clinical findings and progress deltas below, write an encouraging, crystal-clear, jargon-free summary directly addressed to the participant as authored by Chudleigh Health Hub clinicians. "
+                                "Format the output in clean HTML (h3, p, li tags), without markdown code fences, covering exactly these three sections:\n"
+                                "1. What this all means for you & your progress over time (The big picture summary)\n"
+                                "2. What is good and why this will help (Positive reinforcement of strong metrics or improvements)\n"
+                                "3. What you need to work on next (Clear, actionable, prioritized focus areas)\n\n"
+                                f"Master Clinical Summary:\n{st.session_state.ta_master}"
+                            )
+                            st.session_state.ta_pe = strip_code_fences(generate(pe_prompt))
+                            drafted = True
+                        except Exception:
+                            fail("Drafting failed. Please try again.", "Generation error in plain English breakdown")
+                    if drafted:
+                        st.rerun()
 
         st.text_area("Edit Master Executive Synthesis (HTML)", height=220, key="ta_master")
         st.text_area("Edit Plain English Breakdown (HTML)", height=220, key="ta_pe")
@@ -625,20 +1003,22 @@ if app_mode == "Clinician Dashboard":
     st.subheader("🚀 Step 1 & 2: Tiered Action Plans & Portal Access Control")
     st.markdown("Configure tier pricing, generate progressive roadmaps, and select which tiers are unlocked for the participant.")
 
-    col_p1, col_p2, col_p3 = st.columns(3)
-    with col_p1:
-        price_30 = st.text_input("30-Day Tier Price (£)", value="49", key="p_30")
-    with col_p2:
-        price_60 = st.text_input("60-Day Tier Price (£)", value="89", key="p_60")
-    with col_p3:
-        price_90 = st.text_input("90-Day Tier Price (£)", value="129", key="p_90")
+    price_inputs = {}
+    for col, tier in zip(st.columns(3), TIERS):
+        with col:
+            price_inputs[tier] = st.text_input(f"{tier}-Day Tier Price (£)", value=TIER_INFO[tier]["default_price"], key=f"p_{tier}", max_chars=10)
+    prices = {tier: parse_price(v) for tier, v in price_inputs.items()}
+    bad_prices = [tier for tier, p in prices.items() if p is None]
+    if bad_prices:
+        st.warning(f"Invalid price for the {', '.join(bad_prices)}-day tier(s). Enter an amount between £0.50 and £10,000.")
 
     if st.button("✨ Draft Prioritized 30/60/90-Day Tiered Plans", use_container_width=True, key="btn_tier_plans"):
         if not participant_name:
             st.warning("Please enter participant name.")
-        elif not st.session_state.ta_master:
+        elif not st.session_state.ta_master.strip():
             st.warning("Please generate the Master Executive Synthesis first.")
-        else:
+        elif gemini_ready():
+            drafted = False
             with st.spinner("Building prioritized tiered action plans based on longitudinal shifts..."):
                 try:
                     plan_prompt = (
@@ -647,458 +1027,275 @@ if app_mode == "Clinician Dashboard":
                         "Prioritize the biggest clinical vulnerabilities or delta shifts that need attention first in the 30-day plan, "
                         "followed by secondary integrations in the 60-day plan, and long-term fine-tuning in the 90-day plan. "
                         "Return your response strictly as a JSON object with three keys: 'plan_30', 'plan_60', and 'plan_90'. "
-                        "Each value must be formatted in clean HTML (using h3, p, and li tags).\n\n"
+                        "Each value must be a string of clean HTML (using h3, p, and li tags).\n\n"
                         f"Master Clinical Review:\n{st.session_state.ta_master}"
                     )
-                    res = gemini_client.models.generate_content(
-                        model="gemini-3.8-flash", 
-                        contents=plan_prompt,
-                        config={"response_mime_type": "application/json"}
-                    )
-                    if res and res.text:
-                        plan_data = json.loads(res.text)
-                        st.session_state.ta_plan_30 = plan_data.get("plan_30", "")
-                        st.session_state.ta_plan_60 = plan_data.get("plan_60", "")
-                        st.session_state.ta_plan_90 = plan_data.get("plan_90", "")
-                        st.success("Tiered 30/60/90-day action plans drafted successfully!")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Error generating tiered plans: {e}")
+                    plan_data = json.loads(strip_code_fences(generate(plan_prompt, json_mode=True)))
+                    if not isinstance(plan_data, dict):
+                        raise ValueError("Plan response was not a JSON object")
+                    for tier in TIERS:
+                        value = plan_data.get(f"plan_{tier}", "")
+                        st.session_state[f"ta_plan_{tier}"] = value if isinstance(value, str) else json.dumps(value)
+                    drafted = True
+                except Exception:
+                    fail("Generating tiered plans failed. Please try again.", "Generation error in tiered plans")
+            if drafted:
+                st.rerun()
 
-    st.markdown("#### 30-Day Foundation Sprint (High-Priority Fixes)")
-    st.text_area("Edit 30-Day Plan (HTML)", height=180, key="ta_plan_30")
-
-    st.markdown("#### 60-Day Progression Plan (Secondary Integration)")
-    st.text_area("Edit 60-Day Plan (HTML)", height=180, key="ta_plan_60")
-
-    st.markdown("#### 90-Day Mastery Plan (Long-Term Optimization)")
-    st.text_area("Edit 90-Day Plan (HTML)", height=180, key="ta_plan_90")
+    for tier in TIERS:
+        st.markdown(TIER_INFO[tier]["editor_heading"])
+        st.text_area(f"Edit {tier}-Day Plan (HTML)", height=180, key=f"ta_plan_{tier}")
 
     st.markdown("---")
     st.markdown("#### 🔓 Patient Portal Unlock Tiers")
-    unlock_30_flag = st.checkbox("Unlock 30-Day Plan in Patient Portal", value=True, key="chk_unl_30")
-    unlock_60_flag = st.checkbox("Unlock 60-Day Plan in Patient Portal", value=False, key="chk_unl_60")
-    unlock_90_flag = st.checkbox("Unlock 90-Day Plan in Patient Portal", value=False, key="chk_unl_90")
+    unlock_flags = {
+        tier: st.checkbox(f"Unlock {tier}-Day Plan in Patient Portal", value=TIER_INFO[tier]["default_unlocked"], key=f"chk_unl_{tier}")
+        for tier in TIERS
+    }
 
     st.divider()
 
     # --- PUBLISH & SYNC TO GOOGLE CLOUD (LONGITUDINAL SUBCOLLECTION) ---
     if st.button("💾 Publish & Sync New Scan & Tiered Plans to Cloud", type="primary", use_container_width=True):
-        if not participant_name:
-            st.warning("Please ensure participant name is entered.")
-        elif not patient_pin or len(patient_pin) < 4:
-            st.warning("Please enter a valid 4-digit security PIN.")
+        pin = (patient_pin or "").strip()
+        if not participant_name or not c_key:
+            st.warning("Please ensure a valid participant name is entered.")
+        elif pin and not re.fullmatch(rf"[0-9]{{{MIN_NEW_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin):
+            st.warning(f"The PIN must be {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits.")
+        elif not pin and not existing_profile:
+            st.warning(f"New participants need a {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digit security PIN.")
+        elif bad_prices:
+            st.warning("Please fix the tier prices before publishing.")
+        elif not db:
+            st.error("Database connection unavailable.")
         else:
             try:
                 tests_html = ""
                 for idx, t in enumerate(st.session_state.participant_tests):
-                    data_str = "".join([f"<li><b>{k}:</b> {v}</li>" for k, v in t['data'].items() if v])
-                    filename = t.get('pdf_filename', 'Diagnostic_Report.pdf')
+                    items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
+                    list_content = "".join(items) or "<li>Metrics extracted directly via clinical inspection.</li>"
                     pdf_note_box = ""
-                    if filename:
+                    if t.get("pdf_filename"):
                         pdf_note_box = (
                             '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
-                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {filename} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
+                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {esc(t["pdf_filename"])} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
                             '</div>'
                         )
-
-                    test_type = t['type']
-                    test_num = idx + 1
-                    fallback_li = "<li>Metrics extracted directly via clinical inspection.</li>"
-                    list_content = data_str if data_str else fallback_li
-
                     tests_html += (
                         '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
-                        f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{test_num}: {test_type}</h3>'
+                        f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx + 1}: {esc(t["type"])}</h3>'
                         f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
                         f'{pdf_note_box}'
                         '</div>'
                     )
 
-                html_template = """
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="utf-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Chudleigh Health Hub - Expert Clinical Longevity Report</title>
-                    <style>
-                        :root {{
-                            --primary-color: #0f382b;
-                            --secondary-color: #2b6a52;
-                            --success-color: #10b981;
-                            --bg-color: #f8fafc;
-                            --card-bg: #ffffff;
-                            --text-main: #1e293b;
-                            --text-muted: #64748b;
-                            --border-color: #e2e8f0;
-                        }}
-                        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); line-height: 1.6; margin: 0; padding: 20px; }}
-                        .report-container {{ max-width: 950px; margin: 0 auto; background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); overflow: hidden; border: 1px solid var(--border-color); }}
-                        .header {{ background-color: var(--primary-color); color: white; padding: 30px; text-align: center; }}
-                        .header h1 {{ margin: 0 0 5px 0; font-size: 24px; color: white; }}
-                        .header p {{ margin: 0; color: #94a3b8; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }}
-                        .content {{ padding: 30px; }}
-                        .patient-meta {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f1f5f9; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
-                        .meta-item label {{ display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }}
-                        .meta-item span {{ font-size: 16px; font-weight: 700; color: var(--primary-color); }}
-                        
-                        .view-switcher {{ display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; background: #e2e8f0; padding: 6px; border-radius: 10px; flex-wrap: wrap; }}
-                        .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
-                        .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+                safe = {k: clean_html(st.session_state[k]) for k in TEXT_KEYS}
+                raw_plans = {tier: safe[f"ta_plan_{tier}"] for tier in TIERS}
 
-                        .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
-                        .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
-                        .plain-english-card {{ background: linear-gradient(to bottom right, #f8fafc, #f1f5f9); border: 2px solid var(--secondary-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
-                        .plain-english-card h2 {{ margin-top: 0; color: var(--primary-color); font-size: 20px; }}
-                        .plan-card {{ background: linear-gradient(to bottom right, #fffbeb, #fef3c7); border: 2px solid #f59e0b; border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
-                        .plan-card h2 {{ margin-top: 0; color: #b45309; font-size: 20px; }}
-                        .interpretation-text {{ font-size: 15px; background: rgba(255, 255, 255, 0.9); padding: 20px; border-radius: 8px; margin-top: 20px; }}
-                        .footer {{ text-align: center; padding: 20px; background: #f1f5f9; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--border-color); }}
-                    </style>
-                    <script>
-                        function switchView(viewName) {{
-                            const clinicalCard = document.getElementById('card-clinical');
-                            const plainCard = document.getElementById('card-plain');
-                            const planCard = document.getElementById('card-plan');
-                            const btnClinical = document.getElementById('btn-clinical');
-                            const btnPlain = document.getElementById('btn-plain');
-                            const btnPlan = document.getElementById('btn-plan');
-
-                            clinicalCard.style.display = 'none';
-                            plainCard.style.display = 'none';
-                            planCard.style.display = 'none';
-                            btnClinical.classList.remove('active');
-                            btnPlain.classList.remove('active');
-                            btnPlan.classList.remove('active');
-
-                            if (viewName === 'clinical') {{
-                                clinicalCard.style.display = 'block';
-                                btnClinical.classList.add('active');
-                            }} else if (viewName === 'plain') {{
-                                plainCard.style.display = 'block';
-                                btnPlain.classList.add('active');
-                            }} else if (viewName === 'plan') {{
-                                planCard.style.display = 'block';
-                                btnPlan.classList.add('active');
-                            }}
-                        }}
-                    </script>
-                </head>
-                <body>
-                    <div class="report-container">
-                        <div class="header">
-                            <h1>Chudleigh Health Hub</h1>
-                            <p>Expert Clinical Review &bull; Longevity Master Report</p>
-                        </div>
-                        <div class="content">
-                            <div class="patient-meta">
-                                <div class="meta-item"><label>Participant Name</label><span>{participant_name}</span></div>
-                                <div class="meta-item"><label>Age / Gender</label><span>{age_gender}</span></div>
-                                <div class="meta-item"><label>Assessment Date</label><span>{assessment_date}</span></div>
-                                <div class="meta-item"><label>Body Mass / Metrics</label><span>{body_mass_height}</span></div>
-                            </div>
-                            
-                            <div class="view-switcher">
-                                <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
-                                <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
-                                <button onclick="switchView('plan')" id="btn-plan" class="view-btn">🚀 30/60/90-Day Action Plans</button>
-                            </div>
-
-                            <div id="card-clinical" class="results-card">
-                                <h2>🎯 Master Executive Clinical Review &amp; Longitudinal Progress</h2>
-                                <div class="interpretation-text">
-                                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>
-                                    {master_html}
-                                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>
-                                    {mod1_html}
-                                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>
-                                    {mod2_html}
-                                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>
-                                    {mod3_html}
-                                </div>
-                            </div>
-
-                            <div id="card-plain" class="plain-english-card" style="display: none;">
-                                <h2>🗣️ What This Means For You &amp; Your Action Plan</h2>
-                                <div class="interpretation-text">{plain_english_html}</div>
-                            </div>
-
-                            <div id="card-plan" class="plan-card" style="display: none;">
-                                <h2>🚀 Your Tailored 30 / 60 / 90-Day Longevity Roadmaps</h2>
-                                <!-- PLAN_SECTION_START -->
-                                <div class="interpretation-text">
-                                    {p30_html}
-                                    {p60_html}
-                                    {p90_html}
-                                </div>
-                                <!-- PLAN_SECTION_END -->
-                            </div>
-
-                            <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
-                            {tests_html}
-                        </div>
-                        <div class="footer">&copy; 2026 Chudleigh Health Hub. Expert Clinical Longevity Platform. All rights reserved.</div>
-                    </div>
-                </body>
-                </html>
-                """
-
-                p30_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{st.session_state.ta_plan_30}' if unlock_30_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b>.</p></div>'
-                p60_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{st.session_state.ta_plan_60}' if unlock_60_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b>.</p></div>'
-                p90_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{st.session_state.ta_plan_90}' if unlock_90_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{price_90}</b>.</p></div>'
-
-                final_html_output = html_template.format(
-                    participant_name=participant_name,
-                    age_gender=age_gender if age_gender else 'Not specified',
-                    assessment_date=str(assessment_date),
-                    body_mass_height=body_mass_height if body_mass_height else 'Not specified',
-                    master_html=st.session_state.ta_master if st.session_state.ta_master else '<p>Master summary pending.</p>',
-                    mod1_html=st.session_state.ta_mod1 if st.session_state.ta_mod1 else '<p>Cardiorespiratory module pending.</p>',
-                    mod2_html=st.session_state.ta_mod2 if st.session_state.ta_mod2 else '<p>Metabolic module pending.</p>',
-                    mod3_html=st.session_state.ta_mod3 if st.session_state.ta_mod3 else '<p>Biomechanical module pending.</p>',
-                    plain_english_html=st.session_state.ta_pe if st.session_state.ta_pe else '<p>Plain English summary pending.</p>',
-                    p30_html=p30_content,
-                    p60_html=p60_content,
-                    p90_html=p90_content,
+                final_html_output = REPORT_TEMPLATE.format(
+                    participant_name=esc(participant_name),
+                    age_gender=esc(age_gender or "Not specified"),
+                    assessment_date=esc(assessment_date),
+                    body_mass_height=esc(body_mass_height or "Not specified"),
+                    master_html=safe["ta_master"] or "<p>Master summary pending.</p>",
+                    mod1_html=safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>",
+                    mod2_html=safe["ta_mod2"] or "<p>Metabolic module pending.</p>",
+                    mod3_html=safe["ta_mod3"] or "<p>Biomechanical module pending.</p>",
+                    plain_english_html=safe["ta_pe"] or "<p>Plain English summary pending.</p>",
+                    plan_section=build_plan_section(raw_plans, unlock_flags, {t: fmt_price(p) for t, p in prices.items()}),
                     tests_count=len(st.session_state.participant_tests),
-                    tests_html=tests_html
+                    tests_html=tests_html,
+                    year=datetime.date.today().year,
                 )
 
-                if db:
-                    client_lower = participant_name.strip().lower()
-                    scan_id = str(assessment_date)
-
-                    # 1. Save/Update Root Client Profile
-                    profile_record = {
-                        "name_lower": client_lower,
-                        "name": participant_name,
-                        "pin": patient_pin.strip(),
-                        "price_30": price_30,
-                        "price_60": price_60,
-                        "price_90": price_90,
-                        "unlock_30": unlock_30_flag,
-                        "unlock_60": unlock_60_flag,
-                        "unlock_90": unlock_90_flag,
-                    }
-                    db.collection("longevity_reports").document(client_lower).set(profile_record, merge=True)
-
-                    # 2. Save Assessment Scan to Subcollection (Preserves History!)
-                    scan_record = {
-                        "assessment_date": str(assessment_date),
-                        "tests_count": len(st.session_state.participant_tests),
-                        "tests": st.session_state.participant_tests,
-                        "body_mass_height": body_mass_height,
-                        "age_gender": age_gender,
-                        "master_html": st.session_state.ta_master,
-                        "plain_english_html": st.session_state.ta_pe,
-                        "plan_30_raw": st.session_state.ta_plan_30,
-                        "plan_60_raw": st.session_state.ta_plan_60,
-                        "plan_90_raw": st.session_state.ta_plan_90,
-                        "html_output": final_html_output
-                    }
-                    db.collection("longevity_reports").document(client_lower).collection("scans").document(scan_id).set(scan_record)
-
-                    st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!")
+                scan_id = str(assessment_date)
+                scan_record = {
+                    "assessment_date": scan_id,
+                    "tests_count": len(st.session_state.participant_tests),
+                    "tests": strip_pdf_payloads(st.session_state.participant_tests),
+                    "body_mass_height": body_mass_height,
+                    "age_gender": age_gender,
+                    "master_html": safe["ta_master"],
+                    "plain_english_html": safe["ta_pe"],
+                    "plan_30_raw": raw_plans["30"],
+                    "plan_60_raw": raw_plans["60"],
+                    "plan_90_raw": raw_plans["90"],
+                    "html_output": final_html_output,
+                }
+                record_size = len(json.dumps(scan_record, default=str).encode("utf-8"))
+                if record_size > MAX_FIRESTORE_DOC_BYTES:
+                    st.error(f"This report is too large to store ({record_size / 1024:.0f} KB). Please shorten the clinical text.")
                 else:
-                    st.error("Database connection unavailable.")
-            except Exception as e:
-                st.error(f"Error publishing to cloud: {e}")
+                    profile_record = {
+                        "name_lower": c_key,
+                        "name": participant_name.strip(),
+                        **{f"price_{tier}": fmt_price(prices[tier]) for tier in TIERS},
+                        **{f"unlock_{tier}": unlock_flags[tier] for tier in TIERS},
+                        "updated_at": firestore.SERVER_TIMESTAMP,
+                    }
+                    if pin:
+                        profile_record.update(pin_fields(pin))
+
+                    profile_ref = db.collection(REPORTS).document(c_key)
+                    profile_ref.set(profile_record, merge=True)
+                    profile_ref.collection("scans").document(scan_id).set(scan_record)
+                    log.info("Published scan %s", scan_id)
+                    st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!")
+            except Exception:
+                fail("Publishing failed. Nothing was lost locally; please try again.", "Publish to Firestore failed")
 
 # ==========================================
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
 # ==========================================
 elif app_mode == "Secure Patient Mobile Portal":
     st.subheader("📱 Participant Companion Portal")
-    st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and secure 4-digit PIN.")
 
-    # Check if returning from a Stripe payment checkout
-    query_params = st.query_params
-    stripe_session_id = query_params.get("session_id")
-    verified_patient = query_params.get("patient")
-    verified_tier = query_params.get("tier")
+    # Returning from Stripe checkout: verify payment, then strip the ID from the URL.
+    stripe_session_id = st.query_params.get("session_id")
+    if stripe_session_id:
+        handle_stripe_return(stripe_session_id)
+        st.query_params.clear()
+        st.query_params["portal"] = "true"
 
-    if stripe_session_id and verified_patient and verified_tier:
-        try:
-            if not stripe.api_key:
-                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
-            
-            session = stripe.checkout.Session.retrieve(stripe_session_id)
-            if session.payment_status == "paid":
-                lookup_key = verified_patient.strip().lower()
-                update_field = f"unlock_{verified_tier}"
-                
-                db.collection("longevity_reports").document(lookup_key).update({update_field: True})
-                st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
-        except Exception as e:
-            st.error(f"Payment verification error: {e}")
+    portal_auth = st.session_state.get("portal_auth")
+    if portal_auth and time.time() - portal_auth["at"] > PATIENT_SESSION_SECONDS:
+        st.session_state.pop("portal_auth", None)
+        portal_auth = None
+        st.info("Your session expired. Please sign in again.")
 
-    col_l1, col_l2 = st.columns(2)
-    with col_l1:
-        client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
-    with col_l2:
-        client_pin = st.text_input("Your Secure 4-Digit PIN", type="password", placeholder="****")
+    if not db:
+        st.error("The client portal is temporarily unavailable. Please try again later.")
 
-    if st.button("Unlock My Healthspan Portal", type="primary", use_container_width=True):
-        lookup_key = client_lookup.strip().lower()
-        
-        try:
-            if not db:
-                st.error("Google Cloud database connection unavailable.")
+    elif not portal_auth:
+        st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and secure PIN.")
+        with st.form("patient_login"):
+            col_l1, col_l2 = st.columns(2)
+            with col_l1:
+                client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans", max_chars=120)
+            with col_l2:
+                client_pin = st.text_input("Your Secure PIN", type="password", placeholder="••••••", max_chars=MAX_PIN_LENGTH)
+            submitted = st.form_submit_button("Unlock My Healthspan Portal", type="primary", use_container_width=True)
+
+        if submitted:
+            lookup_key = patient_key(client_lookup)
+            pin = (client_pin or "").strip()
+            limiter_id = lookup_key or "invalid-name"
+            remaining = lockout_remaining("patient", limiter_id)
+            generic_error = "We couldn't verify those details. Please check your name and PIN, or contact Chudleigh Health Hub."
+
+            if remaining:
+                st.error(f"Too many failed attempts. Please try again in {math.ceil(remaining / 60)} minute(s).")
+            elif not re.fullmatch(rf"[0-9]{{{LEGACY_MIN_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin) or not lookup_key:
+                st.error(generic_error)
             else:
-                doc_ref = db.collection("longevity_reports").document(lookup_key)
-                doc = doc_ref.get()
-
-                if doc.exists:
-                    client_data = doc.to_dict()
-                    
-                    if client_data["pin"] == client_pin.strip():
-                        # Fetch all historical scans for this patient, ordered newest first
-                        scans_ref = db.collection("longevity_reports").document(lookup_key).collection("scans")
-                        scans_docs = list(scans_ref.order_by("assessment_date", direction=firestore.Query.DESCENDING).stream())
-
-                        if not scans_docs:
-                            st.warning("No assessment scans found on file.")
-                        else:
-                            # Let patient select which scan date to view if multiple exist
-                            scan_dates = [d.id for d in scans_docs]
-                            selected_scan_date = st.selectbox("Select Assessment Date", scan_dates)
-
-                            selected_scan_doc = next((d for d in scans_docs if d.id == selected_scan_date), scans_docs[0])
-                            scan_data = selected_scan_doc.to_dict()
-                            html_output = scan_data.get("html_output", "<p>Report payload not found.</p>")
-
-                            st.success(f"Authentication successful. Welcome back, {client_data['name']}!")
-
-                            st.markdown(
-                                f"""
-                                <div class='portal-box'>
-                                    <h3>📋 Longevity Profile &amp; Scan History</h3>
-                                    <p><b>Participant:</b> {client_data['name']}</p>
-                                    <p><b>Viewing Assessment Date:</b> {selected_scan_date}</p>
-                                    <p><b>Total Scans On File:</b> {len(scans_docs)}</p>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-
-                            # --- DYNAMICALLY PATCH TIER UNLOCK STATUS BASED ON LIVE FLAGS ---
-                            u30 = client_data.get("unlock_30", False)
-                            u60 = client_data.get("unlock_60", False)
-                            u90 = client_data.get("unlock_90", False)
-                            
-                            p30_raw = scan_data.get("plan_30_raw", "")
-                            p60_raw = scan_data.get("plan_60_raw", "")
-                            p90_raw = scan_data.get("plan_90_raw", "")
-                            
-                            p_30 = client_data.get("price_30", "49")
-                            p_60 = client_data.get("price_60", "89")
-                            p_90 = client_data.get("price_90", "129")
-
-                            new_p30 = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{p30_raw}' if u30 else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{p_30}</b>.</p></div>'
-                            new_p60 = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{p60_raw}' if u60 else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{p_60}</b>.</p></div>'
-                            new_p90 = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{p90_raw}' if u90 else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{p_90}</b>.</p></div>'
-
-                            updated_plans_html = f"""<!-- PLAN_SECTION_START -->
-                            <div class="interpretation-text">
-                                {new_p30}
-                                {new_p60}
-                                {new_p90}
-                            </div>
-                            <!-- PLAN_SECTION_END -->"""
-
-                            if "<!-- PLAN_SECTION_START -->" in html_output and "<!-- PLAN_SECTION_END -->" in html_output:
-                                start_idx = html_output.find("<!-- PLAN_SECTION_START -->")
-                                end_idx = html_output.find("<!-- PLAN_SECTION_END -->") + len("<!-- PLAN_SECTION_END -->")
-                                html_output = html_output[:start_idx] + updated_plans_html + html_output[end_idx:]
-
-                            # --- DYNAMIC STRIPE CHECKOUT SESSION GENERATION ---
-                            if not stripe.api_key:
-                                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
-
-                            app_url = "https://chudleigh-health-66895860161.europe-west2.run.app"
-
-                            stripe_url_30 = ""
-                            if not u30:
-                                cs_30 = stripe.checkout.Session.create(
-                                    line_items=[{
-                                        'price_data': {
-                                            'currency': 'gbp',
-                                            'product_data': {'name': 'Chudleigh Health Hub - 30-Day Action Plan'},
-                                            'unit_amount': int(float(p_30) * 100),
-                                        },
-                                        'quantity': 1,
-                                    }],
-                                    mode='payment',
-                                    success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=30",
-                                    cancel_url=f"{app_url}/?portal=true",
-                                )
-                                stripe_url_30 = cs_30.url
-
-                            stripe_url_60 = ""
-                            if not u60:
-                                cs_60 = stripe.checkout.Session.create(
-                                    line_items=[{
-                                        'price_data': {
-                                            'currency': 'gbp',
-                                            'product_data': {'name': 'Chudleigh Health Hub - 60-Day Progression Plan'},
-                                            'unit_amount': int(float(p_60) * 100),
-                                        },
-                                        'quantity': 1,
-                                    }],
-                                    mode='payment',
-                                    success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=60",
-                                    cancel_url=f"{app_url}/?portal=true",
-                                )
-                                stripe_url_60 = cs_60.url
-
-                            stripe_url_90 = ""
-                            if not u90:
-                                cs_90 = stripe.checkout.Session.create(
-                                    line_items=[{
-                                        'price_data': {
-                                            'currency': 'gbp',
-                                            'product_data': {'name': 'Chudleigh Health Hub - 90-Day Mastery Plan'},
-                                            'unit_amount': int(float(p_90) * 100),
-                                        },
-                                        'quantity': 1,
-                                    }],
-                                    mode='payment',
-                                    success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=90",
-                                    cancel_url=f"{app_url}/?portal=true",
-                                )
-                                stripe_url_90 = cs_90.url
-
-                            if stripe_url_30:
-                                html_output = html_output.replace(
-                                    '🔒 30-Day Foundation Sprint (Locked)', 
-                                    f'🔒 30-Day Foundation Sprint (Locked)</p><a href="javascript:void(0);" onclick="window.open(\'{stripe_url_30}\', \'_blank\');" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px; cursor: pointer;">💳 Unlock 30-Day Plan (£{p_30})</a><p style="display:none;'
-                                )
-                            if stripe_url_60:
-                                html_output = html_output.replace(
-                                    '🔒 60-Day Progression Plan (Locked)', 
-                                    f'🔒 60-Day Progression Plan (Locked)</p><a href="javascript:void(0);" onclick="window.open(\'{stripe_url_60}\', \'_blank\');" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px; cursor: pointer;">💳 Unlock 60-Day Plan (£{p_60})</a><p style="display:none;'
-                                )
-                            if stripe_url_90:
-                                html_output = html_output.replace(
-                                    '🔒 90-Day Mastery Plan (Locked)', 
-                                    f'🔒 90-Day Mastery Plan (Locked)</p><a href="javascript:void(0);" onclick="window.open(\'{stripe_url_90}\', \'_blank\');" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px; cursor: pointer;">💳 Unlock 90-Day Plan (£{p_90})</a><p style="display:none;'
-                                )
-
-                            st.download_button(
-                                label=f"📥 Download Report ({selected_scan_date})",
-                                data=html_output,
-                                file_name=f"{client_data['name'].replace(' ', '_')}_{selected_scan_date}_Healthspan_Report.html",
-                                mime="text/html",
-                                use_container_width=True,
-                            )
-
-                            st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
-                            st.components.v1.html(html_output, height=800, scrolling=True)
+                try:
+                    doc_ref = db.collection(REPORTS).document(lookup_key)
+                    snap = doc_ref.get()
+                    record = snap.to_dict() if snap.exists else None
+                    if verify_pin(pin, record):
+                        clear_attempts("patient", limiter_id)
+                        if not record.get("pin_hash"):
+                            doc_ref.update(pin_fields(pin))  # migrate legacy plaintext PIN
+                        st.session_state.portal_auth = {"key": lookup_key, "at": time.time()}
+                        signed_in = True
                     else:
-                        st.error("Incorrect security PIN. Please check your PIN or contact Chudleigh Health Hub.")
-                else:
-                    st.warning("No published profiles found matching that name in the Google Cloud database.")
-        
-        except Exception as e:
-            st.error(f"Error connecting to Cloud records: {e}")
+                        record_failed_attempt("patient", limiter_id)
+                        signed_in = False
+                except Exception:
+                    signed_in = None
+                    fail("We couldn't reach your records right now. Please try again shortly.", "Patient sign-in failed")
+                if signed_in:
+                    st.rerun()
+                elif signed_in is False:
+                    st.error(generic_error)
+
+    else:
+        lookup_key = portal_auth["key"]
+        st.session_state.portal_auth["at"] = time.time()  # sliding idle timeout
+
+        if st.sidebar.button("🚪 Sign out", use_container_width=True):
+            for k in [k for k in st.session_state.keys() if k.startswith(("portal_", "checkout_url_"))]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
+        try:
+            profile_ref = db.collection(REPORTS).document(lookup_key)
+            snap = profile_ref.get()
+            client_data = snap.to_dict() if snap.exists else None
+            scans_docs = list(
+                profile_ref.collection("scans").order_by("assessment_date", direction=firestore.Query.DESCENDING).stream()
+            ) if client_data else []
+        except Exception:
+            client_data, scans_docs = None, []
+            fail("We couldn't load your records right now. Please try again shortly.", "Portal load failed")
+
+        if client_data is None:
+            st.session_state.pop("portal_auth", None)
+        elif not scans_docs:
+            st.warning("No assessment scans found on file.")
+        else:
+            display_name = client_data.get("name", "")
+            scan_dates = [d.id for d in scans_docs]
+            selected_scan_date = st.selectbox("Select Assessment Date", scan_dates, key="portal_scan_date")
+            scan_data = next((d for d in scans_docs if d.id == selected_scan_date), scans_docs[0]).to_dict()
+            html_output = scan_data.get("html_output") or "<p>Report payload not found.</p>"
+
+            st.success(f"Authentication successful. Welcome back, {display_name}!")
+            st.markdown(
+                f"""
+                <div class='portal-box'>
+                    <h3>📋 Longevity Profile &amp; Scan History</h3>
+                    <p><b>Participant:</b> {esc(display_name)}</p>
+                    <p><b>Viewing Assessment Date:</b> {esc(selected_scan_date)}</p>
+                    <p><b>Total Scans On File:</b> {len(scans_docs)}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # --- DYNAMICALLY PATCH TIER UNLOCK STATUS BASED ON LIVE FLAGS ---
+            unlocked = {tier: bool(client_data.get(f"unlock_{tier}", False)) for tier in TIERS}
+            prices = {tier: parse_price(client_data.get(f"price_{tier}", TIER_INFO[tier]["default_price"])) for tier in TIERS}
+            raw_plans = {tier: scan_data.get(f"plan_{tier}_raw", "") for tier in TIERS}
+            plan_section = build_plan_section(raw_plans, unlocked, {t: fmt_price(p) for t, p in prices.items()})
+
+            start_idx = html_output.find(PLAN_START)
+            end_idx = html_output.find(PLAN_END)
+            if start_idx != -1 and end_idx > start_idx:
+                html_output = html_output[:start_idx] + plan_section + html_output[end_idx + len(PLAN_END):]
+
+            safe_file_name = re.sub(r"[^A-Za-z0-9_-]+", "_", display_name).strip("_") or "Participant"
+            st.download_button(
+                label=f"📥 Download Report ({selected_scan_date})",
+                data=html_output,
+                file_name=f"{safe_file_name}_{selected_scan_date}_Healthspan_Report.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+
+            # --- STRIPE CHECKOUT (created only when the patient asks to pay) ---
+            locked = [tier for tier in TIERS if not unlocked[tier]]
+            if locked and stripe.api_key:
+                st.subheader("🔓 Unlock Your Action Plans")
+                for col, tier in zip(st.columns(len(locked)), locked):
+                    with col:
+                        price = prices[tier]
+                        title = TIER_INFO[tier]["title"]
+                        url_key = f"checkout_url_{tier}"
+                        if price is None:
+                            st.caption(f"{title}: please contact Chudleigh Health Hub to unlock.")
+                        elif st.session_state.get(url_key):
+                            st.link_button(f"💳 Continue to secure payment (£{fmt_price(price)})", st.session_state[url_key],
+                                           type="primary", use_container_width=True)
+                        elif st.button(f"💳 Unlock {title} (£{fmt_price(price)})", key=f"buy_{tier}", use_container_width=True):
+                            try:
+                                st.session_state[url_key] = create_checkout_url(lookup_key, tier, price)
+                                created = True
+                            except Exception:
+                                created = False
+                                fail("We couldn't start the payment. Please try again shortly.", "Stripe checkout creation failed")
+                            if created:
+                                st.rerun()
+
+            st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
+            components.html(html_output, height=800, scrolling=True)
