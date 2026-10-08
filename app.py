@@ -804,9 +804,34 @@ if app_mode == "Clinician Dashboard":
                 </html>
                 """
 
-                p30_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{st.session_state.ta_plan_30}' if unlock_30_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;"><h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b>.</p></div>'
-                p60_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{st.session_state.ta_plan_60}' if unlock_60_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b>.</p></div>'
-                p90_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{st.session_state.ta_plan_90}' if unlock_90_flag else f'<div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;"><h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3><p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{price_90}</b>.</p></div>'
+                # Stripe Payment Links embedded directly into the locked HTML cards
+                stripe_link_30 = "https://buy.stripe.com/test_4gMaEZ3Vi0pi8tAeS018c00"
+                stripe_link_60 = "https://buy.stripe.com/test_28E6oJfE0dc4aBI4dm18c01"
+                stripe_link_90 = "https://buy.stripe.com/test_14AcN7crO5JC6ls25e18c02"
+
+                p30_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px;">30-Day Foundation Sprint</h3>{st.session_state.ta_plan_30}' if unlock_30_flag else f'''
+                <div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center;">
+                    <h3 style="color: #b45309; margin-top: 0;">🔒 30-Day Foundation Sprint (Locked)</h3>
+                    <p style="color: #475569; font-size: 14px;">Unlock this foundational sprint for <b>£{price_30}</b>.</p>
+                    <a href="{stripe_link_30}" target="_blank" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px;">💳 Unlock 30-Day Plan (£{price_30})</a>
+                </div>
+                '''
+
+                p60_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">60-Day Progression Plan</h3>{st.session_state.ta_plan_60}' if unlock_60_flag else f'''
+                <div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">
+                    <h3 style="color: #b45309; margin-top: 0;">🔒 60-Day Progression Plan (Locked)</h3>
+                    <p style="color: #475569; font-size: 14px;">Unlock this progression tier for <b>£{price_60}</b>.</p>
+                    <a href="{stripe_link_60}" target="_blank" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px;">💳 Unlock 60-Day Plan (£{price_60})</a>
+                </div>
+                '''
+
+                p90_content = f'<h3 style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 5px; margin-top: 30px;">90-Day Mastery Plan</h3>{st.session_state.ta_plan_90}' if unlock_90_flag else f'''
+                <div style="background: #fff; border: 2px dashed #f59e0b; padding: 20px; border-radius: 8px; text-align: center; margin-top: 20px;">
+                    <h3 style="color: #b45309; margin-top: 0;">🔒 90-Day Mastery Plan (Locked)</h3>
+                    <p style="color: #475569; font-size: 14px;">Unlock the complete 90-day roadmap for <b>£{price_90}</b>.</p>
+                    <a href="{stripe_link_90}" target="_blank" style="display: inline-block; background-color: #0f382b; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin-top: 10px;">💳 Unlock 90-Day Plan (£{price_90})</a>
+                </div>
+                '''
 
                 final_html_output = html_template.format(
                     participant_name=participant_name,
@@ -861,27 +886,6 @@ elif app_mode == "Secure Patient Mobile Portal":
     st.subheader("📱 Participant Companion Portal")
     st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and secure 4-digit PIN.")
 
-    # Check if returning from a Stripe payment checkout
-    query_params = st.query_params
-    stripe_session_id = query_params.get("session_id")
-    verified_patient = query_params.get("patient")
-    verified_tier = query_params.get("tier")
-
-    if stripe_session_id and verified_patient and verified_tier:
-        try:
-            if not stripe.api_key:
-                stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
-            
-            session = stripe.checkout.Session.retrieve(stripe_session_id)
-            if session.payment_status == "paid":
-                lookup_key = verified_patient.strip().lower()
-                update_field = f"unlock_{verified_tier}"
-                
-                db.collection("longevity_reports").document(lookup_key).update({update_field: True})
-                st.success(f"🎉 Payment verified! Your {verified_tier}-Day Action Plan has been successfully unlocked.")
-        except Exception as e:
-            st.error(f"Payment verification error: {e}")
-
     col_l1, col_l2 = st.columns(2)
     with col_l1:
         client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans")
@@ -918,81 +922,6 @@ elif app_mode == "Secure Patient Mobile Portal":
                             """,
                             unsafe_allow_html=True,
                         )
-
-                        # --- STRIPE CHECKOUT BUTTONS FOR LOCKED TIERS ---
-                        if not stripe.api_key:
-                            stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
-
-                        app_url = "https://chudleigh-health-66895860161.europe-west2.run.app"
-
-                        # 30-Day Tier Checkout Button
-                        if not client_data.get("unlock_30", True):
-                            p_30 = client_data.get('price_30', '49')
-                            if st.button(f"💳 Unlock 30-Day Foundation Sprint (£{p_30})", key="pay_30"):
-                                try:
-                                    cs = stripe.checkout.Session.create(
-                                        payment_method_types=['card'],
-                                        line_items=[{
-                                            'price_data': {
-                                                'currency': 'gbp',
-                                                'product_data': {'name': 'Chudleigh Health Hub - 30-Day Action Plan'},
-                                                'unit_amount': int(float(p_30) * 100),
-                                            },
-                                            'quantity': 1,
-                                        }],
-                                        mode='payment',
-                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=30",
-                                        cancel_url=f"{app_url}/?portal=true",
-                                    )
-                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
-                                except Exception as err:
-                                    st.error(f"Checkout error: {err}")
-
-                        # 60-Day Tier Checkout Button
-                        if not client_data.get("unlock_60", False):
-                            p_60 = client_data.get('price_60', '89')
-                            if st.button(f"💳 Unlock 60-Day Progression Plan (£{p_60})", key="pay_60"):
-                                try:
-                                    cs = stripe.checkout.Session.create(
-                                        payment_method_types=['card'],
-                                        line_items=[{
-                                            'price_data': {
-                                                'currency': 'gbp',
-                                                'product_data': {'name': 'Chudleigh Health Hub - 60-Day Action Plan'},
-                                                'unit_amount': int(float(p_60) * 100),
-                                            },
-                                            'quantity': 1,
-                                        }],
-                                        mode='payment',
-                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=60",
-                                        cancel_url=f"{app_url}/?portal=true",
-                                    )
-                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
-                                except Exception as err:
-                                    st.error(f"Checkout error: {err}")
-
-                        # 90-Day Tier Checkout Button
-                        if not client_data.get("unlock_90", False):
-                            p_90 = client_data.get('price_90', '129')
-                            if st.button(f"💳 Unlock 90-Day Mastery Plan (£{p_90})", key="pay_90"):
-                                try:
-                                    cs = stripe.checkout.Session.create(
-                                        payment_method_types=['card'],
-                                        line_items=[{
-                                            'price_data': {
-                                                'currency': 'gbp',
-                                                'product_data': {'name': 'Chudleigh Health Hub - 90-Day Mastery Plan'},
-                                                'unit_amount': int(float(p_90) * 100),
-                                            },
-                                            'quantity': 1,
-                                        }],
-                                        mode='payment',
-                                        success_url=f"{app_url}/?portal=true&session_id={{CHECKOUT_SESSION_ID}}&patient={client_data['name']}&tier=90",
-                                        cancel_url=f"{app_url}/?portal=true",
-                                    )
-                                    st.markdown(f'<meta http-equiv="refresh" content="0;url={cs.url}">', unsafe_allow_html=True)
-                                except Exception as err:
-                                    st.error(f"Checkout error: {err}")
 
                         st.download_button(
                             label="📥 Download My Expert Clinical Report",
