@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import re
 import json
 import hmac
@@ -16,7 +17,6 @@ import stripe
 import streamlit as st
 import streamlit.components.v1 as components
 from google import genai
-from google.genai import errors as genai_errors
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -41,6 +41,39 @@ log = logging.getLogger("chudleigh")
 # --- SERVER CONFIGURATION (set via environment / Secret Manager) ---
 APP_URL = os.environ.get("APP_URL", "https://chudleigh-health-66895860161.europe-west2.run.app").rstrip("/")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return float(default)
+
+
+# --- WHICH AI SERVICE DRAFTS REPORTS (the clinician service only; the patient service never uses AI) ---
+#   gemini         Gemini API with GEMINI_API_KEY (the original setup, and the default)
+#   gemini-vertex  Gemini on Google Cloud: no API key, the service's own Google identity is used
+#   claude-vertex  Claude on Google Cloud: no API key; needs the anthropic[vertex] package installed
+AI_PROVIDERS = {
+    "gemini": "Gemini API (API key)",
+    "gemini-vertex": "Gemini on Google Cloud",
+    "claude-vertex": "Claude on Google Cloud",
+}
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini").strip().lower()
+AI_PROJECT = os.environ.get("AI_PROJECT", "").strip()  # optional: detected automatically on Cloud Run
+GEMINI_VERTEX_MODEL = os.environ.get("GEMINI_VERTEX_MODEL", "").strip()  # optional: defaults to GEMINI_MODEL
+GEMINI_VERTEX_LOCATION = os.environ.get("GEMINI_VERTEX_LOCATION", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "").strip()  # e.g. a model name as shown in Vertex AI Model Garden
+CLAUDE_LOCATION = os.environ.get("CLAUDE_LOCATION", "").strip()
+AI_MAX_TOKENS = int(_env_float("AI_MAX_TOKENS", 12000))  # longest reply allowed (Claude requires a limit)
+AI_MAX_INLINE_BYTES = int(_env_float("AI_MAX_INLINE_MB", 18) * 1024 * 1024)  # PDFs sent inside a request
+# Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
+AI_COMPARE_MODE = os.environ.get("AI_COMPARE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+AI_SERVICE_PHRASES = {
+    "gemini": "Google's Gemini service",
+    "gemini-vertex": "Google's Gemini service on Google Cloud",
+    "claude-vertex": "Anthropic's Claude model, running on Google Cloud",
+}
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE", "default")
 CLINICIAN_PASSWORD = os.environ.get("CLINICIAN_PASSWORD", "")
 
@@ -198,7 +231,7 @@ for _k in TEXT_KEYS:
         st.session_state[_k] = ""
 
 
-# --- GOOGLE CLOUD & GEMINI INITIALIZATIONS ---
+# --- GOOGLE CLOUD INITIALIZATION ---
 @st.cache_resource
 def init_firestore():
     try:
@@ -208,23 +241,7 @@ def init_firestore():
         return None
 
 
-@st.cache_resource
-def init_gemini():
-    if APP_ROLE == "patient":  # the patient service never calls the AI, so it should not hold the key
-        return None
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        log.warning("GEMINI_API_KEY not set; AI drafting disabled")
-        return None
-    try:
-        return genai.Client(api_key=api_key)
-    except Exception:
-        log.exception("Gemini initialisation failed")
-        return None
-
-
 db = init_firestore()
-gemini_client = init_gemini()
 
 
 # ==========================================
@@ -339,32 +356,160 @@ def clear_attempts(scope: str, identifier: str):
         log.exception("Failed to clear login attempts")
 
 
-# --- Gemini ---
-def generate(contents, json_mode: bool = False) -> str:
-    if not gemini_client:
-        raise RuntimeError("Gemini client not configured")
-    config = {"response_mime_type": "application/json"} if json_mode else None
-    for attempt in range(3):
-        try:
-            res = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=contents, config=config)
-            text = (res.text or "") if res else ""
-            if not text.strip():
-                raise RuntimeError("Empty response from model")
-            return text
-        except genai_errors.APIError as e:
-            if getattr(e, "code", None) in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(2 * (2 ** attempt))
-                continue
-            raise
-    raise RuntimeError("Model unavailable")
+# --- AI service (Gemini API, Gemini on Google Cloud, or Claude on Google Cloud) ---
+class AIConfigError(Exception):
+    """AI settings are missing or wrong. The message is safe to show to the clinician."""
 
 
 class PdfAttachError(Exception):
-    """A PDF could not be prepared for Gemini (message is safe to show to the clinician)."""
+    """A PDF could not be prepared for the AI service (message is safe to show to the clinician)."""
+
+
+class InlinePdf:
+    """A PDF held in memory and sent inside the request, for AI services with no file-upload feature."""
+
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self.data = data
+
+
+RETRY_STATUS_CODES = (429, 500, 502, 503, 504, 529)
+
+
+def current_provider() -> str:
+    """The AI service in use. Only in test mode (AI_COMPARE_MODE) can a clinician switch it for their session."""
+    if AI_COMPARE_MODE:
+        choice = st.session_state.get("ai_provider_choice")
+        if choice in AI_PROVIDERS:
+            return choice
+    return AI_PROVIDER
+
+
+def ai_settings(provider: str = None) -> dict:
+    """Model and region for a provider. Raises AIConfigError if something needed is missing."""
+    provider = provider or current_provider()
+    if provider not in AI_PROVIDERS:
+        raise AIConfigError(f"AI_PROVIDER '{provider}' is not recognised. Use one of: {', '.join(AI_PROVIDERS)}.")
+    if provider == "gemini":
+        return {"provider": provider, "model": GEMINI_MODEL, "location": ""}
+    if provider == "gemini-vertex":
+        if not GEMINI_VERTEX_LOCATION:
+            raise AIConfigError("GEMINI_VERTEX_LOCATION is not set (the Google Cloud region for Gemini).")
+        return {"provider": provider, "model": GEMINI_VERTEX_MODEL or GEMINI_MODEL, "location": GEMINI_VERTEX_LOCATION}
+    if not CLAUDE_MODEL:
+        raise AIConfigError("CLAUDE_MODEL is not set (the Claude model name on Google Cloud).")
+    if not CLAUDE_LOCATION:
+        raise AIConfigError("CLAUDE_LOCATION is not set (the Google Cloud region for Claude).")
+    return {"provider": provider, "model": CLAUDE_MODEL, "location": CLAUDE_LOCATION}
+
+
+def _vertex_project() -> str:
+    if AI_PROJECT:
+        return AI_PROJECT
+    import google.auth
+    _credentials, project = google.auth.default()
+    if not project:
+        raise AIConfigError("AI_PROJECT is not set and the Google Cloud project could not be detected.")
+    return project
+
+
+@st.cache_resource
+def get_ai_client(provider: str):
+    """One cached client per AI service. The patient service never creates one."""
+    if APP_ROLE == "patient":
+        return None
+    if provider == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            log.warning("GEMINI_API_KEY not set; drafting with the Gemini API is disabled")
+            return None
+        return genai.Client(api_key=api_key)
+    settings = ai_settings(provider)
+    if provider == "gemini-vertex":
+        return genai.Client(vertexai=True, project=_vertex_project(), location=settings["location"])
+    from anthropic import AnthropicVertex  # imported here so the app runs without it unless Claude is chosen
+    return AnthropicVertex(project_id=_vertex_project(), region=settings["location"])
+
+
+def note_ai_used(provider: str, model: str):
+    """Remember which AI service drafted content for this participant (saved with the report)."""
+    label = f"{AI_PROVIDERS.get(provider, provider)}: {model}"
+    used = st.session_state.setdefault("ai_used", [])
+    if label not in used:
+        used.append(label)
+    st.session_state["ai_last"] = label
+
+
+def _gemini_part(item):
+    if isinstance(item, InlinePdf):
+        from google.genai import types
+        return types.Part.from_bytes(data=item.data, mime_type="application/pdf")
+    return item
+
+
+def _generate_gemini(client, settings: dict, contents, json_mode: bool) -> str:
+    parts = [_gemini_part(c) for c in contents] if isinstance(contents, list) else contents
+    config = {"response_mime_type": "application/json"} if json_mode else None
+    res = client.models.generate_content(model=settings["model"], contents=parts, config=config)
+    text = (res.text or "") if res else ""
+    if not text.strip():
+        raise RuntimeError("Empty response from model")
+    candidates = getattr(res, "candidates", None) or []
+    if candidates:
+        reason = getattr(candidates[0], "finish_reason", None)
+        if "MAX_TOKENS" in str(getattr(reason, "name", reason) or "").upper():
+            raise RuntimeError("The draft was cut off because it was too long")
+    return text
+
+
+def _generate_claude(client, settings: dict, contents, json_mode: bool) -> str:
+    items = contents if isinstance(contents, list) else [contents]
+    blocks = []
+    for item in items:
+        if isinstance(item, InlinePdf):
+            blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf",
+                           "data": base64.b64encode(item.data).decode("ascii")},
+            })
+        else:
+            blocks.append({"type": "text", "text": str(item)})
+    kwargs = {"model": settings["model"], "max_tokens": AI_MAX_TOKENS, "messages": [{"role": "user", "content": blocks}]}
+    if json_mode:
+        kwargs["system"] = "Reply with one valid JSON object and nothing else: no explanation and no code fences."
+    res = client.messages.create(**kwargs)
+    text = "".join(getattr(b, "text", "") for b in (getattr(res, "content", None) or []) if getattr(b, "type", "") == "text")
+    if not text.strip():
+        raise RuntimeError("Empty response from model")
+    if getattr(res, "stop_reason", "") == "max_tokens":
+        raise RuntimeError("The draft was cut off because it was too long")
+    return text
+
+
+def generate(contents, json_mode: bool = False) -> str:
+    """Send a prompt (text, plus any attached PDFs) to the chosen AI service and return its text reply."""
+    provider = current_provider()
+    settings = ai_settings(provider)
+    client = get_ai_client(provider)
+    if client is None:
+        raise RuntimeError("AI client not configured")
+    send = _generate_claude if provider == "claude-vertex" else _generate_gemini
+    for attempt in range(3):
+        try:
+            text = send(client, settings, contents, json_mode)
+            note_ai_used(provider, settings["model"])
+            return text
+        except Exception as e:
+            code = getattr(e, "code", None) or getattr(e, "status_code", None)
+            if code in RETRY_STATUS_CODES and attempt < 2:
+                time.sleep(2 * (2 ** attempt))
+                continue
+            raise
+    raise RuntimeError("AI service unavailable")
 
 
 def wait_until_active(f, timeout: int = PDF_READY_TIMEOUT_SECONDS):
-    """Block until Gemini has finished processing an uploaded file.
+    """Block until Gemini has finished processing an uploaded file (Gemini API only).
 
     Using a file before it is ACTIVE is a common cause of intermittent 400 errors on large PDFs.
     """
@@ -379,15 +524,37 @@ def wait_until_active(f, timeout: int = PDF_READY_TIMEOUT_SECONDS):
         if time.time() >= deadline:
             raise TimeoutError("PDF still processing after timeout")
         time.sleep(2)
-        f = gemini_client.files.get(name=f.name)
+        f = get_ai_client("gemini").files.get(name=f.name)
+
+
+def _inline_pdfs(tests):
+    """Keep each PDF in memory to be sent inside the request. Nothing is uploaded or stored."""
+    attachments = []
+    total = 0
+    for t in tests:
+        data = t.get("pdf_bytes")
+        if not data:
+            continue
+        total += len(data)
+        attachments.append(InlinePdf(t.get("type", "report"), data))
+    if total > AI_MAX_INLINE_BYTES:
+        raise PdfAttachError(
+            f"The attached PDFs are too large to send together ({total / 1024 / 1024:.0f} MB; "
+            f"the limit is {AI_MAX_INLINE_BYTES / 1024 / 1024:.0f} MB). Please draft this section with fewer PDFs."
+        )
+    return attachments
 
 
 def upload_pdfs(tests):
-    """Upload each test's PDF to Gemini and wait until it is ready.
+    """Get each test's PDF ready for the AI service.
 
-    If any PDF fails, everything uploaded so far is deleted and PdfAttachError is raised, so a review is
-    never drafted while silently ignoring an attached report.
+    Gemini API: upload each PDF to Gemini's file store and wait until it is ready. If any fails, everything
+    uploaded so far is deleted and PdfAttachError is raised, so a review is never drafted while silently ignoring
+    an attached report. Other services: nothing is uploaded; the PDFs travel inside the request.
     """
+    if current_provider() != "gemini":
+        return _inline_pdfs(tests)
+    client = get_ai_client("gemini")
     refs = []
     for t in tests:
         data = t.get("pdf_bytes")
@@ -395,7 +562,7 @@ def upload_pdfs(tests):
             continue
         uploaded = None
         try:
-            uploaded = gemini_client.files.upload(file=io.BytesIO(data), config={"mime_type": "application/pdf"})
+            uploaded = client.files.upload(file=io.BytesIO(data), config={"mime_type": "application/pdf"})
             refs.append(wait_until_active(uploaded))
         except Exception as e:
             log.exception("PDF upload to Gemini failed")
@@ -410,11 +577,30 @@ def upload_pdfs(tests):
 
 
 def delete_uploaded(refs):
+    """Delete files from Gemini's file store. PDFs sent inside the request (InlinePdf) leave nothing to delete."""
     for f in refs:
+        if isinstance(f, InlinePdf):
+            continue
         try:
-            gemini_client.files.delete(name=f.name)
+            get_ai_client("gemini").files.delete(name=f.name)
         except Exception:
             log.warning("Could not delete uploaded Gemini file")
+
+
+def pdf_privacy_note() -> str:
+    """The note under the PDF uploader, which says where the PDF goes."""
+    provider = current_provider()
+    who = AI_SERVICE_PHRASES.get(provider, "the AI service")
+    advice = "Where possible, avoid uploading reports that show the participant's name or date of birth."
+    if provider == "gemini":
+        return (
+            f"When you upload a PDF it is sent to {who} straight away to read the measurements, "
+            f"and again later to help draft the review. It is deleted from Gemini after each use. {advice}"
+        )
+    return (
+        f"When you upload a PDF it is sent to {who} straight away to read the measurements, "
+        f"and again later to help draft the review. It travels inside the request, and the app does not save it. {advice}"
+    )
 
 
 # --- Auto-fill measurements from an uploaded PDF report ---
@@ -443,7 +629,7 @@ def reset_measurement_inputs():
     for k in list(st.session_state.keys()):
         if isinstance(k, str) and k.startswith(("in::", "verified::")):
             del st.session_state[k]
-    for k in ("autofill_done", "autofill_unverified"):
+    for k in ("autofill_done", "autofill_unverified", "ai_used", "ai_last"):
         st.session_state.pop(k, None)
 
 
@@ -454,7 +640,7 @@ def assessment_fields(spec: dict):
 
 
 def extract_metrics_from_pdf(assessment_type: str, fields, pdf_bytes: bytes) -> dict:
-    """Ask Gemini to read the listed values from the PDF. Returns {payload_key: value} for values it found."""
+    """Ask the AI service to read the listed values from the PDF. Returns {payload_key: value} for values it found."""
     keys = [payload_key for _label, _example, payload_key in fields]
     field_lines = "\n".join(f'- "{payload_key}": {label}' for label, _example, payload_key in fields)
     prompt = (
@@ -475,10 +661,31 @@ def extract_metrics_from_pdf(assessment_type: str, fields, pdf_bytes: bytes) -> 
 
 
 def gemini_ready() -> bool:
-    if not gemini_client:
-        st.error("AI drafting is unavailable: GEMINI_API_KEY is not configured on the server.")
+    """True if the chosen AI service is set up; otherwise shows why. (The name is kept: the AI service may be Gemini or Claude.)"""
+    provider = current_provider()
+    try:
+        ai_settings(provider)
+        if get_ai_client(provider) is None:
+            if provider == "gemini":
+                st.error("AI drafting is unavailable: GEMINI_API_KEY is not configured on the server.")
+            else:
+                st.error("AI drafting is unavailable: the AI service could not be set up on this server.")
+            return False
+    except AIConfigError as e:
+        st.error(f"AI drafting is unavailable: {e}")
+        return False
+    except ImportError:
+        log.exception("AI library missing")
+        st.error("AI drafting is unavailable: the software library for the chosen AI service is not installed on this server.")
+        return False
+    except Exception:
+        log.exception("AI service set-up failed")
+        st.error("AI drafting is unavailable: the AI service could not be set up. Please check the server logs.")
         return False
     return True
+
+
+ai_ready = gemini_ready
 
 
 # --- Participant lookups ---
@@ -1080,6 +1287,18 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.session_state.clinician_session_ended = True
         st.rerun()
 
+    if AI_COMPARE_MODE:
+        st.sidebar.warning("AI test mode is on: use dummy participants only. Each saved report records which AI service drafted it.")
+        st.sidebar.selectbox(
+            "AI service for drafting",
+            list(AI_PROVIDERS),
+            index=list(AI_PROVIDERS).index(AI_PROVIDER) if AI_PROVIDER in AI_PROVIDERS else 0,
+            format_func=lambda p: AI_PROVIDERS[p],
+            key="ai_provider_choice",
+        )
+        if st.session_state.get("ai_last"):
+            st.sidebar.caption(f"Last draft by: {st.session_state['ai_last']}")
+
     st.sidebar.subheader("Active Participant Queue")
 
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
@@ -1165,11 +1384,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         key=f"pdf_{assessment_type}"
     )
 
-    st.caption(
-        "When you upload a PDF it is sent to Google's Gemini service straight away to read the measurements, "
-        "and again later to help draft the review. It is deleted from Gemini after each use. "
-        "Where possible, avoid uploading reports that show the participant's name or date of birth."
-    )
+    st.caption(pdf_privacy_note())
     pdf_bytes_content = None
     pdf_filename_str = None
 
@@ -1499,6 +1714,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "html_output": final_html_output,
                     "approved_by": approver.strip(),
                     "approved_at": firestore.SERVER_TIMESTAMP,
+                    "ai_used": list(st.session_state.get("ai_used", [])),
                 }
                 record_size = len(json.dumps(scan_record, default=str).encode("utf-8"))
                 if record_size > MAX_FIRESTORE_DOC_BYTES:
