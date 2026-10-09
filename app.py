@@ -43,6 +43,22 @@ APP_URL = os.environ.get("APP_URL", "https://chudleigh-health-66895860161.europe
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE", "default")
 CLINICIAN_PASSWORD = os.environ.get("CLINICIAN_PASSWORD", "")
+
+# Which part of the app this deployment serves. Run the same image as two Cloud Run services:
+#   APP_ROLE=patient    -> public patient portal only; the clinician code can never be reached
+#   APP_ROLE=clinician  -> clinician dashboard only; put this service behind Google IAP
+#   APP_ROLE=all        -> everything on one service (the default; for the transition and local testing only)
+APP_ROLE = os.environ.get("APP_ROLE", "all").strip().lower()
+VALID_APP_ROLES = ("all", "patient", "clinician")
+# How clinicians sign in: "iap" = individual Google accounts checked by Identity-Aware Proxy,
+# "password" = the shared CLINICIAN_PASSWORD.
+CLINICIAN_AUTH = os.environ.get("CLINICIAN_AUTH", "password").strip().lower()
+VALID_CLINICIAN_AUTH = ("password", "iap")
+# For CLINICIAN_AUTH=iap: the "Signed Header JWT audience" of the clinician service, in the form
+# /projects/PROJECT_NUMBER/locations/REGION/services/SERVICE_NAME
+IAP_AUDIENCE = os.environ.get("IAP_AUDIENCE", "").strip()
+IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key"
+IAP_ISSUER = "https://cloud.google.com/iap"
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # --- SECURITY SETTINGS ---
@@ -194,6 +210,8 @@ def init_firestore():
 
 @st.cache_resource
 def init_gemini():
+    if APP_ROLE == "patient":  # the patient service never calls the AI, so it should not hold the key
+        return None
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         log.warning("GEMINI_API_KEY not set; AI drafting disabled")
@@ -299,11 +317,13 @@ def audit(event: str, key: str = "", **details):
     if not db:
         return
     try:
+        staff = st.session_state.get("clinician_email")  # verified Google account (IAP mode only)
         db.collection("audit_log").add({
             "event": event,
             "patient_ref": short_ref(key) if key else None,
             "at": firestore.SERVER_TIMESTAMP,
             "ip": client_ip(),
+            **({"staff": staff} if staff else {}),
             **details,
         })
     except Exception:
@@ -905,7 +925,76 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
 # ==========================================
 # CLINICIAN AUTHENTICATION
 # ==========================================
+def _verify_iap_jwt(token: str) -> dict:
+    """Check the signature, expiry and audience of the token Google IAP attaches to every request."""
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
+    return id_token.verify_token(token, google_requests.Request(), audience=IAP_AUDIENCE, certs_url=IAP_CERTS_URL)
+
+
+def iap_identity(headers) -> str:
+    """Verified e-mail of the signed-in staff member from IAP's signed header, or "" if there isn't one.
+
+    Fails closed: a missing audience setting, a missing/forged/expired/wrong-audience token or a wrong issuer all
+    return "". The unsigned x-goog-authenticated-user-email header is deliberately never trusted.
+    """
+    if not IAP_AUDIENCE or not headers:
+        return ""
+    token = (headers.get("x-goog-iap-jwt-assertion") or "").strip()
+    if not token:
+        return ""
+    try:
+        claims = _verify_iap_jwt(token)
+    except Exception:
+        log.warning("IAP token verification failed")
+        return ""
+    if claims.get("iss") != IAP_ISSUER:
+        return ""
+    email = str(claims.get("email") or "").strip().lower()
+    return email if "@" in email else ""
+
+
+def _iap_gate() -> bool:
+    """Clinician sign-in via Google accounts (Identity-Aware Proxy). No shared password."""
+    now = time.time()
+    if st.session_state.get("clinician_session_ended"):
+        st.info("This session has ended. Reload the page to start a new one.")
+        return False
+    verified = st.session_state.get("clinician_iap")
+    if verified:
+        if now - verified["at"] < CLINICIAN_SESSION_SECONDS:
+            verified["at"] = now  # sliding idle timeout
+            st.session_state.clinician_email = verified["email"]
+            return True
+        st.session_state.pop("clinician_iap", None)
+        st.session_state.pop("clinician_email", None)
+        st.info("Your clinician session timed out. Reload the page to sign in again.")
+        return False
+
+    # Verified once per browser session: IAP's token is short-lived, so it is not re-checked on every rerun.
+    try:
+        headers = st.context.headers
+    except Exception:
+        headers = None
+    email = iap_identity(headers)
+    if not email:
+        log.warning("Clinician access denied: no valid IAP identity")
+        st.error(
+            "Access denied. This area needs the clinic's secure Google sign-in. Reload the page; "
+            "if you still see this, ask your administrator to add your Google account."
+        )
+        return False
+    st.session_state.clinician_iap = {"email": email, "at": now}
+    st.session_state.clinician_email = email
+    log.info("Clinician signed in via IAP")
+    audit("clinician_login")  # audit() adds the verified e-mail as "staff"
+    return True
+
+
 def clinician_gate() -> bool:
+    if CLINICIAN_AUTH == "iap":
+        return _iap_gate()
+    st.session_state.pop("clinician_email", None)
     if not CLINICIAN_PASSWORD:
         st.error("The clinician dashboard is disabled because CLINICIAN_PASSWORD is not configured on the server.")
         return False
@@ -947,12 +1036,29 @@ def clinician_gate() -> bool:
 
 
 # --- URL ROUTING & NAVIGATION ---
-is_patient_link = st.query_params.get("portal") == "true"
+# A misconfigured role must never silently expose the wrong half of the app, so bad values stop the app.
+if APP_ROLE not in VALID_APP_ROLES:
+    st.error("This service is misconfigured (invalid APP_ROLE). Please contact Chudleigh Health Hub.")
+    log.error("Invalid APP_ROLE %r; expected one of %s", APP_ROLE, VALID_APP_ROLES)
+    st.stop()
+if CLINICIAN_AUTH not in VALID_CLINICIAN_AUTH:
+    st.error("This service is misconfigured (invalid CLINICIAN_AUTH). Please contact Chudleigh Health Hub.")
+    log.error("Invalid CLINICIAN_AUTH %r; expected one of %s", CLINICIAN_AUTH, VALID_CLINICIAN_AUTH)
+    st.stop()
 
-if is_patient_link:
-    app_mode = "Secure Patient Mobile Portal"
+is_patient_link = st.query_params.get("portal") == "true"
+PATIENT_VIEW = "Secure Patient Mobile Portal"
+CLINICIAN_VIEW = "Clinician Dashboard"
+
+if APP_ROLE == "patient" or (APP_ROLE == "all" and is_patient_link):
+    # In the patient role nothing in the URL or browser can reach the clinician dashboard: it is simply never run.
+    app_mode = PATIENT_VIEW
     st.sidebar.subheader("🔒 Client Portal Access")
     st.sidebar.markdown("Chudleigh Health Hub Secure Patient Companion")
+    st.sidebar.divider()
+elif APP_ROLE == "clinician":
+    app_mode = CLINICIAN_VIEW
+    st.sidebar.header("Clinician Dashboard")
     st.sidebar.divider()
 else:
     st.sidebar.header("Portal Navigation")
@@ -966,10 +1072,12 @@ else:
 # VIEW 1: CLINICIAN DASHBOARD
 # ==========================================
 if app_mode == "Clinician Dashboard" and clinician_gate():
-    if st.sidebar.button("🚪 Sign out", use_container_width=True):
-        for k in ["clinician_auth_at", "participant_tests", "dr_export", *TEXT_KEYS]:
+    if st.sidebar.button("🚪 End session" if CLINICIAN_AUTH == "iap" else "🚪 Sign out", use_container_width=True):
+        for k in ["clinician_auth_at", "clinician_iap", "clinician_email", "participant_tests", "dr_export", *TEXT_KEYS]:
             st.session_state.pop(k, None)
         reset_measurement_inputs()
+        if CLINICIAN_AUTH == "iap":
+            st.session_state.clinician_session_ended = True
         st.rerun()
 
     st.sidebar.subheader("Active Participant Queue")
@@ -1341,7 +1449,12 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         else:
             st.info("Enter the participant's name to preview the report.")
 
-    approver = st.text_input("Approving clinician (full name)", key="approver_name", max_chars=80)
+    verified_staff = st.session_state.get("clinician_email")
+    if verified_staff:
+        approver = verified_staff
+        st.caption(f"Approving as **{verified_staff}** (verified Google sign-in).")
+    else:
+        approver = st.text_input("Approving clinician (full name)", key="approver_name", max_chars=80)
     approved = st.checkbox(
         "I confirm a clinician has reviewed and approved this report, including all AI-assisted drafting, before it is released to the participant.",
         key="chk_approved",
