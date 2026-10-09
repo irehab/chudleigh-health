@@ -2,6 +2,7 @@ import os
 import io
 import base64
 import re
+import sys
 import json
 import hmac
 import math
@@ -68,6 +69,7 @@ CLAUDE_LOCATION = os.environ.get("CLAUDE_LOCATION", "").strip()
 AI_MAX_TOKENS = int(_env_float("AI_MAX_TOKENS", 12000))  # longest reply allowed (Claude requires a limit)
 AI_MAX_INLINE_BYTES = int(_env_float("AI_MAX_INLINE_MB", 18) * 1024 * 1024)  # PDFs sent inside a request
 # Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
+PRIVACY_NOTICE_URL = os.environ.get("PRIVACY_NOTICE_URL", "").strip()  # optional; must start with https://
 AI_COMPARE_MODE = os.environ.get("AI_COMPARE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 AI_SERVICE_PHRASES = {
     "gemini": "Google's Gemini service",
@@ -190,14 +192,19 @@ st.markdown(
         padding: 24px;
         border-radius: 10px;
         margin-bottom: 20px;
+        color: #14532d;
     }
+    .portal-box h3 { margin-top: 0; color: #0f382b !important; }
+    .portal-box p, .portal-box b { color: #14532d !important; }
     .module-box {
         background-color: #f8fafc;
         border: 1px solid #cbd5e1;
         padding: 20px;
         border-radius: 10px;
         margin-bottom: 20px;
+        color: #1e293b;
     }
+    .module-box h3, .module-box p, .module-box b { color: #1e293b !important; }
     .history-box {
         background-color: #eff6ff;
         border: 1px solid #bfdbfe;
@@ -206,6 +213,10 @@ st.markdown(
         margin-bottom: 20px;
         color: #1e3a8a;
     }
+    .history-box b { color: #1e3a8a !important; }
+    footer { visibility: hidden; }
+    .site-footer { text-align: center; font-size: 12px; margin-top: 32px; opacity: 0.8; }
+    .site-footer a { color: inherit !important; text-decoration: underline; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -252,11 +263,49 @@ def clean_html(fragment: str) -> str:
     return nh3.clean(strip_code_fences(fragment))
 
 
-def fail(user_msg: str, context: str):
-    """Call from inside an except block: logs the traceback, shows a generic message with a reference."""
+def ai_error_hint(exc) -> str:
+    """A short, safe explanation of a common AI-service failure ("" if not recognised).
+
+    The text is fixed wording only: it never includes the error's own text, so no patient data or internal detail
+    can leak through it.
+    """
+    depth = 0
+    while exc is not None and depth < 4:  # also look at the error that caused this one
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            code = None
+        text = f"{type(exc).__name__} {exc}".upper()
+        if code == 429 or "RESOURCE_EXHAUSTED" in text or "QUOTA" in text or "RATELIMIT" in text:
+            return ("Likely cause: the AI service's usage limit (quota) has been reached, or is still zero for this project. "
+                    "For a newly enabled service the limit may need raising in Google Cloud.")
+        if code in (401, 403) or "PERMISSION_DENIED" in text or "UNAUTHENTICATED" in text or "PERMISSIONDENIED" in text:
+            return ("Likely cause: access to the AI service was refused. Check that the clinician service's account has the "
+                    "Vertex AI User role and that the model is enabled in your Google Cloud project.")
+        if code == 404 or "NOT_FOUND" in text or "NOTFOUND" in text:
+            return ("Likely cause: the AI model or region was not found. Check the model name and region settings, "
+                    "and that the model is offered in that region.")
+        if code in (500, 502, 503, 504, 529) or "UNAVAILABLE" in text or "OVERLOADED" in text:
+            return "Likely cause: the AI service is busy or temporarily unavailable. Please try again shortly."
+        if code == 400 or "INVALID_ARGUMENT" in text or "BADREQUEST" in text:
+            return "Likely cause: the AI service rejected the request, for example a PDF that is too large or cannot be read."
+        if isinstance(exc, ValueError) and "JSON" in text:
+            return "Likely cause: the AI's reply was not in the expected format. Please try again."
+        exc = exc.__cause__ or exc.__context__
+        depth += 1
+    return ""
+
+
+def fail(user_msg: str, context: str, ai: bool = False):
+    """Call from inside an except block: logs the traceback and shows a generic message with a reference.
+
+    With ai=True, a plain-English hint for common AI-service problems is added (see ai_error_hint).
+    """
     ref = secrets.token_hex(4)
     log.exception("%s [ref=%s]", context, ref)
-    st.error(f"{user_msg} (reference: {ref})")
+    hint = ai_error_hint(sys.exc_info()[1]) if ai else ""
+    st.error(f"{user_msg} (reference: {ref})" + (f"\n\n{hint}" if hint else ""))
 
 
 def strip_pdf_payloads(tests):
@@ -1428,7 +1477,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 st.warning(f"{e} You can enter the measurements by hand.")
             except Exception:
                 autofill_done[assessment_type] = pdf_sig
-                fail("Couldn't read the measurements from the PDF. Please enter them by hand.", "PDF auto-fill failed")
+                fail("Couldn't read the measurements from the PDF. Please enter them by hand.", "PDF auto-fill failed", ai=True)
 
     needs_verification = bool(pdf_sig) and autofill_unverified.get(assessment_type) == pdf_sig
     if needs_verification:
@@ -1507,7 +1556,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         except PdfAttachError as e:
                             st.error(str(e))
                         except Exception:
-                            fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}")
+                            fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}", ai=True)
                         finally:
                             delete_uploaded(file_refs)
                     if drafted:
@@ -1552,7 +1601,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             st.session_state.ta_master = strip_code_fences(generate(master_prompt))
                             drafted = True
                         except Exception:
-                            fail("Drafting failed. Please try again.", "Generation error in master synthesis")
+                            fail("Drafting failed. Please try again.", "Generation error in master synthesis", ai=True)
                     if drafted:
                         st.rerun()
 
@@ -1576,7 +1625,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             st.session_state.ta_pe = strip_code_fences(generate(pe_prompt))
                             drafted = True
                         except Exception:
-                            fail("Drafting failed. Please try again.", "Generation error in plain English breakdown")
+                            fail("Drafting failed. Please try again.", "Generation error in plain English breakdown", ai=True)
                     if drafted:
                         st.rerun()
 
@@ -1634,7 +1683,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         st.session_state[f"ta_plan_{tier}"] = value if isinstance(value, str) else json.dumps(value)
                     drafted = True
                 except Exception:
-                    fail("Generating tiered plans failed. Please try again.", "Generation error in tiered plans")
+                    fail("Generating tiered plans failed. Please try again.", "Generation error in tiered plans", ai=True)
             if drafted:
                 st.rerun()
 
@@ -1955,3 +2004,11 @@ elif app_mode == "Secure Patient Mobile Portal":
 
             st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
             components.html(html_output, height=800, scrolling=True)
+
+
+# --- Footer on the patient site: privacy notice link ---
+if app_mode == PATIENT_VIEW:
+    _footer = f"&copy; {datetime.date.today().year} Chudleigh Health Hub"
+    if PRIVACY_NOTICE_URL.lower().startswith("https://"):
+        _footer += f" &middot; <a href='{esc(PRIVACY_NOTICE_URL)}' target='_blank' rel='noopener noreferrer'>Privacy notice</a>"
+    st.markdown(f"<div class='site-footer'>{_footer}</div>", unsafe_allow_html=True)
