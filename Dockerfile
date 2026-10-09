@@ -21,8 +21,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Copy only the application (not .env files, keys, PDFs, etc.). Owned by root, so read-only for appuser.
-COPY app.py .
+# Copy only the application code (not .env files, keys, PDFs, tests, etc.). Owned by root, so read-only for appuser.
+COPY app.py helpers.py ./
 
 USER appuser
 
