@@ -1,5 +1,10 @@
+# Lower bounds only. Once the app is running well, pin exact versions so a surprise upgrade can't break a deploy:
+#   docker run --rm <your-image> pip freeze   (then paste the versions here as name==version)
 streamlit>=1.40
 google-cloud-firestore>=2.19
 google-genai>=1.0
 stripe>=10.0
 nh3>=0.2.17
+# Needed to verify the signed sign-in token that Google IAP attaches (clinician service):
+cryptography>=42
+requests>=2.31
