@@ -2,7 +2,6 @@ import os
 import io
 import re
 import json
-import html
 import hmac
 import math
 import time
@@ -10,7 +9,7 @@ import secrets
 import hashlib
 import logging
 import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import nh3
 import stripe
@@ -19,6 +18,21 @@ import streamlit.components.v1 as components
 from google import genai
 from google.genai import errors as genai_errors
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from helpers import (
+    PIN_HASH_ITERATIONS,
+    client_ip_from_xff,
+    esc,
+    fmt_price,
+    hash_pin,
+    parse_price,
+    patient_key,
+    redact_for_ai,
+    short_ref,
+    strip_code_fences,
+    verify_pin,
+)
 
 # --- LOGGING (stdout -> Cloud Logging). Never log patient names, PINs or clinical content. ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -35,13 +49,16 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 MIN_NEW_PIN_LENGTH = 6          # new / reset PINs
 LEGACY_MIN_PIN_LENGTH = 4       # existing 4-digit PINs can still sign in
 MAX_PIN_LENGTH = 8
-PIN_HASH_ITERATIONS = 310_000
 MAX_LOGIN_ATTEMPTS = 5
+MAX_CLINICIAN_ATTEMPTS_PER_IP = 5
+MAX_CLINICIAN_ATTEMPTS_GLOBAL = 25      # ceiling across all addresses (guards against rotating IPs)
+MAX_PATIENT_ATTEMPTS_PER_IP = 25        # stops one address spraying many names
 LOCKOUT_SECONDS = 15 * 60
 PATIENT_SESSION_SECONDS = 30 * 60
 CLINICIAN_SESSION_SECONDS = 60 * 60
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MAX_FIRESTORE_DOC_BYTES = 950_000
+PDF_READY_TIMEOUT_SECONDS = 120
 
 REPORTS = "longevity_reports"
 TIERS = ("30", "60", "90")
@@ -195,18 +212,6 @@ gemini_client = init_gemini()
 # ==========================================
 # HELPERS
 # ==========================================
-def esc(value) -> str:
-    """Escape any user/DB-supplied value before placing it in HTML."""
-    return html.escape("" if value is None else str(value), quote=True)
-
-
-_FENCE_RE = re.compile(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$")
-
-
-def strip_code_fences(text: str) -> str:
-    return _FENCE_RE.sub("", text or "").strip()
-
-
 def clean_html(fragment: str) -> str:
     """Sanitise AI-generated or clinician-edited HTML (removes scripts, event handlers, etc.)."""
     return nh3.clean(strip_code_fences(fragment))
@@ -219,66 +224,21 @@ def fail(user_msg: str, context: str):
     st.error(f"{user_msg} (reference: {ref})")
 
 
-def patient_key(name: str):
-    """Firestore document ID for a participant. Returns None for names that can't be used safely."""
-    key = (name or "").strip().lower()
-    if not key or len(key) > 200 or "/" in key or key in (".", ".."):
-        return None
-    if key.startswith("__") and key.endswith("__"):
-        return None
-    return key
-
-
-def parse_price(value):
-    try:
-        d = Decimal(str(value).strip().lstrip("£").strip())
-    except (InvalidOperation, ValueError):
-        return None
-    if not d.is_finite() or d < Decimal("0.50") or d > Decimal("10000"):
-        return None
-    return d.quantize(Decimal("0.01"))
-
-
-def fmt_price(d) -> str:
-    if d is None:
-        return "—"
-    return str(int(d)) if d == d.to_integral_value() else f"{d:.2f}"
-
-
 def strip_pdf_payloads(tests):
     """Remove raw PDF data so records stay under Firestore's 1 MiB limit and out of prompts."""
     return [{k: v for k, v in t.items() if k not in ("pdf_b64", "pdf_bytes")} for t in (tests or [])]
 
 
-# --- PIN hashing (PBKDF2-SHA256, per-user salt) ---
-def hash_pin(pin: str, salt: bytes = None, iterations: int = PIN_HASH_ITERATIONS):
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, iterations)
-    return salt.hex(), digest.hex()
-
-
+# --- PIN storage (hashing itself lives in helpers.py) ---
 def pin_fields(pin: str) -> dict:
     salt, digest = hash_pin(pin)
     return {
         "pin_hash": digest,
         "pin_salt": salt,
         "pin_iterations": PIN_HASH_ITERATIONS,
+        "pin_weak": len(pin) < MIN_NEW_PIN_LENGTH,  # flags short legacy PINs so a clinician can reset them
         "pin": firestore.DELETE_FIELD,  # remove any legacy plaintext PIN
     }
-
-
-def verify_pin(pin: str, record) -> bool:
-    if not record:
-        hash_pin(pin)  # equalise timing so unknown names can't be detected
-        return False
-    if record.get("pin_hash") and record.get("pin_salt"):
-        _, digest = hash_pin(pin, bytes.fromhex(record["pin_salt"]), int(record.get("pin_iterations", PIN_HASH_ITERATIONS)))
-        return hmac.compare_digest(digest, record["pin_hash"])
-    legacy = record.get("pin")
-    if legacy is not None:
-        hash_pin(pin)
-        return hmac.compare_digest(str(legacy).strip().encode(), pin.encode())
-    return False
 
 
 # --- Brute-force protection (shared across all app instances via Firestore) ---
@@ -299,23 +259,55 @@ def lockout_remaining(scope: str, identifier: str) -> int:
     return 0
 
 
-def record_failed_attempt(scope: str, identifier: str):
-    time.sleep(1)  # slow down automated guessing
+@firestore.transactional
+def _bump_attempts(transaction, ref, now, max_attempts):
+    """Read-modify-write inside a transaction so simultaneous guesses are all counted."""
+    snap = ref.get(transaction=transaction)
+    data = snap.to_dict() if snap.exists else {}
+    if now - data.get("window_start", 0) > LOCKOUT_SECONDS:
+        data = {"window_start": now, "count": 0}
+    data["count"] = data.get("count", 0) + 1
+    if data["count"] >= max_attempts:
+        data = {"window_start": now, "count": 0, "locked_until": now + LOCKOUT_SECONDS}
+    transaction.set(ref, data)
+
+
+def record_failed_attempt(scope: str, identifier: str, max_attempts: int = MAX_LOGIN_ATTEMPTS, delay: bool = True):
+    if delay:
+        time.sleep(1)  # slow down automated guessing
     if not db:
         return
     try:
-        ref = _attempt_ref(scope, identifier)
-        snap = ref.get()
-        now = time.time()
-        data = snap.to_dict() if snap.exists else {}
-        if now - data.get("window_start", 0) > LOCKOUT_SECONDS:
-            data = {"window_start": now, "count": 0}
-        data["count"] = data.get("count", 0) + 1
-        if data["count"] >= MAX_LOGIN_ATTEMPTS:
-            data = {"window_start": now, "count": 0, "locked_until": now + LOCKOUT_SECONDS}
-        ref.set(data)
+        _bump_attempts(db.transaction(), _attempt_ref(scope, identifier), time.time(), max_attempts)
     except Exception:
         log.exception("Failed to record login attempt")
+
+
+def client_ip() -> str:
+    """Best-effort client address (Cloud Run puts it in X-Forwarded-For)."""
+    try:
+        return client_ip_from_xff(st.context.headers.get("x-forwarded-for", ""))
+    except Exception:
+        return "unknown"
+
+
+def audit(event: str, key: str = "", **details):
+    """Write an audit-trail entry. Stores a short hash of the patient key, never the name.
+
+    Failures are logged but never block the action being audited.
+    """
+    if not db:
+        return
+    try:
+        db.collection("audit_log").add({
+            "event": event,
+            "patient_ref": short_ref(key) if key else None,
+            "at": firestore.SERVER_TIMESTAMP,
+            "ip": client_ip(),
+            **details,
+        })
+    except Exception:
+        log.exception("Audit write failed")
 
 
 def clear_attempts(scope: str, identifier: str):
@@ -347,17 +339,53 @@ def generate(contents, json_mode: bool = False) -> str:
     raise RuntimeError("Model unavailable")
 
 
+class PdfAttachError(Exception):
+    """A PDF could not be prepared for Gemini (message is safe to show to the clinician)."""
+
+
+def wait_until_active(f, timeout: int = PDF_READY_TIMEOUT_SECONDS):
+    """Block until Gemini has finished processing an uploaded file.
+
+    Using a file before it is ACTIVE is a common cause of intermittent 400 errors on large PDFs.
+    """
+    deadline = time.time() + timeout
+    while True:
+        state = getattr(f, "state", None)
+        name = str(getattr(state, "name", state) or "ACTIVE").upper()  # no state reported -> treat as ready
+        if "FAILED" in name:
+            raise RuntimeError("Gemini could not process the PDF")
+        if "ACTIVE" in name:
+            return f
+        if time.time() >= deadline:
+            raise TimeoutError("PDF still processing after timeout")
+        time.sleep(2)
+        f = gemini_client.files.get(name=f.name)
+
+
 def upload_pdfs(tests):
+    """Upload each test's PDF to Gemini and wait until it is ready.
+
+    If any PDF fails, everything uploaded so far is deleted and PdfAttachError is raised, so a review is
+    never drafted while silently ignoring an attached report.
+    """
     refs = []
     for t in tests:
         data = t.get("pdf_bytes")
         if not data:
             continue
+        uploaded = None
         try:
-            refs.append(gemini_client.files.upload(file=io.BytesIO(data), config={"mime_type": "application/pdf"}))
-        except Exception:
+            uploaded = gemini_client.files.upload(file=io.BytesIO(data), config={"mime_type": "application/pdf"})
+            refs.append(wait_until_active(uploaded))
+        except Exception as e:
             log.exception("PDF upload to Gemini failed")
-            st.warning(f"Could not attach the PDF for {t['type']}; drafting from the entered metrics only.")
+            if uploaded is not None:
+                delete_uploaded([uploaded])
+            delete_uploaded(refs)
+            raise PdfAttachError(
+                f"Could not prepare the PDF for {t['type']}. Please try again, "
+                "or remove that PDF and draft from the entered metrics only."
+            ) from e
     return refs
 
 
@@ -374,6 +402,67 @@ def gemini_ready() -> bool:
         st.error("AI drafting is unavailable: GEMINI_API_KEY is not configured on the server.")
         return False
     return True
+
+
+# --- Participant lookups ---
+@st.cache_data(ttl=60, show_spinner=False)
+def lookup_history(key: str):
+    """Return (profile_info or None, previous_scan_summary or None). Cached for a minute.
+
+    Only non-sensitive fields are returned (never PIN data), and each publish clears the cache.
+    """
+    profile_ref = db.collection(REPORTS).document(key)
+    snap = profile_ref.get()
+    profile = None
+    if snap.exists:
+        d = snap.to_dict() or {}
+        legacy_pin = d.get("pin")
+        profile = {
+            "pin_weak": bool(d.get("pin_weak")) or (legacy_pin is not None and len(str(legacy_pin)) < MIN_NEW_PIN_LENGTH),
+            **{f"price_{t}": d.get(f"price_{t}") for t in TIERS},
+        }
+    previous = None
+    docs = list(
+        profile_ref.collection("scans")
+        .order_by("assessment_date", direction=firestore.Query.DESCENDING)
+        .limit(1)
+        .stream()
+    )
+    if docs:
+        p = docs[0].to_dict() or {}
+        previous = {k: p.get(k) for k in ("assessment_date", "tests_count", "tests", "master_html", "age_gender", "body_mass_height")}
+    return profile, previous
+
+
+# --- Data-rights tools (export / delete) ---
+_SECRET_FIELDS = ("pin", "pin_hash", "pin_salt", "pin_iterations")
+
+
+def export_participant(key: str) -> str:
+    """Everything held about one participant, as JSON (PIN data excluded)."""
+    profile_ref = db.collection(REPORTS).document(key)
+    snap = profile_ref.get()
+    if not snap.exists:
+        raise LookupError("No record found")
+    profile = {k: v for k, v in (snap.to_dict() or {}).items() if k not in _SECRET_FIELDS}
+    scans = {d.id: d.to_dict() for d in profile_ref.collection("scans").stream()}
+    payments = [
+        {"checkout_session": d.id, **(d.to_dict() or {})}
+        for d in db.collection("payments").where(filter=FieldFilter("patient_key", "==", key)).stream()
+    ]
+    return json.dumps({"profile": profile, "scans": scans, "payments": payments}, default=str, indent=2)
+
+
+def delete_participant(key: str) -> int:
+    """Permanently delete a participant's profile and scans. Payment records are kept for accounting."""
+    profile_ref = db.collection(REPORTS).document(key)
+    deleted = 0
+    for d in profile_ref.collection("scans").stream():
+        d.reference.delete()
+        deleted += 1
+    profile_ref.delete()
+    clear_attempts("patient", key)
+    return deleted
 
 
 # --- Report building ---
@@ -476,12 +565,14 @@ def handle_stripe_return(session_id: str):
              "Unlock after payment failed")
         return
 
+    audit("payment_unlock", key, tier=tier)
     st.success(f"🎉 Payment verified! Your {tier}-Day Action Plan has been unlocked. Sign in below to view it.")
 
 
 # ==========================================
 # ASSESSMENT INPUT DEFINITIONS
-# Each assessment is a list of columns; each field is (label, default, payload key).
+# Each assessment is a list of columns; each field is (label, example shown as a placeholder, payload key).
+# Fields start EMPTY so example numbers can never end up in a real report by accident.
 # ==========================================
 ASSESSMENTS = {
     "SpO2 / Pulse Oximetry (ViHealth)": {
@@ -576,7 +667,6 @@ MODULES = [
         "spinner": "Synthesizing cardiorespiratory clinical review...",
         "role": "an expert clinical cardiologist and longevity physician",
         "domain": "Cardiorespiratory and Autonomic function",
-        "success": "Cardiorespiratory review drafted successfully!",
         "edit_label": "Edit Cardiorespiratory Clinical Review (HTML)",
     },
     {
@@ -589,7 +679,6 @@ MODULES = [
         "spinner": "Synthesizing metabolic and body composition clinical review...",
         "role": "an expert clinical metabolic specialist and longevity physician",
         "domain": "Body Composition and AGE Reader metrics",
-        "success": "Metabolic review drafted successfully!",
         "edit_label": "Edit Body Comp & Metabolic Clinical Review (HTML)",
     },
     {
@@ -602,7 +691,6 @@ MODULES = [
         "spinner": "Synthesizing biomechanical and neuromuscular review...",
         "role": "an expert clinical biomechanist and sports physiologist",
         "domain": "Biomechanical and Neuromuscular Function",
-        "success": "Biomechanical review drafted successfully!",
         "edit_label": "Edit Biomechanical Clinical Review (HTML)",
     },
 ]
@@ -712,6 +800,51 @@ REPORT_TEMPLATE = """
 """
 
 
+def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, prices, unlock_flags):
+    """Build the patient report HTML.
+
+    Returns (report_html, sanitised_text_by_key, raw_plans_by_tier). `state` is st.session_state.
+    """
+    tests_html = ""
+    for idx, t in enumerate(tests):
+        items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
+        list_content = "".join(items) or "<li>Metrics extracted directly via clinical inspection.</li>"
+        pdf_note_box = ""
+        if t.get("pdf_filename"):
+            pdf_note_box = (
+                '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
+                f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {esc(t["pdf_filename"])} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
+                '</div>'
+            )
+        tests_html += (
+            '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
+            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx + 1}: {esc(t["type"])}</h3>'
+            f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
+            f'{pdf_note_box}'
+            '</div>'
+        )
+
+    safe = {k: clean_html(state[k]) for k in TEXT_KEYS}
+    raw_plans = {tier: safe[f"ta_plan_{tier}"] for tier in TIERS}
+
+    report_html = REPORT_TEMPLATE.format(
+        participant_name=esc(participant_name),
+        age_gender=esc(age_gender or "Not specified"),
+        assessment_date=esc(assessment_date),
+        body_mass_height=esc(body_mass_height or "Not specified"),
+        master_html=safe["ta_master"] or "<p>Master summary pending.</p>",
+        mod1_html=safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>",
+        mod2_html=safe["ta_mod2"] or "<p>Metabolic module pending.</p>",
+        mod3_html=safe["ta_mod3"] or "<p>Biomechanical module pending.</p>",
+        plain_english_html=safe["ta_pe"] or "<p>Plain English summary pending.</p>",
+        plan_section=build_plan_section(raw_plans, unlock_flags, {t: fmt_price(p) for t, p in prices.items()}),
+        tests_count=len(tests),
+        tests_html=tests_html,
+        year=datetime.date.today().year,
+    )
+    return report_html, safe, raw_plans
+
+
 # ==========================================
 # CLINICIAN AUTHENTICATION
 # ==========================================
@@ -734,7 +867,8 @@ def clinician_gate() -> bool:
         submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
 
     if submitted:
-        remaining = lockout_remaining("clinician", "dashboard")
+        ip = client_ip()
+        remaining = max(lockout_remaining("clinician-ip", ip), lockout_remaining("clinician-global", "dashboard"))
         if remaining:
             st.error(f"Too many failed attempts. Try again in {math.ceil(remaining / 60)} minute(s).")
             return False
@@ -743,11 +877,13 @@ def clinician_gate() -> bool:
             hashlib.sha256(CLINICIAN_PASSWORD.encode("utf-8")).digest(),
         )
         if ok:
-            clear_attempts("clinician", "dashboard")
+            clear_attempts("clinician-ip", ip)
             st.session_state.clinician_auth_at = time.time()
             log.info("Clinician signed in")
+            audit("clinician_login")
             st.rerun()
-        record_failed_attempt("clinician", "dashboard")
+        record_failed_attempt("clinician-ip", ip, MAX_CLINICIAN_ATTEMPTS_PER_IP)
+        record_failed_attempt("clinician-global", "dashboard", MAX_CLINICIAN_ATTEMPTS_GLOBAL, delay=False)
         log.warning("Failed clinician sign-in")
         st.error("Incorrect password.")
     return False
@@ -774,7 +910,7 @@ else:
 # ==========================================
 if app_mode == "Clinician Dashboard" and clinician_gate():
     if st.sidebar.button("🚪 Sign out", use_container_width=True):
-        for k in ["clinician_auth_at", "participant_tests", *TEXT_KEYS]:
+        for k in ["clinician_auth_at", "participant_tests", "dr_export", *TEXT_KEYS]:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -807,25 +943,20 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     body_mass_height = st.text_input("Body Mass / Height / BMI", placeholder="e.g. 78 kg / 175 cm / 25.4", key="p_bm", max_chars=120)
 
-    # --- EXISTING PROFILE & LONGITUDINAL HISTORY CHECK ---
+    # --- EXISTING PROFILE & LONGITUDINAL HISTORY CHECK (cached for 60s) ---
     c_key = patient_key(participant_name)
     if participant_name and not c_key:
         st.warning("This name can't be used as a record key (it must not contain '/' and must be under 200 characters).")
 
     existing_profile = False
+    existing_info = None
     previous_scan = None
+    confirm_same_person = False
     if c_key and db:
         try:
-            profile_ref = db.collection(REPORTS).document(c_key)
-            existing_profile = profile_ref.get().exists
-            past_docs = list(
-                profile_ref.collection("scans")
-                .order_by("assessment_date", direction=firestore.Query.DESCENDING)
-                .limit(1)
-                .stream()
-            )
-            if past_docs:
-                previous_scan = past_docs[0].to_dict()
+            existing_info, previous_scan = lookup_history(c_key)
+            existing_profile = existing_info is not None
+            if previous_scan:
                 st.markdown(
                     f"""
                     <div class='history-box'>
@@ -835,10 +966,22 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     unsafe_allow_html=True
                 )
             if existing_profile:
-                st.info(
-                    "An existing record matches this name. Publishing will add a scan to that record. "
-                    "Check this is the same person — records are matched by name only."
+                prev_details = ""
+                if previous_scan:
+                    prev_details = (
+                        f" The previous scan recorded: age/gender \"{previous_scan.get('age_gender') or 'not specified'}\", "
+                        f"body metrics \"{previous_scan.get('body_mass_height') or 'not specified'}\"."
+                    )
+                st.warning(
+                    "An existing record matches this name. Publishing will add a scan to that record, and whoever signs in with "
+                    "that name and PIN will see it. Records are matched by name only." + prev_details
                 )
+                confirm_same_person = st.checkbox(
+                    "I have checked that this is the same person as the existing record",
+                    key=f"confirm_same::{c_key}",
+                )
+                if existing_info.get("pin_weak"):
+                    st.warning("This participant still has a short legacy PIN. Enter a new 6-8 digit PIN above to replace it.")
         except Exception:
             log.exception("History lookup failed")
             st.warning("Could not check for previous scans.")
@@ -855,6 +998,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         key=f"pdf_{assessment_type}"
     )
 
+    st.caption(
+        "Uploaded PDFs are sent to Google's Gemini service to help draft the review, then deleted from it. "
+        "Where possible, avoid uploading reports that show the participant's name or date of birth."
+    )
     pdf_bytes_content = None
     pdf_filename_str = None
 
@@ -873,18 +1020,20 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     test_payload_data = {}
     for col, fields in zip(st.columns(len(spec["columns"])), spec["columns"]):
         with col:
-            for label, default, payload_key in fields:
-                test_payload_data[payload_key] = st.text_input(label, default, key=f"in::{assessment_type}::{label}", max_chars=200)
-    for label, default, payload_key in spec.get("full_width", []):
-        test_payload_data[payload_key] = st.text_input(label, default, key=f"in::{assessment_type}::{label}", max_chars=200)
+            for label, example, payload_key in fields:
+                test_payload_data[payload_key] = st.text_input(label, value="", placeholder=f"e.g. {example}", key=f"in::{assessment_type}::{label}", max_chars=200)
+    for label, example, payload_key in spec.get("full_width", []):
+        test_payload_data[payload_key] = st.text_input(label, value="", placeholder=f"e.g. {example}", key=f"in::{assessment_type}::{label}", max_chars=200)
 
     if st.button("➕ Add Assessment to Participant Profile", use_container_width=True):
         if not participant_name:
             st.warning("Please enter the participant's name before adding assessments.")
+        elif not any((v or "").strip() for v in test_payload_data.values()):
+            st.warning("Please enter at least one measurement before adding this assessment. Blank fields are left out of the report.")
         else:
             st.session_state.participant_tests.append({
                 "type": assessment_type,
-                "data": test_payload_data,
+                "data": {k: (v or "").strip() for k, v in test_payload_data.items()},
                 "pdf_filename": pdf_filename_str,
                 "pdf_bytes": pdf_bytes_content,
             })
@@ -914,7 +1063,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     with st.spinner(mod["spinner"]):
                         file_refs = []
                         try:
-                            context_str = f"Participant: {participant_name}, Age/Gender: {age_gender}\n"
+                            context_str = f"Participant details (age/sex only; identity withheld): {redact_for_ai(age_gender)}\n"
                             for t in mod_tests:
                                 context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
                             file_refs = upload_pdfs(mod_tests)
@@ -928,6 +1077,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             )
                             st.session_state[mod["state_key"]] = strip_code_fences(generate([*file_refs, prompt]))
                             drafted = True
+                        except PdfAttachError as e:
+                            st.error(str(e))
                         except Exception:
                             fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}")
                         finally:
@@ -1021,6 +1172,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     bad_prices = [tier for tier, p in prices.items() if p is None]
     if bad_prices:
         st.warning(f"Invalid price for the {', '.join(bad_prices)}-day tier(s). Enter an amount between £0.50 and £10,000.")
+    if existing_info:
+        stored_prices = {t: parse_price(existing_info.get(f"price_{t}")) for t in TIERS}
+        if any(stored_prices[t] is not None and stored_prices[t] != prices[t] for t in TIERS):
+            st.warning(
+                "Stored prices for this participant: "
+                + ", ".join(f"{t}-day £{fmt_price(stored_prices[t])}" for t in TIERS)
+                + ". Publishing will replace them with the prices entered above."
+            )
 
     if st.button("✨ Draft Prioritized 30/60/90-Day Tiered Plans", use_container_width=True, key="btn_tier_plans"):
         if not participant_name:
@@ -1058,12 +1217,31 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.markdown("---")
     st.markdown("#### 🔓 Patient Portal Unlock Tiers")
+    st.caption("Ticking a plan unlocks it. Plans a participant has already paid for stay unlocked when you publish again.")
     unlock_flags = {
         tier: st.checkbox(f"Unlock {tier}-Day Plan in Patient Portal", value=TIER_INFO[tier]["default_unlocked"], key=f"chk_unl_{tier}")
         for tier in TIERS
     }
 
     st.divider()
+
+    # --- REVIEW, APPROVE & PUBLISH ---
+    st.markdown("#### ✅ Review & Approve")
+    if st.checkbox("👁️ Preview the report as the participant will see it", key="chk_preview"):
+        if participant_name:
+            preview_html, _, _ = build_report(
+                participant_name, age_gender, assessment_date, body_mass_height,
+                st.session_state.participant_tests, st.session_state, prices, unlock_flags,
+            )
+            components.html(preview_html, height=700, scrolling=True)
+        else:
+            st.info("Enter the participant's name to preview the report.")
+
+    approver = st.text_input("Approving clinician (full name)", key="approver_name", max_chars=80)
+    approved = st.checkbox(
+        "I confirm a clinician has reviewed and approved this report, including all AI-assisted drafting, before it is released to the participant.",
+        key="chk_approved",
+    )
 
     # --- PUBLISH & SYNC TO GOOGLE CLOUD (LONGITUDINAL SUBCOLLECTION) ---
     if st.button("💾 Publish & Sync New Scan & Tiered Plans to Cloud", type="primary", use_container_width=True):
@@ -1074,48 +1252,19 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.warning(f"The PIN must be {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits.")
         elif not pin and not existing_profile:
             st.warning(f"New participants need a {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digit security PIN.")
+        elif existing_profile and not confirm_same_person:
+            st.warning("An existing record matches this name. Please tick the box confirming it is the same person before publishing.")
         elif bad_prices:
             st.warning("Please fix the tier prices before publishing.")
+        elif not (approver or "").strip() or not approved:
+            st.warning("Please enter the approving clinician's name and tick the approval box before publishing.")
         elif not db:
             st.error("Database connection unavailable.")
         else:
             try:
-                tests_html = ""
-                for idx, t in enumerate(st.session_state.participant_tests):
-                    items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
-                    list_content = "".join(items) or "<li>Metrics extracted directly via clinical inspection.</li>"
-                    pdf_note_box = ""
-                    if t.get("pdf_filename"):
-                        pdf_note_box = (
-                            '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
-                            f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {esc(t["pdf_filename"])} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
-                            '</div>'
-                        )
-                    tests_html += (
-                        '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
-                        f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx + 1}: {esc(t["type"])}</h3>'
-                        f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
-                        f'{pdf_note_box}'
-                        '</div>'
-                    )
-
-                safe = {k: clean_html(st.session_state[k]) for k in TEXT_KEYS}
-                raw_plans = {tier: safe[f"ta_plan_{tier}"] for tier in TIERS}
-
-                final_html_output = REPORT_TEMPLATE.format(
-                    participant_name=esc(participant_name),
-                    age_gender=esc(age_gender or "Not specified"),
-                    assessment_date=esc(assessment_date),
-                    body_mass_height=esc(body_mass_height or "Not specified"),
-                    master_html=safe["ta_master"] or "<p>Master summary pending.</p>",
-                    mod1_html=safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>",
-                    mod2_html=safe["ta_mod2"] or "<p>Metabolic module pending.</p>",
-                    mod3_html=safe["ta_mod3"] or "<p>Biomechanical module pending.</p>",
-                    plain_english_html=safe["ta_pe"] or "<p>Plain English summary pending.</p>",
-                    plan_section=build_plan_section(raw_plans, unlock_flags, {t: fmt_price(p) for t, p in prices.items()}),
-                    tests_count=len(st.session_state.participant_tests),
-                    tests_html=tests_html,
-                    year=datetime.date.today().year,
+                final_html_output, safe, raw_plans = build_report(
+                    participant_name, age_gender, assessment_date, body_mass_height,
+                    st.session_state.participant_tests, st.session_state, prices, unlock_flags,
                 )
 
                 scan_id = str(assessment_date)
@@ -1131,6 +1280,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "plan_60_raw": raw_plans["60"],
                     "plan_90_raw": raw_plans["90"],
                     "html_output": final_html_output,
+                    "approved_by": approver.strip(),
+                    "approved_at": firestore.SERVER_TIMESTAMP,
                 }
                 record_size = len(json.dumps(scan_record, default=str).encode("utf-8"))
                 if record_size > MAX_FIRESTORE_DOC_BYTES:
@@ -1140,7 +1291,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         "name_lower": c_key,
                         "name": participant_name.strip(),
                         **{f"price_{tier}": fmt_price(prices[tier]) for tier in TIERS},
-                        **{f"unlock_{tier}": unlock_flags[tier] for tier in TIERS},
+                        # Only ever write True. A missing flag means "locked", and this way publishing can never
+                        # re-lock a plan the participant has already paid for (even if a payment lands mid-publish).
+                        **{f"unlock_{tier}": True for tier in TIERS if unlock_flags[tier]},
                         "updated_at": firestore.SERVER_TIMESTAMP,
                     }
                     if pin:
@@ -1149,10 +1302,52 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     profile_ref = db.collection(REPORTS).document(c_key)
                     profile_ref.set(profile_record, merge=True)
                     profile_ref.collection("scans").document(scan_id).set(scan_record)
+                    lookup_history.clear()
+                    audit("scan_published", c_key, scan_date=scan_id, approved_by=approver.strip())
                     log.info("Published scan %s", scan_id)
                     st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!")
             except Exception:
                 fail("Publishing failed. Nothing was lost locally; please try again.", "Publish to Firestore failed")
+
+    # --- DATA RIGHTS: EXPORT / DELETE ---
+    st.divider()
+    with st.expander("🛡️ Data rights: export or delete a participant's records"):
+        st.caption("Use this to answer a participant's data access or erasure request. Every export and deletion is written to the audit log.")
+        dr_name = st.text_input("Participant full name (exactly as recorded)", key="dr_name", max_chars=120)
+        dr_key = patient_key(dr_name)
+        if dr_key and db:
+            if st.button("📦 Prepare export", key="dr_export_btn"):
+                try:
+                    st.session_state["dr_export"] = {"key": dr_key, "json": export_participant(dr_key)}
+                    audit("data_export", dr_key)
+                except LookupError:
+                    st.warning("No record found for that name.")
+                except Exception:
+                    fail("The export failed. Please try again.", "Data export failed")
+            export = st.session_state.get("dr_export")
+            if export and export["key"] == dr_key:
+                st.download_button(
+                    "📥 Download export (JSON)",
+                    data=export["json"],
+                    file_name="participant_export.json",
+                    mime="application/json",
+                    key="dr_download",
+                )
+
+            st.markdown("**Delete this participant's profile and scans** (cannot be undone; payment records are kept for accounting)")
+            confirm_text = st.text_input("Type the participant's full name again to confirm", key="dr_confirm", max_chars=120)
+            if st.button("🗑️ Permanently delete these records", key="dr_delete_btn"):
+                if patient_key(confirm_text) != dr_key:
+                    st.warning("The name you typed doesn't match.")
+                else:
+                    try:
+                        deleted_scans = delete_participant(dr_key)
+                        audit("participant_deleted", dr_key, scans_deleted=deleted_scans)
+                        lookup_history.clear()
+                        st.session_state.pop("dr_export", None)
+                        st.success(f"Deleted the profile and {deleted_scans} scan(s).")
+                    except Exception:
+                        fail("The deletion failed. Please try again.", "Participant deletion failed")
 
 # ==========================================
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
@@ -1193,7 +1388,8 @@ elif app_mode == "Secure Patient Mobile Portal":
             lookup_key = patient_key(client_lookup)
             pin = (client_pin or "").strip()
             limiter_id = lookup_key or "invalid-name"
-            remaining = lockout_remaining("patient", limiter_id)
+            ip = client_ip()
+            remaining = max(lockout_remaining("patient", limiter_id), lockout_remaining("patient-ip", ip))
             generic_error = "We couldn't verify those details. Please check your name and PIN, or contact Chudleigh Health Hub."
 
             if remaining:
@@ -1207,12 +1403,14 @@ elif app_mode == "Secure Patient Mobile Portal":
                     record = snap.to_dict() if snap.exists else None
                     if verify_pin(pin, record):
                         clear_attempts("patient", limiter_id)
+                        audit("patient_login", lookup_key)
                         if not record.get("pin_hash"):
                             doc_ref.update(pin_fields(pin))  # migrate legacy plaintext PIN
                         st.session_state.portal_auth = {"key": lookup_key, "at": time.time()}
                         signed_in = True
                     else:
                         record_failed_attempt("patient", limiter_id)
+                        record_failed_attempt("patient-ip", ip, MAX_PATIENT_ATTEMPTS_PER_IP, delay=False)
                         signed_in = False
                 except Exception:
                     signed_in = None
@@ -1231,26 +1429,38 @@ elif app_mode == "Secure Patient Mobile Portal":
                 st.session_state.pop(k, None)
             st.rerun()
 
+        load_failed = False
         try:
             profile_ref = db.collection(REPORTS).document(lookup_key)
             snap = profile_ref.get()
             client_data = snap.to_dict() if snap.exists else None
-            scans_docs = list(
-                profile_ref.collection("scans").order_by("assessment_date", direction=firestore.Query.DESCENDING).stream()
-            ) if client_data else []
+            # Only the dates are listed here; the full report is fetched below for the one scan being viewed.
+            scan_ids = [
+                d.id for d in profile_ref.collection("scans")
+                .order_by("assessment_date", direction=firestore.Query.DESCENDING)
+                .select(["assessment_date"])
+                .stream()
+            ] if client_data else []
         except Exception:
-            client_data, scans_docs = None, []
+            client_data, scan_ids = None, []
+            load_failed = True
             fail("We couldn't load your records right now. Please try again shortly.", "Portal load failed")
 
-        if client_data is None:
+        if load_failed:
+            pass  # error already shown; keep the participant signed in so they can retry
+        elif client_data is None:
             st.session_state.pop("portal_auth", None)
-        elif not scans_docs:
+        elif not scan_ids:
             st.warning("No assessment scans found on file.")
         else:
             display_name = client_data.get("name", "")
-            scan_dates = [d.id for d in scans_docs]
-            selected_scan_date = st.selectbox("Select Assessment Date", scan_dates, key="portal_scan_date")
-            scan_data = next((d for d in scans_docs if d.id == selected_scan_date), scans_docs[0]).to_dict()
+            selected_scan_date = st.selectbox("Select Assessment Date", scan_ids, key="portal_scan_date")
+            try:
+                scan_snap = profile_ref.collection("scans").document(selected_scan_date).get()
+                scan_data = (scan_snap.to_dict() or {}) if scan_snap.exists else {}
+            except Exception:
+                scan_data = {}
+                fail("We couldn't load that report right now. Please try again shortly.", "Scan load failed")
             html_output = scan_data.get("html_output") or "<p>Report payload not found.</p>"
 
             st.success(f"Authentication successful. Welcome back, {display_name}!")
@@ -1260,7 +1470,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                     <h3>📋 Longevity Profile &amp; Scan History</h3>
                     <p><b>Participant:</b> {esc(display_name)}</p>
                     <p><b>Viewing Assessment Date:</b> {esc(selected_scan_date)}</p>
-                    <p><b>Total Scans On File:</b> {len(scans_docs)}</p>
+                    <p><b>Total Scans On File:</b> {len(scan_ids)}</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
