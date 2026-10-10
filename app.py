@@ -231,6 +231,12 @@ st.markdown(
         color: #1e3a8a;
     }
     .history-box b { color: #1e3a8a !important; }
+    .check-banner, .check-note { background-color: #fef2f2; border: 2px solid #dc2626; border-left: 10px solid #dc2626;
+        border-radius: 8px; margin: 10px 0 16px 0; font-size: 1.15rem; font-weight: 700; line-height: 1.5; color: #7f1d1d; }
+    .check-banner { padding: 14px 18px; }
+    .check-note { padding: 10px 14px; border-radius: 6px; }
+    .check-banner, .check-banner *, .check-note, .check-note * { color: #7f1d1d !important; }
+    .check-note span { font-size: 0.85rem; font-weight: 400; }
     footer { visibility: hidden; }
     .site-footer { text-align: center; font-size: 12px; margin-top: 32px; opacity: 0.8; }
     .site-footer a { color: inherit !important; text-decoration: underline; }
@@ -1206,22 +1212,83 @@ def build_extraction_prompt(assessment_type: str, field_lines: str) -> str:
     )
 
 
-_CHECK_RE = re.compile(r"<!--\s*CHECK:\s*(.*?)\s*(?:-->|\Z)", re.S | re.I)  # an unclosed note still counts
+CHECK_FLAG = "⚠️"
+# A CHECK note may have symbols or an emoji before the word CHECK. An unclosed note still counts.
+_CHECK_RE = re.compile(r"<!--[^A-Za-z<>]*CHECK:\s*(.*?)\s*(?:-->|\Z)", re.S | re.I)
+_NOTE_SUFFIX_RE = re.compile(r"\s*(?:⚠️?\s*)*DELETE THIS WHOLE LINE WHEN RESOLVED\s*$", re.I)
+_ANY_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+# Pieces of a note left behind when someone deletes part of it: <>, <-->, < -->, a lone --> or a lone <!--
+_STRAY_RE = re.compile(r"<\s*>|<\s*-+\s*>|<!-(?!-)|<!--|-->")
+
+
+def _note_text(raw: str) -> str:
+    return _NOTE_SUFFIX_RE.sub("", " ".join(raw.split()))
 
 
 def extract_check_notes(text: str) -> list:
     """The notes the AI left for the clinician, as <!-- CHECK: ... --> comments. They are stripped from patient reports."""
-    return [" ".join(m.split()) for m in _CHECK_RE.findall(text or "")]
+    return [_note_text(m) for m in _CHECK_RE.findall(text or "")]
+
+
+def find_stray_fragments(text: str) -> list:
+    """Leftover pieces of a deleted note (for example <> or -->), which would otherwise show in the participant's report."""
+    rest = _ANY_COMMENT_RE.sub("", _CHECK_RE.sub("", text or ""))
+    found = []
+    for m in _STRAY_RE.finditer(rest):
+        if m.group(0) not in found:
+            found.append(m.group(0))
+    return found
+
+
+def has_unresolved_notes(text: str) -> bool:
+    return bool(extract_check_notes(text)) or bool(find_stray_fragments(text))
+
+
+def tidy_check_notes(text: str) -> str:
+    """Put every CHECK note on its own line, marked so it is easy to see and to delete whole (this also closes unclosed notes)."""
+    if not _CHECK_RE.search(text or ""):
+        return text
+    def one(m):
+        return f"\n\n<!-- {CHECK_FLAG} CHECK: {_note_text(m.group(1))}  {CHECK_FLAG} DELETE THIS WHOLE LINE WHEN RESOLVED -->\n\n"
+    return re.sub(r"\n{3,}", "\n\n", _CHECK_RE.sub(one, text)).strip()
+
+
+def highlight_check_notes(text: str) -> str:
+    """The draft as it will read, with each CHECK note shown as a bold red box where it sits. For the clinician only."""
+    out, last = [], 0
+    for m in _CHECK_RE.finditer(text or ""):
+        out.append(clean_html(text[last:m.start()]))
+        out.append(
+            f"<div class='check-note'>{CHECK_FLAG} CHECK: {esc(_note_text(m.group(1))[:300])}<br>"
+            "<span>Fix the text if needed, then delete this note's whole line in the box above.</span></div>"
+        )
+        last = m.end()
+    out.append(clean_html(text[last:]))
+    return "".join(out)
 
 
 def show_check_notes(text: str):
-    """Show the clinician any unresolved CHECK notes under a draft."""
+    """Show the clinician, in bold red, any unresolved CHECK notes and stray pieces under a draft."""
     notes = extract_check_notes(text)
+    strays = find_stray_fragments(text)
+    if not notes and not strays:
+        return
+    parts = []
     if notes:
-        st.warning(
-            "This draft flags points for you to verify against the source report. Resolve each one, then delete its "
-            "CHECK line from the text above.\n\n" + "\n".join(f"- {n[:300]}" for n in notes)
+        items = "".join(f"<li>{esc(n[:300])}</li>" for n in notes)
+        parts.append(
+            f"{CHECK_FLAG} CHECK NEEDED: {len(notes)} point(s) to verify against the source report<ul>{items}</ul>"
+            "Fix the text if needed, then <u>delete each CHECK line completely</u>, from &lt;!-- to --&gt;."
         )
+    if strays:
+        shown = ", ".join(f"<code>{esc(f)}</code>" for f in strays)
+        parts.append(
+            f"{CHECK_FLAG} STRAY PIECES of a note are still in the text ({shown}). Delete them, or they will show in the participant's report."
+        )
+    st.markdown("<div class='check-banner'>" + "<br><br>".join(parts) + "</div>", unsafe_allow_html=True)
+    if notes:
+        with st.expander("👁 Preview: where each note sits in the draft (the participant never sees the notes)", expanded=True):
+            st.markdown(highlight_check_notes(text), unsafe_allow_html=True)
 
 
 MODULES = [
@@ -1796,8 +1863,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
     st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
     st.caption(
-        "If a draft flags something to check, it appears as a CHECK note under the text box. Notes are removed from the "
-        "participant's report, and you cannot publish until each one is resolved and deleted."
+        "If a draft flags something to check, a bold red box appears under the text box, and the note is marked in the text "
+        "with a warning sign. Notes are removed from the participant's report, and you cannot publish until each one is "
+        "resolved and its whole line deleted."
     )
 
     for mod in MODULES:
@@ -1820,7 +1888,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                                 context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
                             file_refs = upload_pdfs(mod_tests)
                             prompt = build_module_prompt(mod, context_str)
-                            st.session_state[mod["state_key"]] = strip_code_fences(generate([*file_refs, prompt]))
+                            st.session_state[mod["state_key"]] = tidy_check_notes(strip_code_fences(generate([*file_refs, prompt])))
                             drafted = True
                         except PdfAttachError as e:
                             st.error(str(e))
@@ -1846,7 +1914,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             if st.button("✨ Draft Master Executive Synthesis & Delta Analysis", use_container_width=True, key="btn_master"):
                 if not any(st.session_state[k].strip() for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
                     st.warning("Please draft at least one module review first.")
-                elif any(extract_check_notes(st.session_state[k]) for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
+                elif any(has_unresolved_notes(st.session_state[k]) for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
                     st.warning("Please resolve and delete the CHECK notes in the module reviews before drafting the summary.")
                 elif gemini_ready():
                     drafted = False
@@ -1864,7 +1932,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                                 history_context,
                                 {k: st.session_state[k] for k in ("ta_mod1", "ta_mod2", "ta_mod3")},
                             )
-                            st.session_state.ta_master = strip_code_fences(generate(master_prompt))
+                            st.session_state.ta_master = tidy_check_notes(strip_code_fences(generate(master_prompt)))
                             drafted = True
                         except Exception:
                             fail("Drafting failed. Please try again.", "Generation error in master synthesis", ai=True)
@@ -1875,14 +1943,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             if st.button("🗣️ Draft Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
                 if not st.session_state.ta_master.strip():
                     st.warning("Please generate the Master Executive Synthesis first.")
-                elif extract_check_notes(st.session_state.ta_master):
+                elif has_unresolved_notes(st.session_state.ta_master):
                     st.warning("Please resolve and delete the CHECK notes in the master summary first.")
                 elif gemini_ready():
                     drafted = False
                     with st.spinner("Drafting plain English coaching guide..."):
                         try:
                             pe_prompt = build_plain_english_prompt(st.session_state.ta_master)
-                            st.session_state.ta_pe = strip_code_fences(generate(pe_prompt))
+                            st.session_state.ta_pe = tidy_check_notes(strip_code_fences(generate(pe_prompt)))
                             drafted = True
                         except Exception:
                             fail("Drafting failed. Please try again.", "Generation error in plain English breakdown", ai=True)
@@ -1924,7 +1992,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.warning("Please enter participant name.")
         elif not st.session_state.ta_master.strip():
             st.warning("Please generate the Master Executive Synthesis first.")
-        elif extract_check_notes(st.session_state.ta_master):
+        elif has_unresolved_notes(st.session_state.ta_master):
             st.warning("Please resolve and delete the CHECK notes in the master summary first.")
         elif gemini_ready():
             drafted = False
@@ -1936,7 +2004,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         raise ValueError("Plan response was not a JSON object")
                     for tier in TIERS:
                         value = plan_data.get(f"plan_{tier}", "")
-                        st.session_state[f"ta_plan_{tier}"] = value if isinstance(value, str) else json.dumps(value)
+                        st.session_state[f"ta_plan_{tier}"] = tidy_check_notes(value if isinstance(value, str) else json.dumps(value))
                     drafted = True
                 except Exception:
                     fail("Generating tiered plans failed. Please try again.", "Generation error in tiered plans", ai=True)
@@ -1986,8 +2054,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         pin = (patient_pin or "").strip()
         if not participant_name or not c_key:
             st.warning("Please ensure a valid participant name is entered.")
-        elif any(extract_check_notes(st.session_state.get(k, "")) for k in TEXT_KEYS):
-            st.warning("Some drafts still contain CHECK notes. Resolve each one and delete its CHECK line before publishing.")
+        elif any(has_unresolved_notes(st.session_state.get(k, "")) for k in TEXT_KEYS):
+            st.warning("Some drafts still contain CHECK notes or stray pieces of them. Resolve each one and delete its whole line before publishing.")
         elif pin and not re.fullmatch(rf"[0-9]{{{MIN_NEW_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin):
             st.warning(f"The PIN must be {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits.")
         elif not pin and not existing_profile:
