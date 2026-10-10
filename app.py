@@ -1108,7 +1108,8 @@ REPORT_RULES = """RULES. Follow every one.
 7. Limits. Say plainly what a single test can and cannot show.
 8. Voice. Do not state or imply an author, a department or a job title, and do not sign off. Do not mention AI, models or tools.
 9. Notes for the clinician. If anything needs checking (figures that do not add up, a value that is missing or unclear, text you could not read, a result that seems implausible), add an HTML comment that starts with CHECK: at the place it applies, for example <!-- CHECK: the time bands add up to 4:40, not the stated 4:48 -->. These comments are removed from the participant's report. Do not mention the problem anywhere else.
-10. Lifestyle and exercise suggestions. Make them specific, practical and in proportion to the results: what to do, how often, for how long and how to build up gradually. You may use simple, conservative starting amounts as suggestions (for example two or three short sessions a week), but never present them as findings, and do not cite guidelines or studies. Keep them general and low-risk for a healthy adult, and start gently. Include one line telling the participant to check with their clinician before starting if they have symptoms, an injury or a medical condition, and to stop and seek advice if they feel chest pain, dizziness, faintness, unusual breathlessness or sharp pain. If the report flags a result as outside its range, keep the suggestions gentle and advise speaking to their clinician or GP before increasing intensity. General eating habits are fine (for example regular meals, more vegetables, protein spread through the day). Do not give diets, calorie or weight targets, fasting plans, supplements or medication advice, and do not promise results."""
+10. Lifestyle and exercise suggestions. Make them specific, practical and in proportion to the results: what to do, how often, for how long and how to build up gradually. You may use simple, conservative starting amounts as suggestions (for example two or three short sessions a week), but never present them as findings, and do not cite guidelines or studies. Keep them general and low-risk for a healthy adult, and start gently. Include one line telling the participant to check with their clinician before starting if they have symptoms, an injury or a medical condition, and to stop and seek advice if they feel chest pain, dizziness, faintness, unusual breathlessness or sharp pain. If the report flags a result as outside its range, keep the suggestions gentle and advise speaking to their clinician or GP before increasing intensity. General eating habits are fine (for example regular meals, more vegetables, protein spread through the day). Do not give diets, calorie or weight targets, fasting plans, supplements or medication advice, and do not promise results.
+11. Readability. Write in plain, friendly English with short sentences, for someone who is not a clinician. Say each thing once and do not repeat the same figures within a section. Do not describe how the report is laid out or labelled (axis labels, column headings), and do not describe the shape or trend of a chart or trace; use only the printed numbers and words. Mention a missing reference range once, in one short sentence. Link a suggestion to a result only where there is a real reason, and never force a link to a minor figure."""
 
 HTML_FORMAT = (
     "Format: output only an HTML fragment that uses h3, p, ul, li and strong tags. No markdown, no code fences, no styles "
@@ -1122,8 +1123,10 @@ def build_module_prompt(mod: dict, context_str: str) -> str:
         f"Task: write the review section on {mod['domain']}, using the attached report or reports and the structured metrics below.\n\n"
         f"{REPORT_RULES}\n\n"
         "Use exactly these four headings (h3), in this order:\n"
-        "- What was measured: a short list of the key values, quoted exactly.\n"
-        "- What the results show: plain observations that stay within the data and the rules above.\n"
+        "- What was measured: every value the report prints, one per line, in simple wording (for example: Oxygen level: "
+        "highest 98, average 96, lowest 94), including any time or percentage bands exactly as printed.\n"
+        "- What the results show: in two to four short sentences, say in plain words what the figures add up to. Do not repeat "
+        "the figures listed above.\n"
         f"- Limits of this test: {mod['limits']}\n"
         "- Lifestyle and exercise suggestions: 3 to 6 specific, practical suggestions that follow from the results (rule 10), "
         "ending with one line on when it would be sensible to speak to a GP. "
@@ -1182,7 +1185,8 @@ def build_plan_prompt(master_html: str) -> str:
         f"{REPORT_VOICE}\n\n"
         "Task: build a 30-day, a 60-day and a 90-day plan for the participant from the summary below.\n\n"
         f"{REPORT_RULES}\n\n"
-        "Plan rules: every action must link to a finding in the summary, and you must not invent findings. The 30-day plan "
+        "Plan rules: every action must follow from the summary, and you must not invent findings. Mention a specific figure only "
+        "where it genuinely supports the step. The 30-day plan "
         "covers the most important areas first, the 60-day plan builds on it, and the 90-day plan covers longer-term habits "
         "and retesting. Make the steps concrete lifestyle and exercise steps (rule 10): what to do, how often, for how long "
         "and how to build up, covering exercise, recovery and sleep, and everyday habits where the summary gives a reason. "
