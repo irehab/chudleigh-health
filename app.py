@@ -59,6 +59,7 @@ AI_PROVIDERS = {
     "gemini": "Gemini API (API key)",
     "gemini-vertex": "Gemini on Google Cloud",
     "claude-vertex": "Claude on Google Cloud",
+    "claude-api": "Claude, Anthropic API (US/global)",
 }
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini").strip().lower()
 AI_PROJECT = os.environ.get("AI_PROJECT", "").strip()  # optional: detected automatically on Cloud Run
@@ -68,13 +69,29 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "").strip()  # e.g. a model name a
 CLAUDE_LOCATION = os.environ.get("CLAUDE_LOCATION", "").strip()
 AI_MAX_TOKENS = int(_env_float("AI_MAX_TOKENS", 12000))  # longest reply allowed (Claude requires a limit)
 AI_MAX_INLINE_BYTES = int(_env_float("AI_MAX_INLINE_MB", 18) * 1024 * 1024)  # PDFs sent inside a request
-# Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
+# Claude through Anthropic's own API (needs ANTHROPIC_API_KEY). Anthropic offers no UK or EU processing there (only "us" or
+# "global"), so this service is blocked outside AI test mode unless AI_ALLOW_US_PROCESSING is set after your adviser approves.
+CLAUDE_API_MODEL = os.environ.get("CLAUDE_API_MODEL", "").strip() or "claude-sonnet-5-5"
+ANTHROPIC_INFERENCE_GEO = os.environ.get("ANTHROPIC_INFERENCE_GEO", "").strip().lower()  # "", "us" or "global"
+AI_ALLOW_US_PROCESSING = os.environ.get("AI_ALLOW_US_PROCESSING", "").strip().lower() in ("1", "true", "yes", "on")
+AI_TEST_ONLY_PROVIDERS = ("claude-api",)
+# List prices in US dollars per million tokens (input, output), checked October 2026. Edit here if they change.
+AI_PRICES_USD = {
+    "gemini": (0.75, 3.75),
+    "gemini-vertex": (0.75, 3.75),
+    "claude-vertex": (2.00, 10.00),
+    "claude-api": (2.00, 10.00),
+}
+GEMINI_STANDARD_PRICING_FROM = datetime.date(2027, 1, 1)  # Google's introductory Gemini 3.8 Flash price ends 31 Dec 2026
+AI_USD_TO_GBP = _env_float("AI_USD_TO_GBP", 0.75)
 PRIVACY_NOTICE_URL = os.environ.get("PRIVACY_NOTICE_URL", "").strip()  # optional; must start with https://
+# Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
 AI_COMPARE_MODE = os.environ.get("AI_COMPARE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 AI_SERVICE_PHRASES = {
     "gemini": "Google's Gemini service",
     "gemini-vertex": "Google's Gemini service on Google Cloud",
     "claude-vertex": "Anthropic's Claude model, running on Google Cloud",
+    "claude-api": "Anthropic's own Claude service (which processes data in the US or globally)",
 }
 FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE", "default")
 CLINICIAN_PASSWORD = os.environ.get("CLINICIAN_PASSWORD", "")
@@ -450,6 +467,18 @@ def ai_settings(provider: str = None) -> dict:
         if not GEMINI_VERTEX_LOCATION:
             raise AIConfigError("GEMINI_VERTEX_LOCATION is not set (the Google Cloud region for Gemini).")
         return {"provider": provider, "model": GEMINI_VERTEX_MODEL or GEMINI_MODEL, "location": GEMINI_VERTEX_LOCATION}
+    if provider == "claude-api":
+        if provider in AI_TEST_ONLY_PROVIDERS and not (AI_COMPARE_MODE or AI_ALLOW_US_PROCESSING):
+            raise AIConfigError(
+                "Claude through Anthropic's own API processes data in the US or globally, so it is only available in AI test "
+                "mode with dummy participants. To use it with real participants, your data protection adviser must approve it "
+                "and AI_ALLOW_US_PROCESSING must be set."
+            )
+        if ANTHROPIC_INFERENCE_GEO not in ("", "us", "global"):
+            raise AIConfigError("ANTHROPIC_INFERENCE_GEO must be empty, us or global.")
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise AIConfigError("ANTHROPIC_API_KEY is not set (the Anthropic API key).")
+        return {"provider": provider, "model": CLAUDE_API_MODEL, "location": "", "inference_geo": ANTHROPIC_INFERENCE_GEO}
     if not CLAUDE_MODEL:
         raise AIConfigError("CLAUDE_MODEL is not set (the Claude model name on Google Cloud).")
     if not CLAUDE_LOCATION:
@@ -478,6 +507,10 @@ def get_ai_client(provider: str):
             log.warning("GEMINI_API_KEY not set; drafting with the Gemini API is disabled")
             return None
         return genai.Client(api_key=api_key)
+    if provider == "claude-api":
+        ai_settings(provider)  # gives a clear message if the key is missing or this service is not allowed here
+        from anthropic import Anthropic  # imported here so the app runs without it unless Claude is chosen
+        return Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     settings = ai_settings(provider)
     if provider == "gemini-vertex":
         return genai.Client(vertexai=True, project=_vertex_project(), location=settings["location"])
@@ -485,13 +518,75 @@ def get_ai_client(provider: str):
     return AnthropicVertex(project_id=_vertex_project(), region=settings["location"])
 
 
-def note_ai_used(provider: str, model: str):
-    """Remember which AI service drafted content for this participant (saved with the report)."""
+def note_ai_used(provider: str, model: str, usage=None):
+    """Remember which AI service drafted content for this participant, and how many tokens it used."""
     label = f"{AI_PROVIDERS.get(provider, provider)}: {model}"
     used = st.session_state.setdefault("ai_used", [])
     if label not in used:
         used.append(label)
     st.session_state["ai_last"] = label
+    in_tokens, out_tokens = usage or (0, 0)
+    record = st.session_state.setdefault("ai_usage", {}).setdefault(label, {"provider": provider, "calls": 0, "in": 0, "out": 0})
+    record["calls"] += 1
+    record["in"] += in_tokens
+    record["out"] += out_tokens
+
+
+def ai_price_usd(provider: str, today=None):
+    """(input, output) list price in US dollars per million tokens, or None if unknown."""
+    today = today or datetime.date.today()
+    if provider in ("gemini", "gemini-vertex") and today >= GEMINI_STANDARD_PRICING_FROM:
+        return (1.50, 7.50)
+    price = AI_PRICES_USD.get(provider)
+    if price and provider == "claude-api" and ANTHROPIC_INFERENCE_GEO == "us":
+        price = (price[0] * 1.1, price[1] * 1.1)  # US-only processing costs 10% more
+    return price
+
+
+def estimate_ai_cost_gbp(provider: str, in_tokens: int, out_tokens: int, today=None):
+    """Rough cost in pounds at list prices, or None if the price is unknown. An estimate, not an invoice."""
+    price = ai_price_usd(provider, today)
+    if not price:
+        return None
+    return (in_tokens * price[0] + out_tokens * price[1]) / 1_000_000 * AI_USD_TO_GBP
+
+
+def _usage_gemini(res):
+    """(input tokens, output tokens) from a Gemini reply. Thinking tokens are billed as output."""
+    u = getattr(res, "usage_metadata", None)
+    if not u:
+        return (0, 0)
+    return (int(getattr(u, "prompt_token_count", 0) or 0),
+            int((getattr(u, "candidates_token_count", 0) or 0) + (getattr(u, "thoughts_token_count", 0) or 0)))
+
+
+def _usage_claude(res):
+    """(input tokens, output tokens) from a Claude reply."""
+    u = getattr(res, "usage", None)
+    if not u:
+        return (0, 0)
+    in_tokens = sum(int(getattr(u, f, 0) or 0) for f in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return (in_tokens, int(getattr(u, "output_tokens", 0) or 0))
+
+
+def ai_usage_summary() -> list:
+    """One line per AI service used for this participant: calls, tokens and an estimated cost."""
+    lines = []
+    for label, r in (st.session_state.get("ai_usage") or {}).items():
+        cost = estimate_ai_cost_gbp(r["provider"], r["in"], r["out"])
+        line = f"{label}: {r['calls']} calls, {r['in']:,} tokens in, {r['out']:,} out"
+        if cost is not None:
+            line += f", about £{cost:.2f}"
+        lines.append(line)
+    return lines
+
+
+def ai_usage_for_record() -> list:
+    """Token counts (never prompts or answers) saved with the report, so costs can be reviewed later."""
+    return [
+        {"service": label, "calls": r["calls"], "input_tokens": r["in"], "output_tokens": r["out"]}
+        for label, r in (st.session_state.get("ai_usage") or {}).items()
+    ]
 
 
 def _gemini_part(item):
@@ -513,6 +608,7 @@ def _generate_gemini(client, settings: dict, contents, json_mode: bool) -> str:
         reason = getattr(candidates[0], "finish_reason", None)
         if "MAX_TOKENS" in str(getattr(reason, "name", reason) or "").upper():
             raise RuntimeError("The draft was cut off because it was too long")
+    st.session_state["ai_last_usage"] = _usage_gemini(res)
     return text
 
 
@@ -531,12 +627,15 @@ def _generate_claude(client, settings: dict, contents, json_mode: bool) -> str:
     kwargs = {"model": settings["model"], "max_tokens": AI_MAX_TOKENS, "messages": [{"role": "user", "content": blocks}]}
     if json_mode:
         kwargs["system"] = "Reply with one valid JSON object and nothing else: no explanation and no code fences."
+    if settings.get("inference_geo"):
+        kwargs["extra_body"] = {"inference_geo": settings["inference_geo"]}  # Anthropic API only: "us" or "global"
     res = client.messages.create(**kwargs)
     text = "".join(getattr(b, "text", "") for b in (getattr(res, "content", None) or []) if getattr(b, "type", "") == "text")
     if not text.strip():
         raise RuntimeError("Empty response from model")
     if getattr(res, "stop_reason", "") == "max_tokens":
         raise RuntimeError("The draft was cut off because it was too long")
+    st.session_state["ai_last_usage"] = _usage_claude(res)
     return text
 
 
@@ -547,11 +646,11 @@ def generate(contents, json_mode: bool = False) -> str:
     client = get_ai_client(provider)
     if client is None:
         raise RuntimeError("AI client not configured")
-    send = _generate_claude if provider == "claude-vertex" else _generate_gemini
+    send = _generate_claude if provider in ("claude-vertex", "claude-api") else _generate_gemini
     for attempt in range(3):
         try:
             text = send(client, settings, contents, json_mode)
-            note_ai_used(provider, settings["model"])
+            note_ai_used(provider, settings["model"], st.session_state.pop("ai_last_usage", None))
             return text
         except Exception as e:
             code = getattr(e, "code", None) or getattr(e, "status_code", None)
@@ -683,7 +782,7 @@ def reset_measurement_inputs():
     for k in list(st.session_state.keys()):
         if isinstance(k, str) and k.startswith(("in::", "verified::")):
             del st.session_state[k]
-    for k in ("autofill_done", "autofill_unverified", "ai_used", "ai_last"):
+    for k in ("autofill_done", "autofill_unverified", "ai_used", "ai_last", "ai_usage", "ai_last_usage"):
         st.session_state.pop(k, None)
 
 
@@ -1517,6 +1616,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         if st.session_state.get("ai_last"):
             st.sidebar.caption(f"Last draft by: {st.session_state['ai_last']}")
 
+    _usage_lines = ai_usage_summary()
+    if _usage_lines:
+        st.sidebar.caption("AI use for this participant (estimated at list prices):\n\n" + "\n\n".join(_usage_lines))
+
     st.sidebar.subheader("Active Participant Queue")
 
     if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
@@ -1920,6 +2023,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "approved_by": approver.strip(),
                     "approved_at": firestore.SERVER_TIMESTAMP,
                     "ai_used": list(st.session_state.get("ai_used", [])),
+                    "ai_usage": ai_usage_for_record(),
                 }
                 record_size = len(json.dumps(scan_record, default=str).encode("utf-8"))
                 if record_size > MAX_FIRESTORE_DOC_BYTES:
