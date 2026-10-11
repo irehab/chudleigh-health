@@ -6,6 +6,7 @@ on its own (see tests/test_helpers.py).
 import hashlib
 import hmac
 import html
+import datetime
 import re
 import secrets
 from decimal import Decimal, InvalidOperation
@@ -114,3 +115,94 @@ def client_ip_from_xff(header_value: str) -> str:
     """
     parts = [p.strip() for p in (header_value or "").split(",") if p.strip()]
     return parts[-1][:64] if parts else "unknown"
+
+
+# --- Bespoke plans ---
+PLAN_STATUSES = ("requested", "in_progress", "delivered")
+
+# What a participant is asked after paying for a plan: (key, question, longest answer allowed, required)
+QUESTIONNAIRE_FIELDS = [
+    ("goals", "What would you most like to achieve over this period?", 600, True),
+    ("injuries", "Any injuries, pain or symptoms we should know about?", 600, False),
+    ("health", "Any medical conditions or medication that could affect exercise or lifestyle advice?", 600, False),
+    ("exercise", "What exercise do you do now, and how often?", 400, False),
+    ("time_equipment", "How much time can you spend, and what do you have access to (gym, home, none)?", 300, False),
+    ("sleep_stress", "How are your sleep and stress at the moment?", 300, False),
+    ("other", "Anything else you would like us to know?", 500, False),
+]
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def add_working_days(start: datetime.date, days: int) -> datetime.date:
+    """The date that many working days (Monday to Friday) after start. Bank holidays are not counted."""
+    d, left = start, max(0, int(days))
+    while left > 0:
+        d += datetime.timedelta(days=1)
+        if d.weekday() < 5:
+            left -= 1
+    return d
+
+
+def friendly_date(iso: str) -> str:
+    """'2026-10-19' -> 'Mon 19 Oct 2026'. Anything that is not a date comes back unchanged."""
+    try:
+        return datetime.date.fromisoformat(str(iso)[:10]).strftime("%a %d %b %Y")
+    except ValueError:
+        return str(iso or "")
+
+
+def clean_questionnaire(raw: dict) -> dict:
+    """Keep only the known questions, strip control characters, trim, and cut each answer to its limit. Blank answers are dropped."""
+    out = {}
+    for key, _question, limit, _required in QUESTIONNAIRE_FIELDS:
+        value = _CONTROL_CHARS.sub("", str((raw or {}).get(key) or "")).strip()[:limit]
+        if value:
+            out[key] = value
+    return out
+
+
+def questionnaire_missing(answers: dict) -> list:
+    """The questions that must be answered but were not."""
+    return [q for key, q, _limit, required in QUESTIONNAIRE_FIELDS if required and not (answers or {}).get(key)]
+
+
+def plan_text_to_html(text: str) -> str:
+    """Turn the plain text a clinician types into simple, safe HTML.
+
+    A blank line starts a new paragraph. A line starting '## ' is a heading. Lines starting '- ' or '* ' are list items.
+    **bold** works. HTML comments are removed, and everything else is escaped first, so no HTML can be injected.
+    """
+    text = re.sub(r"<!--.*?(?:-->|\Z)", "", text or "", flags=re.S)
+    out, para, items = [], [], []
+
+    def inline(line: str) -> str:
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc(line))
+
+    def flush():
+        if para:
+            out.append("<p>" + "<br>".join(inline(x) for x in para) + "</p>")
+            para.clear()
+        if items:
+            out.append("<ul>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ul>")
+            items.clear()
+
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        heading = re.match(r"^#{1,3}\s+(.*)$", line)
+        bullet = re.match(r"^[-*\u2022]\s+(.*)$", line)
+        if heading:
+            flush()
+            out.append(f"<h3>{inline(heading.group(1))}</h3>")
+        elif bullet:
+            if para:
+                flush()
+            items.append(bullet.group(1))
+        else:
+            if items:
+                flush()
+            para.append(line)
+    flush()
+    return "".join(out)
