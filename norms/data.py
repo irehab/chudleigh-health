@@ -18,7 +18,7 @@ SOURCES = {
         ),
         "url": "https://www.cdc.gov/nchs/data/nhsr/nhsr041.pdf",
         "population": "About 14,200 US adults aged 20 and over who had no condition or medicine that affects pulse. Pulse counted by a doctor for 30 seconds after 4 minutes seated.",
-        "note": "The range used is the 5th to 95th percentile, so 9 in 10 healthy people fall inside it.",
+        "note": "The range used is the 5th to 95th percentile, so 9 in 10 healthy people fall inside it. The report notes that studies have linked a higher resting pulse with a higher chance of cardiovascular disease and of death from any cause.",
     },
     "rijnbeek_ecg": {
         "short": "Dutch healthy-adult ECG study (Rijnbeek 2014)",
@@ -45,7 +45,15 @@ SOURCES = {
         "citation": "World Health Organization. Obesity: preventing and managing the global epidemic. WHO Technical Report Series 894. Geneva: WHO; 2000.",
         "url": "https://www.who.int/publications/i/item/9241208945",
         "population": "Adults aged 18 and over.",
-        "note": "BMI is a rough guide. It cannot tell muscle from fat.",
+        "note": ("BMI is a rough guide. It cannot tell muscle from fat. The WHO table rates the chance of weight-related conditions as average at 18.5 to 24.9, increased at 25 to 29.9 and moderate or higher at 30 and over. "
+                 "It says the risk is graded, begins below 25, and can differ between populations."),
+    },
+    "guh_comorbidities": {
+        "short": "Overweight, obesity and related conditions (systematic review 2009)",
+        "citation": "The incidence of co-morbidities related to obesity and overweight: a systematic review and meta-analysis. BMC Public Health 2009;9:88.",
+        "url": "https://doi.org/10.1186/1471-2458-9-88",
+        "population": "A systematic review of studies in adults, covering 18 related conditions.",
+        "note": "It found that overweight and obesity are linked with a higher chance of conditions including type 2 diabetes, cardiovascular disease and some cancers. A link in groups of people is not a prediction for one person.",
     },
     "spo2_older": {
         "short": "Oxygen levels in healthy older adults (Rodriguez-Molinero 2013)",
