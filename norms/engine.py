@@ -6,7 +6,7 @@ with the reason.
 
 The wording follows three rules. It states the fact first, then says plainly whether it is good news or something to work on, and
 then explains why. It only links a result to a health outcome where a source says so (WHO, the NCHS pulse report, the systematic
-review in data.SOURCES), and it never promises an outcome.
+review in data.SOURCES), and it never promises an outcome. Every sentence a participant reads is kept to 20 words or fewer.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-11.2"
+NORMS_VERSION = "2026-10-11.3"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -28,11 +28,26 @@ A_TANITA = "Tanita Body Composition (MC-780MA)"
 A_ECG = "12-Lead ECG (Electrocardiogram)"
 A_AGE = "AGE Reader (Advanced Glycation End-Products)"
 
+# What a participant reads as the name of each result, and one plain line on what it measures.
+PATIENT_TEXT = {
+    "pulse_avg": ("Resting pulse", "How many times your heart beats each minute while you are at rest."),
+    "spo2_avg": ("Blood oxygen level", "How much oxygen your blood is carrying, as a percentage."),
+    "ecg_hr": ("Heart rate at your ECG", "How many times your heart beat each minute during your ECG."),
+    "ecg_pr": ("Heart signal timing (PR interval)", "How long the heart's electrical signal takes to pass from the top of your heart to the bottom."),
+    "ecg_qrs": ("Heart squeeze timing (QRS duration)", "How long the electrical signal takes to spread through the lower chambers of your heart."),
+    "ecg_qtcf": ("Heart reset time (QTc)", "How long your heart takes to reset between beats, adjusted for your heart rate."),
+    "ecg_qtcb": ("Heart reset time (QTc, Bazett)", "How long your heart takes to reset between beats, adjusted for your heart rate."),
+    "fat_pct": ("Body fat", "The share of your body weight that is fat, as estimated by the body composition scale."),
+    "bmi": ("BMI", "A rough measure of whether your weight suits your height."),
+    "age_pos": ("Skin AGE level (compared with others your age)", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
+    "age_vs_avg": ("Skin AGE level (compared with the average)", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
+}
+
 
 @dataclass
 class Comparison:
     key: str
-    label: str
+    label: str           # the technical name, for the clinician
     assessment: str
     status: str
     source: str = ""
@@ -49,6 +64,10 @@ class Comparison:
     reason: str = ""     # why a measure could not be compared
     calculated: bool = False
     also_sources: list = field(default_factory=list)
+    patient_label: str = ""   # the name a participant reads
+    measures: str = ""        # one plain line on what it measures
+    low: float | None = None  # the usual range, as numbers, for the bar
+    high: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -161,11 +180,11 @@ def _no_ref(key, label, assessment, value, unit, reason, calculated=False) -> Co
 def _missing(age, sex, need_sex=True) -> str:
     """What the participant's details lack for this comparison, as a sentence, or '' if nothing is missing."""
     if age is None and need_sex and sex is None:
-        return "Needs the participant's age and sex to choose reference data."
+        return "Age and sex are needed to choose reference data."
     if age is None:
-        return "Needs the participant's age to choose reference data."
+        return "An age is needed to choose reference data."
     if need_sex and sex is None:
-        return "Needs the participant's sex (male or female) to choose reference data."
+        return "A sex (male or female) is needed to choose reference data."
     return ""
 
 
@@ -188,9 +207,11 @@ def _where(status, pos) -> str:
     return {WITHIN: f"within that range, {_POS_TEXT.get(pos, 'inside it')}", BELOW: "lower than that range", ABOVE: "higher than that range"}[status]
 
 
-# ------------------------------------------------------------------------------------------------ the wording
-_CAUTION = "Your clinician will look at this closely with the rest of your ECG. A value outside the usual range is not a diagnosis, and there are often harmless explanations."
-_PULSE_LINK = "Studies have linked a higher resting pulse with a higher chance of heart disease"
+# ------------------------------------------------------------------------------------------------ the wording (every sentence is 20 words or fewer)
+_CAUTION = ("Your clinician will look at this closely with the rest of your ECG. A value outside the usual range is not a diagnosis. "
+            "There are often harmless explanations.")
+_PULSE_LINK = "Studies have linked a higher resting pulse with a higher chance of heart disease."
+_GRADED = "The chance of type 2 diabetes and heart disease generally rises step by step as body fat goes up."
 
 _ECG_LABELS = {
     "ecg_hr": ("Heart rate at the ECG", "beats per minute", "bpm"),
@@ -199,6 +220,10 @@ _ECG_LABELS = {
     "ecg_qtcb": ("ECG QTc (Bazett correction)", "milliseconds", "ms"),
     "ecg_qtcf": ("ECG QTc (Fridericia correction)", "milliseconds", "ms"),
 }
+
+
+# how a sentence refers to each ECG result (plain words; the card title also carries the technical name in brackets)
+_ECG_SUBJECT = {"ecg_hr": "heart rate at the ECG", "ecg_pr": "PR interval", "ecg_qrs": "QRS duration", "ecg_qtcf": "QTc", "ecg_qtcb": "QTc (Bazett correction)"}
 
 
 def _compare_one(key, m, age, sex, height_cm) -> Comparison:
@@ -217,24 +242,24 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         status = _range_status(v, lo, hi)
         who = _who(sex, g)
         pos = _position(v, lo, hi) if status == WITHIN else ""
-        sentence = (f"Your resting pulse averaged {_fmt(v)} beats per minute. In a large US health survey, 9 in 10 healthy {who} had a resting pulse "
-                    f"between {lo} and {hi}, so yours is {_where(status, pos)}.")
+        sentence = (f"Your resting pulse averaged {_fmt(v)} beats per minute. In a large US health survey, 9 in 10 healthy {who} were between {lo} and {hi}. "
+                    f"Yours is {_where(status, pos)}.")
         if status == WITHIN and v <= med:
             headline, theme = "A good result", DOING_WELL
-            meaning = f"That is in the lower half of the typical range, which is a good place to be. {_PULSE_LINK}, so a lower one is the better direction."
+            meaning = f"That is in the lower half of the typical range, which is a good place to be. {_PULSE_LINK} So a lower one is the better direction."
         elif status == WITHIN:
             headline, theme = "Within the typical range", DOING_WELL
-            meaning = (f"That is in the upper half of the typical range, which is fine. {_PULSE_LINK}, so if you would like to bring it down, "
-                       "regular exercise, good sleep and managing stress can all help.")
+            meaning = (f"That is in the upper half of the typical range, which is fine. {_PULSE_LINK} "
+                       "If you would like to bring it down, regular exercise, good sleep and managing stress can all help.")
         elif status == ABOVE:
             headline, theme = "Worth working on", WORK_ON
-            meaning = (f"A higher resting pulse can follow caffeine, poor sleep, stress, illness or being less fit. {_PULSE_LINK}, so it is worth working on, "
-                       "and worth mentioning to your clinician if it stays high.")
+            meaning = (f"A higher resting pulse can follow caffeine, poor sleep, stress, illness or being less fit. {_PULSE_LINK} "
+                       "It is worth working on, and worth mentioning to your clinician if it stays high.")
         else:
             headline, theme = "Worth a mention to your clinician", DISCUSS
             meaning = "A low resting pulse is common in people who exercise regularly. If you also feel dizzy, faint or breathless, speak to your clinician or GP."
         return Comparison(key=key, label=label, assessment=a, status=status, source="nhanes_pulse", value=v, value_text=f"{_fmt(v)} bpm",
-                          range_text=f"{lo} to {hi} bpm", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme)
+                          range_text=f"{lo} to {hi} bpm", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi)
 
     if key in _ECG_LABELS:
         label, unit_long, unit = _ECG_LABELS[key]
@@ -249,9 +274,9 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         status = _range_status(v, lo, hi)
         who = _who(sex, g)
         pos = _position(v, lo, hi) if status == WITHIN else ""
-        name = label[0].lower() + label[1:] if not label.startswith("ECG") else label
-        sentence = (f"Your {name} was {_fmt(v)} {unit_long}. In a study of healthy adults, about 96 in 100 {who} were between {lo} and {hi}, "
-                    f"so yours is {_where(status, pos)}.")
+        name = _ECG_SUBJECT[key]
+        sentence = (f"Your {name} was {_fmt(v)} {unit_long}. In a study of healthy adults, about 96 in 100 {who} were between {lo} and {hi}. "
+                    f"Yours is {_where(status, pos)}.")
         if status == WITHIN:
             headline, theme = "Within the range seen in healthy adults", DOING_WELL
             meaning = "Good news. Your clinician reads this together with the rest of your ECG."
@@ -259,7 +284,7 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             headline, theme = "Worth discussing with your clinician", DISCUSS
             meaning = _CAUTION
         return Comparison(key=key, label=label, assessment=a, status=status, source="rijnbeek_ecg", value=v, value_text=f"{_fmt(v)} {unit}",
-                          range_text=f"{lo} to {hi} {unit}", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme)
+                          range_text=f"{lo} to {hi} {unit}", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi)
 
     if key == "fat_pct":
         label, unit = "Body fat", "%"
@@ -277,29 +302,30 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
                  WITHIN: f"within it, {_POS_TEXT.get(pos, '')}",
                  ABOVE: "above it, in the range that matches a BMI of 25 to 30",
                  WELL_ABOVE: "well above it, in the range that matches a BMI of 30 or more"}[status]
-        sentence = f"Your body fat was {_fmt(v)}%. For {who}, the healthy range in the study is {low}% to under {over}%, so yours is {where}."
-        graded = "The chance of weight-related conditions such as type 2 diabetes and heart disease generally rises step by step as body fat goes up"
+        sentence = f"Your body fat was {_fmt(v)}%. For {who}, the healthy range in the study is {low}% to under {over}%. Yours is {where}."
         if status == WITHIN and pos in ("lower", "middle"):
             headline, theme = "A good result", DOING_WELL
-            meaning = f"Well done. {graded}, so being {'toward the lower end of' if pos == 'lower' else 'around the middle of'} the healthy range is a good place to be."
+            meaning = f"Well done. {_GRADED} Being {'toward the lower end of' if pos == 'lower' else 'around the middle of'} the healthy range is a good place to be."
         elif status == WITHIN:
             headline, theme = "Within the healthy range, toward the top", WATCH
-            meaning = f"You are still within the healthy range, which is good, but toward the top of it. {graded}, so it is worth keeping an eye on."
+            meaning = f"You are still within the healthy range, which is good, but toward the top of it. {_GRADED} It is worth keeping an eye on."
         elif status == ABOVE:
             headline, theme = "Worth working on", WORK_ON
-            meaning = ("That range matches a BMI of 25 to 30, where the World Health Organization says the chance of conditions such as type 2 diabetes and heart disease is increased. "
-                       "The good news is that body fat can change. Bringing it down towards the healthy range is worth working on to support your long-term health, and we will talk through how.")
+            meaning = ("That matches a BMI of 25 to 30. The World Health Organization rates the chance of type 2 diabetes and heart disease as increased at that level. "
+                       "The good news is that body fat can change. Bringing it down towards the healthy range is worth working on to support your long-term health. "
+                       "We will talk through how.")
         elif status == WELL_ABOVE:
             headline, theme = "Worth working on", WORK_ON
-            meaning = ("That range matches a BMI of 30 or more, where the World Health Organization says the chance of conditions such as type 2 diabetes and heart disease is moderate or higher. "
-                       "This is worth taking seriously and working on steadily. Realistic, steady steps matter more than quick fixes, and we will talk through how.")
+            meaning = ("That matches a BMI of 30 or more. The World Health Organization rates the chance of type 2 diabetes and heart disease as moderate or higher. "
+                       "This is worth taking seriously and working on steadily. Realistic, steady steps matter more than quick fixes. We will talk through how.")
         else:
             headline, theme = "Worth a mention to your clinician", DISCUSS
-            meaning = "A low body fat is common in people who train hard. If it is not intentional, or you feel tired or run down, or have lost weight without trying, please mention it to your clinician."
+            meaning = ("A low body fat is common in people who train hard. If it is not intentional, please mention it to your clinician. "
+                       "Please also mention it if you feel tired or run down, or have lost weight without trying.")
         return Comparison(
             key=key, label=label, assessment=a, status=status, source="gallagher_fat", value=v, value_text=f"{_fmt(v)}%",
-            range_text=f"{low}% to under {over}%", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme,
-            detail=("These ranges are provisional and were worked out from BMI limits. Body fat from a bioimpedance scale can differ from the laboratory methods used to make them."),
+            range_text=f"{low}% to under {over}%", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=low, high=over,
+            detail="These ranges are provisional and were worked out from BMI limits. Body fat from a body composition scale can differ from the laboratory methods used to make them.",
             also_sources=["who_bmi", "guh_comorbidities"] if status in (ABOVE, WELL_ABOVE, WITHIN) else [],
         )
 
@@ -311,20 +337,22 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         status = BELOW if v < lo else WITHIN if v < over else ABOVE if v < obese else WELL_ABOVE
         where = {BELOW: "lower than the healthy range", WITHIN: "within the healthy range", ABOVE: "above the healthy range, in the overweight group",
                  WELL_ABOVE: "well above the healthy range, in the group the WHO calls obese"}[status]
-        sentence = (f"Your BMI was {_fmt(v)}{' (worked out from your weight and height)' if calc else ''}. The World Health Organization's healthy range for adults "
-                    f"is 18.5 to under 25, so yours is {where}.")
+        sentence = (f"Your BMI was {_fmt(v)}{' (worked out from your weight and height)' if calc else ''}. "
+                    f"The World Health Organization's healthy range for adults is 18.5 to under 25. Yours is {where}.")
         if status == WITHIN:
             headline, theme = "A good result", DOING_WELL
-            meaning = "Well done. At this level the WHO rates the chance of weight-related conditions as average. BMI is only a rough guide, so we read it alongside your body fat."
+            meaning = ("Well done. At this level the World Health Organization rates the chance of weight-related conditions as average. "
+                       "BMI is only a rough guide, so we read it alongside your body fat.")
         elif status in (ABOVE, WELL_ABOVE):
             headline, theme = "Worth working on", WORK_ON
-            meaning = ("At this level the World Health Organization says the chance of conditions such as type 2 diabetes and heart disease is "
-                       f"{'increased' if status == ABOVE else 'moderate or higher'}. BMI cannot tell muscle from fat, though, so please read it alongside your body fat.")
+            meaning = (f"At this level, the chance of type 2 diabetes and heart disease is {'increased' if status == ABOVE else 'moderate or higher'}. "
+                       "That is the World Health Organization's rating. BMI cannot tell muscle from fat, though. Please read it alongside your body fat.")
         else:
             headline, theme = "Worth a mention to your clinician", DISCUSS
-            meaning = "A low BMI can mean there is little reserve if you become unwell. If it is not intentional, or you have lost weight without trying, please mention it to your clinician."
+            meaning = ("A low BMI can mean there is little reserve if you become unwell. If it is not intentional, please mention it to your clinician. "
+                       "Please also mention it if you have lost weight without trying.")
         return Comparison(key=key, label=label, assessment=a, status=status, source="who_bmi", value=v, value_text=_fmt(v), calculated=calc,
-                          range_text="18.5 to under 25", group="adults", headline=headline, sentence=sentence, meaning=meaning, theme=theme,
+                          range_text="18.5 to under 25", group="adults", headline=headline, sentence=sentence, meaning=meaning, theme=theme, low=lo, high=over,
                           detail="BMI is only a rough guide. It cannot tell muscle from fat, so it can mislead for very muscular people.",
                           also_sources=["guh_comorbidities"] if status in (ABOVE, WELL_ABOVE) else [])
 
@@ -338,22 +366,23 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         older = age >= data.SPO2_OLDER_AGE
         lower = data.SPO2_OLDER_LOWER if older else data.SPO2_ADULT_LOWER
         status = WITHIN if v >= lower else BELOW
+        where = "within that range" if status == WITHIN else "lower than that range"
         if older:
-            sentence = (f"Your blood oxygen level averaged {_fmt(v)}%. In a study of healthy adults over 65, 95 in 100 had a reading of {lower}% or higher, "
-                        f"so yours is {'within that range' if status == WITHIN else 'lower than that range'}.")
+            sentence = (f"Your blood oxygen level averaged {_fmt(v)}%. In a study of healthy adults over 65, 95 in 100 had a reading of {lower}% or higher. "
+                        f"Yours is {where}.")
         else:
-            sentence = (f"Your blood oxygen level averaged {_fmt(v)}%. In healthy adults it is usually {lower}% or higher, "
-                        f"so yours is {'within that range' if status == WITHIN else 'lower than that range'}.")
+            sentence = f"Your blood oxygen level averaged {_fmt(v)}%. In healthy adults it is usually {lower}% or higher. Yours is {where}."
         if status == WITHIN:
             headline, theme = "A good result", DOING_WELL
             meaning = "That is a good sign that your blood is carrying oxygen well while you are at rest."
         else:
             headline, theme = "Worth discussing with your clinician", DISCUSS
-            meaning = "Your clinician will want to look at this properly. A short reading can be affected by cold hands, movement or nail polish, so it may be worth repeating."
+            meaning = ("Your clinician will want to look at this properly. A short reading can be affected by cold hands, movement or nail polish. "
+                       "It may be worth repeating.")
         return Comparison(
             key=key, label=label, assessment=a, status=status, source="spo2_older" if older else "spo2_adults", value=v, value_text=f"{_fmt(v)}%",
             range_text=f"{lower}% or higher", group="healthy adults aged 65 and over" if older else "healthy adults under 65", headline=headline,
-            sentence=sentence, meaning=meaning, theme=theme,
+            sentence=sentence, meaning=meaning, theme=theme, low=float(lower), high=100.0,
             detail=("If readings stay low, or you feel breathless, speak to your GP." if status == BELOW else ""),
         )
 
@@ -373,7 +402,7 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             key=key, label="Skin AGE level compared with the average", assessment=a, status=REPORTED, source="age_scanner_printed", value=v,
             value_text=f"{_fmt(v)}% {way}", range_text="the device's own comparison", headline="For your information", theme=INFO,
             sentence=(f"Your AGE Scanner report says your AGE level is {_fmt(v)}% {way} the average for "
-                      f"{str(int(age_used)) + '-year-olds' if age_used else 'your age group'}, using the device maker's own reference group."),
+                      f"{str(int(age_used)) + '-year-olds' if age_used else 'your age group'}. It uses the device maker's own reference group."),
             meaning="This comes from the device maker's own comparison group, so treat it as a guide. We will talk it through with you.",
         )
     return _no_ref(key, key, a, v, "", "No reference data is available for this measure.")
@@ -390,10 +419,10 @@ def _read_together(results: list):
         return
     if bmi.status in (ABOVE, WELL_ABOVE) and fat.status == WITHIN:
         bmi.headline, bmi.theme = "Read alongside your body fat", INFO
-        bmi.meaning = ("Your BMI is above the healthy range, but your body fat is within it. That can happen when someone carries a lot of muscle, "
-                       "so your body fat is the better guide for you.")
+        bmi.meaning = ("Your BMI is above the healthy range, but your body fat is within it. "
+                       "That can happen when someone carries a lot of muscle, so your body fat is the better guide for you.")
     elif bmi.status == WITHIN and fat.status in (ABOVE, WELL_ABOVE):
-        fat.meaning += " Your BMI looks healthy, but body fat can be high even when BMI is, so body fat is the more telling number for you."
+        fat.meaning += " Your BMI looks healthy. But body fat can be high even when BMI is, so body fat is the more telling number for you."
 
 
 def compare(tests: list, age, sex, height_cm=None) -> list:
@@ -408,10 +437,20 @@ def compare(tests: list, age, sex, height_cm=None) -> list:
     measures = measures_from_tests(tests, height_cm)
     results = [_compare_one(k, measures[k], age, sex, height_cm) for k in _ORDER if k in measures]
     _read_together(results)
+    for c in results:
+        c.patient_label, c.measures = PATIENT_TEXT.get(c.key, (c.label, ""))
     return results
 
 
-# ------------------------------------------------------------------------------------------------ summary and text for the AI
+# ------------------------------------------------------------------------------------------------ what a participant sees
+def for_patient(comparisons: list) -> list:
+    """The comparisons a participant reads, as dicts. The QTc is shown once (Fridericia, which holds up better at fast and slow heart rates),
+    and the clinician's table keeps both."""
+    comps = [c if isinstance(c, dict) else c.to_dict() for c in comparisons]
+    keys = {c["key"] for c in comps if c["status"] != NO_REFERENCE}
+    return [c for c in comps if not (c["key"] == "ecg_qtcb" and "ecg_qtcf" in keys)]
+
+
 def tally(comparisons: list) -> dict:
     counts = {WITHIN: 0, BELOW: 0, ABOVE: 0, WELL_ABOVE: 0, REPORTED: 0, NO_REFERENCE: 0}
     for c in comparisons:
@@ -432,61 +471,55 @@ def summary_sentence(comparisons: list) -> str:
     return f"We compared {compared} of your results with reference data: " + ", ".join(parts) + "."
 
 
-_SHORT = {"pulse_avg": "resting pulse", "spo2_avg": "blood oxygen level", "ecg_hr": "heart rate at your ECG", "ecg_pr": "ECG PR interval", "ecg_qrs": "ECG QRS duration",
-          "ecg_qtcf": "ECG QTc interval", "ecg_qtcb": "ECG QTc interval", "fat_pct": "body fat", "bmi": "BMI"}
-
-
-def _names(items) -> list:
-    seen, out = [], []
-    for c in items:
-        n = _SHORT.get(c["key"], c["label"].lower())
-        if n not in seen:
-            seen.append(n)
-            out.append(n)
-    return out
-
-
-def _join(names) -> str:
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-
-
-def overview(comparisons: list) -> list:
-    """The 'putting it all together' part: a list of (heading, text). Built only from the comparisons' statuses and themes."""
-    comps = [c if isinstance(c, dict) else c.to_dict() for c in comparisons]
-    compared = [c for c in comps if c["status"] not in (NO_REFERENCE, REPORTED)]
-    if not compared:
-        return []
-    well = [c for c in compared if c.get("theme") == DOING_WELL]
-    watch = [c for c in compared if c.get("theme") == WATCH]
-    work = [c for c in compared if c.get("theme") == WORK_ON]
-    talk = [c for c in compared if c.get("theme") == DISCUSS]
-    info = [c for c in compared if c.get("theme") == INFO]
-
-    def is_are(names):
-        return "is" if len(names) == 1 else "are"
-
-    blocks = [("The big picture", summary_sentence(comps))]
-    if well:
-        n = _names(well)
-        blocks.append(("Where you are doing well", f"Your {_join(n)} {is_are(n)} within the usual range for your age and sex. That is good news, and worth keeping up."))
+def glance_verdict(comparisons: list) -> str:
+    """One sentence for the top of the 'at a glance' page. Counts what the participant sees (the QTc once)."""
+    comps = [c for c in for_patient(comparisons) if c["status"] not in (NO_REFERENCE, REPORTED)]
+    if not comps:
+        return ""
+    n = len(comps)
+    within = sum(1 for c in comps if c["status"] == WITHIN)
+    work = sum(1 for c in comps if c.get("theme") == WORK_ON)
+    talk = sum(1 for c in comps if c.get("theme") == DISCUSS)
+    info = sum(1 for c in comps if c.get("theme") == INFO)
+    watch = sum(1 for c in comps if c.get("theme") == WATCH)
+    if within == n and not watch:
+        return (f"Good news: all {n} results we could compare are within the usual range for your age and sex." if n > 1
+                else "Good news: the result we could compare is within the usual range for your age and sex.")
+    parts = [f"{within} of your {n} results {'is' if within == 1 else 'are'} within the usual range for your age and sex."]
     if watch:
-        n = _names(watch)
-        blocks.append(("Worth keeping an eye on", f"Your {_join(n)} {is_are(n)} within the healthy range but toward the top of it, so it is worth keeping an eye on."))
+        parts.append(f"{watch} {'is' if watch == 1 else 'are'} worth keeping an eye on.")
     if work:
-        n = _names(work)
-        blocks.append(("Worth working on", f"Your {_join(n)} {is_are(n)} above the usual range. Each of these can change. Steady, realistic steps add up, and bringing "
-                                           f"{'it' if len(n) == 1 else 'them'} towards the usual range is worth aiming for to support your long-term health. Your clinician will talk through what could help you."))
+        parts.append(f"{work} {'is' if work == 1 else 'are'} worth working on.")
     if talk:
-        n = _names(talk)
-        blocks.append(("To talk through with your clinician", f"Your {_join(n)} {'sits' if len(n) == 1 else 'sit'} outside the usual range. This is not a diagnosis. Your clinician will look at "
-                                                              f"{'it' if len(n) == 1 else 'them'} with your other results and tell you if anything needs following up."))
+        parts.append(f"{talk} {'is' if talk == 1 else 'are'} worth talking through with your clinician.")
     if info:
-        blocks.append(("Read together", "Some results are best read alongside others. We have said so next to each one, and we will go through them with you."))
-    if not work and not talk:
-        blocks.append(("What this adds up to", "From the results we could compare, this is a good picture. The best thing to do is keep doing what you are doing."))
-    blocks.append(("Where this leaves you", "These numbers show where you are today compared with groups of healthy people. They are a starting point for a conversation about your long-term health, "
-                                            "not a verdict, and many of them can change."))
-    return blocks
+        parts.append(f"{info} {'is' if info == 1 else 'are'} best read alongside your other results.")
+    return " ".join(parts)
+
+
+# The groups on the 'at a glance' page, most important first: (theme, heading, a few plain words that apply to every result in it)
+_GROUPS = [
+    (WORK_ON, "Worth working on", "These can change. Steady, realistic steps add up. Bringing them towards the usual range is worth aiming for, to support your long-term health. "
+                                  "Your clinician will talk through what could help you."),
+    (DISCUSS, "To talk through with your clinician", "This is not a diagnosis. Your clinician will look at these with your other results and tell you if anything needs following up."),
+    (WATCH, "Worth keeping an eye on", "These are within the healthy range but toward the top of it, so they are worth keeping an eye on."),
+    (INFO, "Best read alongside your other results", "We have said why next to each one, and we will go through them with you."),
+    (DOING_WELL, "Going well", "These are within the usual range for your age and sex. That is good news, and worth keeping up."),
+]
+CLOSING = ("These numbers show where you are today compared with groups of healthy people. "
+           "They are a starting point for a conversation about your long-term health. They are not a verdict, and many of them can change.")
+ALL_GOOD = "From the results we could compare, this is a good picture. The best thing to do is keep doing what you are doing."
+
+
+def glance_groups(comparisons: list) -> list:
+    """The grouped list for the 'at a glance' page: a list of dicts {theme, heading, text, items}. Only groups that have results appear."""
+    comps = [c for c in for_patient(comparisons) if c["status"] not in (NO_REFERENCE, REPORTED)]
+    out = []
+    for theme, heading, text in _GROUPS:
+        items = [c for c in comps if c.get("theme") == theme]
+        if items:
+            out.append({"theme": theme, "heading": heading, "text": text, "items": items})
+    return out
 
 
 def comparison_context(comparisons: list, assessments=None) -> str:
