@@ -26,6 +26,7 @@ RUN pip install -r requirements.txt
 # Copy only the application code (not .env files, keys, PDFs, tests, etc.). Owned by root, so read-only for appuser.
 COPY app.py helpers.py ./
 COPY pdf_reader ./pdf_reader
+COPY norms ./norms
 
 USER appuser
 
