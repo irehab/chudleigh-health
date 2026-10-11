@@ -7,10 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # Force gRPC to use the native system DNS resolver
     GRPC_DNS_RESOLVER=native
 
-# Install system certificates and network protocols for secure cloud routing
+# Install system certificates and network protocols for secure cloud routing, and the text-recognition (OCR) program
+# the PDF reader uses for reports that are pictures
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     netbase \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as an unprivileged user
@@ -23,6 +25,7 @@ RUN pip install -r requirements.txt
 
 # Copy only the application code (not .env files, keys, PDFs, tests, etc.). Owned by root, so read-only for appuser.
 COPY app.py helpers.py ./
+COPY pdf_reader ./pdf_reader
 
 USER appuser
 
