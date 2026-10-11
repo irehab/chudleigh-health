@@ -206,3 +206,18 @@ def plan_text_to_html(text: str) -> str:
             para.append(line)
     flush()
     return "".join(out)
+
+
+# --- A clinician's personal note on the report ---
+NOTE_MAX = 1500
+
+
+def clean_note(text, limit: int = NOTE_MAX, single_line: bool = False) -> str:
+    """Tidy a note typed by a clinician: no control characters, tidy line endings, trimmed, and cut to the limit.
+    With single_line, new lines become spaces (for a name to sign it with)."""
+    t = _CONTROL_CHARS.sub("", str(text if text is not None else "")).replace("\r\n", "\n").replace("\r", "\n")
+    if single_line:
+        t = " ".join(t.split())
+    else:
+        t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()[:limit].strip()
