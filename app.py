@@ -34,9 +34,11 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from helpers import (
+    NOTE_MAX,
     PIN_HASH_ITERATIONS,
     QUESTIONNAIRE_FIELDS,
     add_working_days,
+    clean_note,
     clean_questionnaire,
     client_ip_from_xff,
     esc,
@@ -665,6 +667,11 @@ def build_comparison_export() -> str:
     return "\n".join(lines) + "\n"
 
 
+def compare_page_shown(comparisons) -> bool:
+    """The 'Your results at a glance' and 'Your results in detail' pages (and the clinician's note) are only shown if at least one result could be compared."""
+    return bool(NORMS_AVAILABLE and comparisons and any(c["status"] != "no_reference" for c in comparisons))
+
+
 def compute_comparisons(tests, age_years, sex_choice, height_cm) -> list:
     """Compare the participant's results with published reference data for their age and sex. Returns a list of dicts."""
     if not NORMS_AVAILABLE:
@@ -993,7 +1000,8 @@ def reset_measurement_inputs():
     for k in list(st.session_state.keys()):
         if isinstance(k, str) and k.startswith(("in::", "verified::", "raw::")):
             del st.session_state[k]
-    for k in ("autofill_done", "autofill_unverified", "autofill_log", "reader_view", "ai_used", "ai_last", "ai_usage", "ai_last_usage"):
+    for k in ("autofill_done", "autofill_unverified", "autofill_log", "reader_view", "ai_used", "ai_last", "ai_usage", "ai_last_usage",
+              "cmp_excluded", "cmp_note", "cmp_note_by", "p_age", "p_sex", "p_height"):
         st.session_state.pop(k, None)
 
 
@@ -1958,7 +1966,7 @@ REPORT_TEMPLATE = """
     </style>
     <script>
         function switchView(viewName) {{
-            const views = ['clinical', 'plain'{compare_view}];
+            const views = [{views_js}];
             views.forEach(function (v) {{
                 document.getElementById('card-' + v).style.display = (v === viewName) ? 'block' : 'none';
                 document.getElementById('btn-' + v).classList.toggle('active', v === viewName);
@@ -1981,31 +1989,10 @@ REPORT_TEMPLATE = """
             </div>
 
             <div class="view-switcher">
-                <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
-                <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
-                {compare_button}
+                {tab_buttons}
             </div>
 
-            <div id="card-clinical" class="results-card">
-                <h2>🎯 Master Executive Clinical Review &amp; Longitudinal Progress</h2>
-                <div class="interpretation-text">
-                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>
-                    {master_html}
-                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>
-                    {mod1_html}
-                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>
-                    {mod2_html}
-                    <h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>
-                    {mod3_html}
-                </div>
-            </div>
-
-            <div id="card-plain" class="plain-english-card" style="display: none;">
-                <h2>🗣️ What This Means For You</h2>
-                <div class="interpretation-text">{plain_english_html}</div>
-            </div>
-
-            {compare_card}
+            {view_cards}
 
             <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
             {tests_html}
@@ -2021,7 +2008,7 @@ REPORT_TEMPLATE = """
 """
 
 
-def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None):
+def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by=""):
     """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state."""
     tests_html = ""
     for idx, t in enumerate(tests):
@@ -2044,23 +2031,43 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
 
     safe = {k: clean_html(state[k]) for k in TEXT_KEYS}
     # the page is only worth showing if at least one result could be compared (a page that only lists what could not be done is no use)
-    compare_html = (norms.render_section_html(comparisons)
-                    if (NORMS_AVAILABLE and comparisons and any(c["status"] != "no_reference" for c in comparisons)) else "")
+    glance_html = norms.render_glance_html(comparisons, note=note, note_by=note_by) if compare_page_shown(comparisons) else ""
+    detail_html = norms.render_section_html(comparisons) if compare_page_shown(comparisons) else ""
+    clinical_inner = (
+        '<h2>🎯 Master Executive Clinical Review &amp; Longitudinal Progress</h2><div class="interpretation-text">'
+        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>'
+        f'{safe["ta_master"] or "<p>Master summary pending.</p>"}'
+        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>'
+        f'{safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>"}'
+        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>'
+        f'{safe["ta_mod2"] or "<p>Metabolic module pending.</p>"}'
+        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>'
+        f'{safe["ta_mod3"] or "<p>Biomechanical module pending.</p>"}'
+        '</div>'
+    )
+    # the pages, in the order a participant should meet them: the easy ones first, the clinical one last. The first one shown is the one that opens.
+    pages = []
+    if glance_html:
+        pages.append(("glance", "⭐ Your results at a glance", "plain-english-card", f'<h2>⭐ Your Results at a Glance</h2><div class="interpretation-text">{glance_html}</div>'))
+    if detail_html:
+        pages.append(("compare", "📊 Your results in detail", "plain-english-card", f'<h2>📊 Your Results in Detail</h2><div class="interpretation-text">{detail_html}</div>'))
+    pages.append(("plain", "🗣️ Plain English Breakdown", "plain-english-card",
+                  f'<h2>🗣️ What This Means For You</h2><div class="interpretation-text">{safe["ta_pe"] or "<p>Plain English summary pending.</p>"}</div>'))
+    pages.append(("clinical", "🩺 For your clinician or GP", "results-card", clinical_inner))
+    tab_buttons = "\n                ".join(
+        f'<button onclick="switchView(\'{vid}\')" id="btn-{vid}" class="view-btn{" active" if i == 0 else ""}">{label}</button>' for i, (vid, label, _c, _h) in enumerate(pages))
+    hidden = ' style="display: none;"'
+    view_cards = "\n\n            ".join(
+        f'<div id="card-{vid}" class="{css}"{"" if i == 0 else hidden}>{inner}</div>' for i, (vid, _l, css, inner) in enumerate(pages))
 
     report_html = REPORT_TEMPLATE.format(
-        compare_view=", 'compare'" if compare_html else "",
-        compare_button=("<button onclick=\"switchView('compare')\" id=\"btn-compare\" class=\"view-btn\">📊 How You Compare</button>" if compare_html else ""),
-        compare_card=(f'<div id="card-compare" class="plain-english-card" style="display: none;"><h2>📊 How Your Results Compare</h2>'
-                      f'<div class="interpretation-text">{compare_html}</div></div>' if compare_html else ""),
+        views_js=", ".join(f"'{vid}'" for vid, *_ in pages),
+        tab_buttons=tab_buttons,
+        view_cards=view_cards,
         participant_name=esc(participant_name),
         age_gender=esc(age_gender or "Not specified"),
         assessment_date=esc(assessment_date),
         body_mass_height=esc(body_mass_height or "Not specified"),
-        master_html=safe["ta_master"] or "<p>Master summary pending.</p>",
-        mod1_html=safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>",
-        mod2_html=safe["ta_mod2"] or "<p>Metabolic module pending.</p>",
-        mod3_html=safe["ta_mod3"] or "<p>Biomechanical module pending.</p>",
-        plain_english_html=safe["ta_pe"] or "<p>Plain English summary pending.</p>",
         tests_count=len(tests),
         tests_html=tests_html,
         year=datetime.date.today().year,
@@ -2487,6 +2494,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     comparisons_all = compute_comparisons(st.session_state.participant_tests, age_years, sex_choice, height_cm)
     comparisons = [c for c in comparisons_all if c["key"] not in (st.session_state.get("cmp_excluded") or [])]
+    report_note = clean_note(st.session_state.get("cmp_note", ""))
+    report_note_by = clean_note(st.session_state.get("cmp_note_by", ""), 60, single_line=True)
 
     for mod in MODULES:
         with st.container():
@@ -2628,10 +2637,18 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             labels = {c["key"]: c["label"] for c in comparisons_all}
             st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
                            help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
-            st.caption("The participant sees these on a page called 'How You Compare', with plain-English sentences and the full source for every range. "
-                       "The sentences come from fixed wording, not from the AI. Preview the report to see it.")
+            st.caption("The participant sees these on two pages, 'Your results at a glance' and 'Your results in detail', with plain-English sentences and the full source "
+                       "for every range. The sentences come from fixed wording, not from the AI. Preview the report to see them.")
+            if compare_page_shown(comparisons_all):  # the note goes on that page, so only offer it when there will be one
+                st.text_area("Your personal note to the participant (optional)", key="cmp_note", max_chars=NOTE_MAX, height=140,
+                             placeholder="e.g. Lovely to see you again. Your numbers are heading the right way, and I'd like us to focus on... ",
+                             help="Shown at the top of the 'Your results at a glance' page, in your own words. Plain text. It is never sent to any AI service.")
+                st.text_input("Sign it as", key="cmp_note_by", max_chars=60, placeholder="e.g. John (leave blank for 'Your clinician')")
         else:
             st.caption("None of the results entered can be compared with reference data yet.")
+        if report_note and not compare_page_shown(comparisons):
+            st.warning("Your personal note will not appear in the report. It goes on the 'Your results at a glance' page, and that page is only shown when at least one result "
+                       "can be compared (and has not been left out).")
     st.divider()
 
     # --- REVIEW, APPROVE & PUBLISH ---
@@ -2640,7 +2657,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         if participant_name:
             preview_html, _ = build_report(
                 participant_name, age_gender, assessment_date, body_mass_height,
-                st.session_state.participant_tests, st.session_state, comparisons,
+                st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by,
             )
             components.html(preview_html, height=700, scrolling=True)
         else:
@@ -2680,7 +2697,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             try:
                 final_html_output, safe = build_report(
                     participant_name, age_gender, assessment_date, body_mass_height,
-                    st.session_state.participant_tests, st.session_state, comparisons,
+                    st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by,
                 )
 
                 scan_id = str(assessment_date)
@@ -2695,6 +2712,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "height_cm": float(height_cm) if height_cm else None,
                     "comparisons": comparisons,
                     "norms_version": norms.NORMS_VERSION if NORMS_AVAILABLE else "",
+                    # the note is only kept if it was actually shown to the participant
+                    "clinician_note": report_note if compare_page_shown(comparisons) else "",
+                    "clinician_note_by": report_note_by if (report_note and compare_page_shown(comparisons)) else "",
                     "master_html": safe["ta_master"],
                     "plain_english_html": safe["ta_pe"],
                     "html_output": final_html_output,
