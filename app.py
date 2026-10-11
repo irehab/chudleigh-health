@@ -20,6 +20,12 @@ try:  # the app's own PDF reader (no AI). If it is not installed on the server, 
     PDF_READER_AVAILABLE = True
 except Exception:  # pragma: no cover
     read_report_pdf, reader_for, PDF_READER_AVAILABLE = None, None, False
+
+try:  # published reference data and the comparisons made from it (no AI)
+    import norms
+    NORMS_AVAILABLE = True
+except Exception:  # pragma: no cover
+    norms, NORMS_AVAILABLE = None, False
 import stripe
 import streamlit as st
 import streamlit.components.v1 as components
@@ -657,6 +663,64 @@ def build_comparison_export() -> str:
         if current and current != raw:
             lines += ["--- Current text (after your edits) ---", current]
     return "\n".join(lines) + "\n"
+
+
+def compute_comparisons(tests, age_years, sex_choice, height_cm) -> list:
+    """Compare the participant's results with published reference data for their age and sex. Returns a list of dicts."""
+    if not NORMS_AVAILABLE:
+        return []
+    try:
+        return [c.to_dict() for c in norms.compare(tests, age_years, sex_choice, height_cm)]
+    except Exception:
+        log.exception("Reference comparison failed")
+        return []
+
+
+def reader_demographics() -> dict:
+    """Age, sex and height printed on the reports the reader has read, so they can be checked against what was entered."""
+    out = {}
+    for view in (st.session_state.get("reader_view") or {}).values():
+        values = view["result"].values
+        for key, names in (("age", ("Age (years)", "Age used for comparison (years)")), ("sex", ("Sex (as printed)",)), ("height", ("Height (cm)",))):
+            for name in names:
+                v = values.get(name)
+                if v is not None and key not in out:
+                    out[key] = v.text if key == "sex" else v.number
+    return out
+
+
+def apply_demographic_hints(state, hints: dict):
+    """Fill the age, sex and height boxes from the reports. Run as a button callback, so it runs before the boxes are drawn."""
+    if hints.get("age"):
+        state["p_age"] = int(hints["age"])
+    sex = (hints.get("sex") or "").strip().lower()
+    if sex in ("male", "female"):
+        state["p_sex"] = sex.capitalize()
+    if hints.get("height"):
+        state["p_height"] = float(hints["height"])
+
+
+def show_demographic_hints(age_years, sex_choice, height_cm):
+    """Under an uploaded report: check its age, sex and height against what was entered, and offer to fill the boxes."""
+    hints = reader_demographics()
+    if not hints:
+        return
+    problems = []
+    if hints.get("age") and age_years and abs(hints["age"] - age_years) > 1:
+        problems.append(f"age {int(hints['age'])} (you entered {int(age_years)})")
+    if hints.get("sex") and sex_choice in ("Male", "Female") and hints["sex"].strip().lower() != sex_choice.lower():
+        problems.append(f"sex {hints['sex'].strip().lower()} (you entered {sex_choice.lower()})")
+    if hints.get("height") and height_cm and abs(hints["height"] - height_cm) > 3:
+        problems.append(f"height {hints['height']:g} cm (you entered {height_cm:g} cm)")
+    if problems:
+        st.warning("The report you uploaded says " + "; ".join(problems) + ". Check you have the right person's report, and correct whichever is wrong.")
+        return
+    missing = (not age_years and hints.get("age")) or (sex_choice == "Not stated" and hints.get("sex")) or (not height_cm and hints.get("height"))
+    if missing:
+        said = ", ".join(x for x in (f"age {int(hints['age'])}" if hints.get("age") else "", f"sex {hints['sex'].strip().lower()}" if hints.get("sex") else "",
+                                      f"height {hints['height']:g} cm" if hints.get("height") else "") if x)
+        st.info(f"The report says: {said}. The comparison with reference data uses the participant's age and sex.")
+        st.button("Use these for the participant details", key="use_report_details", on_click=apply_demographic_hints, args=(st.session_state, hints))
 
 
 def try_pdf_reader(pdf_bytes: bytes, assessment_type: str):
@@ -1584,7 +1648,7 @@ REPORT_RULES = """RULES. Follow every one.
 2. Breakdowns. If the report gives time or percentage breakdowns, quote them as printed and say what they are a share of. If the parts do not add up to the stated total, do not reconcile them or guess. Quote them as printed and add a note for the clinician (rule 9).
 3. No assumptions. You are given only the participant's age and sex and the test data. Do not assume or imply anything about symptoms, medical history, medication, fitness or training level, sleep, diet or lifestyle. Where such context would change what a result means, say that it depends on it.
 4. Describe, do not diagnose. Do not name a medical condition as a conclusion. You may say a result may be worth discussing with a GP when the report itself flags it or when it lies outside a range the report prints.
-5. Reference ranges. Use only ranges and labels that the report itself prints. If none is printed, say that no reference range was provided. Do not quote ranges, studies, guidelines or statistics from memory, and do not write phrases such as "research shows".
+5. Reference ranges. Use only ranges and labels that the report itself prints, or that appear under "Reference comparisons computed by the app". Use those comparisons exactly as given. If none is printed or given, say that no reference range was provided. Do not quote ranges, studies, guidelines or statistics from memory, and do not write phrases such as "research shows".
 6. Careful wording. Prefer "suggests", "is consistent with" and "may". Avoid "rules out", "confirms", "proves", "intact" and "normal" unless the report uses that label.
 7. Limits. Say plainly what a single test can and cannot show.
 8. Voice. Do not state or imply an author, a department or a job title, and do not sign off. Do not mention AI, models or tools.
@@ -1894,7 +1958,7 @@ REPORT_TEMPLATE = """
     </style>
     <script>
         function switchView(viewName) {{
-            const views = ['clinical', 'plain'];
+            const views = ['clinical', 'plain'{compare_view}];
             views.forEach(function (v) {{
                 document.getElementById('card-' + v).style.display = (v === viewName) ? 'block' : 'none';
                 document.getElementById('btn-' + v).classList.toggle('active', v === viewName);
@@ -1919,6 +1983,7 @@ REPORT_TEMPLATE = """
             <div class="view-switcher">
                 <button onclick="switchView('clinical')" id="btn-clinical" class="view-btn active">🩺 Professional Clinical View</button>
                 <button onclick="switchView('plain')" id="btn-plain" class="view-btn">🗣️ Plain English Breakdown</button>
+                {compare_button}
             </div>
 
             <div id="card-clinical" class="results-card">
@@ -1940,6 +2005,8 @@ REPORT_TEMPLATE = """
                 <div class="interpretation-text">{plain_english_html}</div>
             </div>
 
+            {compare_card}
+
             <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
             {tests_html}
 
@@ -1954,7 +2021,7 @@ REPORT_TEMPLATE = """
 """
 
 
-def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state):
+def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None):
     """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state."""
     tests_html = ""
     for idx, t in enumerate(tests):
@@ -1976,8 +2043,15 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         )
 
     safe = {k: clean_html(state[k]) for k in TEXT_KEYS}
+    # the page is only worth showing if at least one result could be compared (a page that only lists what could not be done is no use)
+    compare_html = (norms.render_section_html(comparisons)
+                    if (NORMS_AVAILABLE and comparisons and any(c["status"] != "no_reference" for c in comparisons)) else "")
 
     report_html = REPORT_TEMPLATE.format(
+        compare_view=", 'compare'" if compare_html else "",
+        compare_button=("<button onclick=\"switchView('compare')\" id=\"btn-compare\" class=\"view-btn\">📊 How You Compare</button>" if compare_html else ""),
+        compare_card=(f'<div id="card-compare" class="plain-english-card" style="display: none;"><h2>📊 How Your Results Compare</h2>'
+                      f'<div class="interpretation-text">{compare_html}</div></div>' if compare_html else ""),
         participant_name=esc(participant_name),
         age_gender=esc(age_gender or "Not specified"),
         assessment_date=esc(assessment_date),
@@ -2194,7 +2268,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     with col1:
         participant_name = st.text_input("Participant Full Name", placeholder="e.g. John Evans", key="p_name", max_chars=120)
-        age_gender = st.text_input("Age / Gender / DOB", placeholder="e.g. 48 yrs / Male / 15/03/1978", key="p_ag", max_chars=120)
+        age_years = st.number_input("Age (years)", min_value=0, max_value=120, value=None, step=1, key="p_age", placeholder="e.g. 48",
+                                    help="Used to choose reference data. Please enter the age, not a date of birth.")
 
     with col2:
         assessment_date = st.date_input("Assessment Date", value=datetime.date.today(), key="p_date")
@@ -2203,6 +2278,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             type="password", placeholder="••••••", key="p_pin", max_chars=MAX_PIN_LENGTH,
             help="Required for new participants. For existing participants, leave blank to keep their current PIN.",
         )
+
+    col_sex, col_height = st.columns(2)
+    with col_sex:
+        sex_choice = st.selectbox("Sex", ["Not stated", "Male", "Female"], key="p_sex",
+                                  help="Chooses which reference data the results are compared with. Without it, only comparisons that need no sex can be made.")
+    with col_height:
+        height_cm = st.number_input("Height (cm)", min_value=0.0, max_value=250.0, value=None, step=0.5, key="p_height", placeholder="e.g. 175")
+    age_gender = ", ".join(x for x in (f"{int(age_years)} years" if age_years else "", sex_choice.lower() if sex_choice and sex_choice != "Not stated" else "") if x)
 
     body_mass_height = st.text_input("Body Mass / Height / BMI", placeholder="e.g. 78 kg / 175 cm / 25.4", key="p_bm", max_chars=120)
 
@@ -2336,6 +2419,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         view = reader_views.get(assessment_type)
         if view and view["sig"] == pdf_sig:
             show_reader_result(view["result"], assessment_type)
+            show_demographic_hints(age_years, sex_choice, height_cm)
 
     needs_verification = bool(pdf_sig) and autofill_unverified.get(assessment_type) == pdf_sig
     if needs_verification:
@@ -2401,6 +2485,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         "resolved and its whole line deleted."
     )
 
+    comparisons_all = compute_comparisons(st.session_state.participant_tests, age_years, sex_choice, height_cm)
+    comparisons = [c for c in comparisons_all if c["key"] not in (st.session_state.get("cmp_excluded") or [])]
+
     for mod in MODULES:
         with st.container():
             st.markdown(mod["heading"])
@@ -2419,6 +2506,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             context_str = f"Participant details (age/sex only; identity withheld): {redact_for_ai(age_gender)}\n"
                             for t in mod_tests:
                                 context_str += test_context_line(t)
+                            if NORMS_AVAILABLE:
+                                context_str += norms.comparison_context(comparisons, {t["type"] for t in mod_tests})
                             file_refs = upload_pdfs([t for t in mod_tests if not t.get("from_reader")])
                             prompt = build_module_prompt(mod, context_str)
                             store_draft(mod["state_key"], tidy_check_notes(strip_code_fences(generate([*file_refs, prompt]))))
@@ -2525,13 +2614,33 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.divider()
 
+    # --- COMPARISON WITH REFERENCE DATA ---
+    st.markdown("#### 📊 Comparison with reference data")
+    if not NORMS_AVAILABLE:
+        st.caption("Reference data is not installed on this server, so no comparisons are made.")
+    elif not st.session_state.participant_tests:
+        st.caption("Add assessments to see how the results compare with published reference data for the participant's age and sex.")
+    else:
+        if not age_years or sex_choice == "Not stated":
+            st.info("Enter the participant's age and sex at the top to compare their results with reference data for their age and sex. Some comparisons need only an age.")
+        if comparisons_all:
+            st.markdown(norms.clinician_table(comparisons_all))
+            labels = {c["key"]: c["label"] for c in comparisons_all}
+            st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
+                           help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
+            st.caption("The participant sees these on a page called 'How You Compare', with plain-English sentences and the full source for every range. "
+                       "The sentences come from fixed wording, not from the AI. Preview the report to see it.")
+        else:
+            st.caption("None of the results entered can be compared with reference data yet.")
+    st.divider()
+
     # --- REVIEW, APPROVE & PUBLISH ---
     st.markdown("#### ✅ Review & Approve")
     if st.checkbox("👁️ Preview the report as the participant will see it", key="chk_preview"):
         if participant_name:
             preview_html, _ = build_report(
                 participant_name, age_gender, assessment_date, body_mass_height,
-                st.session_state.participant_tests, st.session_state,
+                st.session_state.participant_tests, st.session_state, comparisons,
             )
             components.html(preview_html, height=700, scrolling=True)
         else:
@@ -2571,7 +2680,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             try:
                 final_html_output, safe = build_report(
                     participant_name, age_gender, assessment_date, body_mass_height,
-                    st.session_state.participant_tests, st.session_state,
+                    st.session_state.participant_tests, st.session_state, comparisons,
                 )
 
                 scan_id = str(assessment_date)
@@ -2581,6 +2690,11 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "tests": strip_pdf_payloads(st.session_state.participant_tests),
                     "body_mass_height": body_mass_height,
                     "age_gender": age_gender,
+                    "age_years": int(age_years) if age_years else None,
+                    "sex": sex_choice if sex_choice != "Not stated" else "",
+                    "height_cm": float(height_cm) if height_cm else None,
+                    "comparisons": comparisons,
+                    "norms_version": norms.NORMS_VERSION if NORMS_AVAILABLE else "",
                     "master_html": safe["ta_master"],
                     "plain_english_html": safe["ta_pe"],
                     "html_output": final_html_output,
