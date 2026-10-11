@@ -14,6 +14,12 @@ import datetime
 from decimal import Decimal
 
 import nh3
+
+try:  # the app's own PDF reader (no AI). If it is not installed on the server, the AI reads PDFs as before.
+    from pdf_reader import read_pdf as read_report_pdf, reader_for
+    PDF_READER_AVAILABLE = True
+except Exception:  # pragma: no cover
+    read_report_pdf, reader_for, PDF_READER_AVAILABLE = None, None, False
 import stripe
 import streamlit as st
 import streamlit.components.v1 as components
@@ -587,6 +593,123 @@ def ai_usage_summary() -> list:
     return lines
 
 
+def store_draft(key: str, text: str):
+    """Put a draft in its text box, and keep an untouched copy so test mode can show what the AI really wrote."""
+    st.session_state[key] = text
+    st.session_state[f"raw::{key}"] = text
+
+
+DRAFT_TITLES = {
+    "ta_mod1": "Cardiorespiratory section", "ta_mod2": "Body composition and metabolic section", "ta_mod3": "Biomechanical section",
+    "ta_master": "Summary", "ta_pe": "Plain English note", "ta_plan_30": "30-day plan", "ta_plan_60": "60-day plan", "ta_plan_90": "90-day plan",
+}
+
+
+def build_comparison_export() -> str:
+    """Everything from a test run in one text file, for comparing AI services. Leaves out the participant's name and PDF file names."""
+    state = st.session_state
+    lines = [
+        "AI COMPARISON EXPORT (test mode, dummy data only)",
+        f"Date: {datetime.date.today().isoformat()}",
+        "The participant's name and the PDF file names are not included.",
+        "",
+        "AI services used: " + ("; ".join(state.get("ai_used") or []) or "none yet"),
+    ]
+    lines += ["  " + line for line in ai_usage_summary()]
+    lines += ["", "ASSESSMENTS ADDED"]
+    for i, t in enumerate(state.get("participant_tests") or [], 1):
+        lines.append(f"{i}. {t.get('type', '')}" + (" (PDF attached)" if t.get("pdf_bytes") else ""))
+        lines += [f"   {k}: {v}" for k, v in (t.get("data") or {}).items() if v]
+    log = state.get("autofill_log") or []
+    if log:
+        lines += ["", "PDF READING: what the AI read from each PDF, and what you kept"]
+        for e in log:
+            read, kept = e.get("read") or {}, e.get("kept") or {}
+            changed = sorted(k for k in set(read) | set(kept) if read.get(k, "") != kept.get(k, ""))
+            lines.append(f"- {e.get('type', '')} (read by {e.get('by', '')}): {len(read)} value(s) read, {len(changed)} changed by you")
+            lines += [f"    {k}: read '{read.get(k, '')}' -> kept '{kept.get(k, '')}'" for k in changed]
+    lines += ["", "DRAFTS"]
+    for key in TEXT_KEYS:
+        current = (state.get(key) or "").strip()
+        raw = (state.get(f"raw::{key}") or "").strip()
+        if not current and not raw:
+            continue
+        lines += ["", f"=== {DRAFT_TITLES.get(key, key)} ==="]
+        if raw:
+            lines += ["--- As written by the AI ---", raw]
+        if current and current != raw:
+            lines += ["--- Current text (after your edits) ---", current]
+    return "\n".join(lines) + "\n"
+
+
+def try_pdf_reader(pdf_bytes: bytes, assessment_type: str):
+    """Read a PDF with the app's own reader. Returns a dict, or None if the reader is not installed.
+
+    found: {box name: text} when the reader recognised the report and it belongs to this assessment, else None (use the AI).
+    """
+    if not PDF_READER_AVAILABLE:
+        return None
+    result = read_report_pdf(pdf_bytes)
+    reader = reader_for(result.device) if result.device != "unknown" else None
+    out = {"result": result, "found": None, "mismatch": False, "by": ""}
+    if reader is None or result.status not in ("ok", "check"):
+        return out
+    if reader.APP_ASSESSMENT != assessment_type:
+        out["mismatch"] = True
+        return out
+    out["found"] = {k: v for k, v in reader.app_fields(result).items() if v}
+    out["by"] = "PDF reader with text recognition (no AI)" if result.used_ocr else "PDF reader (no AI)"
+    return out
+
+
+def show_reader_result(result, assessment_type: str):
+    """Tell the clinician how the PDF was read, with any failed checks in the same bold red box as the AI's notes."""
+    reader = reader_for(result.device) if result.device != "unknown" else None
+    if reader is None:
+        why = {"unknown_device": "it is not a device the reader knows", "no_text": "it is a picture or scan the reader could not read", "error": "it could not be opened"}.get(result.status, "it was not recognised")
+        st.caption(f"The app's own reader could not read this PDF ({why}), so the AI was used instead, or you can enter the values by hand.")
+        return
+    if reader.APP_ASSESSMENT != assessment_type:
+        st.warning(f"This PDF looks like a {result.device_label}, but \"{assessment_type}\" is selected. Choose \"{reader.APP_ASSESSMENT}\" above and upload it there, so the right boxes are filled.")
+        return
+    errors = [c for c in result.checks if c.severity == "error"]
+    failed = [c for c in errors if not c.ok]
+    unread = [n.replace("Could not read: ", "") for n in result.notes if n.startswith("Could not read")]
+    how = "read from the picture by text recognition, with no AI" if result.used_ocr else "read directly from the PDF's text, with no AI"
+    if result.status == "ok":
+        st.success(f"✅ {result.device_label}: {how}. All {len(errors)} automatic checks passed. Still compare the values with the report before adding.")
+    else:
+        parts = []
+        if failed:
+            parts.append("⚠️ CHECKS THAT FAILED (a number may be misread):<ul>" + "".join(f"<li>{esc(c.name)}: {esc(c.detail)}</li>" for c in failed) + "</ul>")
+        if unread:
+            parts.append("⚠️ COULD NOT READ: " + esc(", ".join(unread)))
+        parts.append("Compare every value with the report and correct it before adding.")
+        st.markdown("<div class='check-banner'>" + "<br>".join(parts) + "</div>", unsafe_allow_html=True)
+    with st.expander(f"Automatic checks and notes ({len(result.checks)})"):
+        for c in result.checks:
+            st.markdown(f"{'✅' if c.ok else ('ℹ️' if c.severity == 'note' else '❌')} **{c.name}**: {c.detail}")
+        for n in result.notes:
+            st.caption(n)
+        for statement in result.statements:
+            st.info(f"The device's own wording (not used in the report): {statement['text']}\n\n_{statement['caution']}_")
+
+
+def test_context_line(t: dict) -> str:
+    """What the AI is told about one assessment: the checked values, and anything else the reader found."""
+    line = f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
+    if t.get("extra"):
+        line += f"  Other values printed on the report (read by the app and checked): {json.dumps(t['extra'])}\n"
+    if t.get("printed_ranges"):
+        line += f"  Ranges printed on the report itself: {'; '.join(t['printed_ranges'])}\n"
+    return line
+
+
+def for_history(tests: list) -> list:
+    """Earlier scans' assessments, without the long list of extra values."""
+    return [{k: v for k, v in t.items() if k not in ("extra", "printed_ranges", "from_reader")} for t in tests]
+
+
 def ai_usage_for_record() -> list:
     """Token counts (never prompts or answers) saved with the report, so costs can be reviewed later."""
     return [
@@ -751,13 +874,14 @@ def pdf_privacy_note() -> str:
     provider = current_provider()
     who = AI_SERVICE_PHRASES.get(provider, "the AI service")
     advice = "Where possible, avoid uploading reports that show the participant's name or date of birth."
+    own = "Reports from devices the app recognises are read inside the app and are not sent to any AI service. Any other PDF " if PDF_READER_AVAILABLE else "When you upload a PDF it "
     if provider == "gemini":
         return (
-            f"When you upload a PDF it is sent to {who} straight away to read the measurements, "
+            f"{own}is sent to {who} straight away to read the measurements, "
             f"and again later to help draft the review. It is deleted from Gemini after each use. {advice}"
         )
     return (
-        f"When you upload a PDF it is sent to {who} straight away to read the measurements, "
+        f"{own}is sent to {who} straight away to read the measurements, "
         f"and again later to help draft the review. It travels inside the request, and the app does not save it. {advice}"
     )
 
@@ -786,9 +910,9 @@ def clean_extracted(data, allowed_keys, max_len: int = 200) -> dict:
 def reset_measurement_inputs():
     """Forget typed/auto-filled measurements so one participant's numbers never carry over to the next."""
     for k in list(st.session_state.keys()):
-        if isinstance(k, str) and k.startswith(("in::", "verified::")):
+        if isinstance(k, str) and k.startswith(("in::", "verified::", "raw::")):
             del st.session_state[k]
-    for k in ("autofill_done", "autofill_unverified", "ai_used", "ai_last", "ai_usage", "ai_last_usage"):
+    for k in ("autofill_done", "autofill_unverified", "autofill_log", "reader_view", "ai_used", "ai_last", "ai_usage", "ai_last_usage"):
         st.session_state.pop(k, None)
 
 
@@ -1686,6 +1810,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         )
         if st.session_state.get("ai_last"):
             st.sidebar.caption(f"Last draft by: {st.session_state['ai_last']}")
+        if st.session_state.get("participant_tests") or any(st.session_state.get(k) for k in TEXT_KEYS):
+            st.sidebar.download_button(
+                "⬇️ Download all drafts for comparison",
+                data=build_comparison_export(),
+                file_name=f"ai_comparison_{datetime.date.today().isoformat()}.txt",
+                mime="text/plain",
+                key="dl_compare",
+            )
 
     _usage_lines = ai_usage_summary()
     if _usage_lines:
@@ -1798,15 +1930,28 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     autofill_unverified = st.session_state.setdefault("autofill_unverified", {})
     pdf_sig = hashlib.sha256(pdf_bytes_content).hexdigest()[:16] if pdf_bytes_content else None
 
+    reader_views = st.session_state.setdefault("reader_view", {})
     if pdf_sig:
         if st.button("🔄 Re-read values from the PDF", key=f"reread_{assessment_type}"):
             autofill_done.pop(assessment_type, None)
-        if autofill_done.get(assessment_type) != pdf_sig and gemini_ready():
+            reader_views.pop(assessment_type, None)
+        if autofill_done.get(assessment_type) != pdf_sig:
             fields = assessment_fields(spec)
-            try:
-                with st.spinner("Reading the measurements from the PDF..."):
-                    found = extract_metrics_from_pdf(assessment_type, fields, pdf_bytes_content)
-                # Replace the boxes with what the PDF shows (blank where it shows nothing), so old values never linger.
+            attempt = None
+            if PDF_READER_AVAILABLE:
+                with st.spinner("Reading the PDF..."):
+                    attempt = try_pdf_reader(pdf_bytes_content, assessment_type)
+            if attempt:
+                reader_views[assessment_type] = {"sig": pdf_sig, "result": attempt["result"]}
+            if attempt and attempt["mismatch"]:
+                # the PDF belongs to a different assessment: fill nothing, and say so below
+                autofill_done[assessment_type] = pdf_sig
+                autofill_unverified.pop(assessment_type, None)
+                st.session_state.pop(f"raw::autofill::{assessment_type}", None)
+            elif attempt and attempt["found"] is not None:
+                found = attempt["found"]
+                st.session_state[f"raw::autofill::{assessment_type}"] = {"by": attempt["by"], "read": dict(found)}
+                # Replace the boxes with what the report shows (blank where it shows nothing), so old values never linger.
                 for label, _example, payload_key in fields:
                     st.session_state[f"in::{assessment_type}::{label}"] = found.get(payload_key, "")
                 autofill_done[assessment_type] = pdf_sig
@@ -1814,13 +1959,30 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     autofill_unverified[assessment_type] = pdf_sig
                 else:
                     autofill_unverified.pop(assessment_type, None)
-                    st.warning("No measurements could be read from this PDF. Please enter them by hand.")
-            except PdfAttachError as e:
-                autofill_done[assessment_type] = pdf_sig  # don't retry on every rerun; use the Re-read button
-                st.warning(f"{e} You can enter the measurements by hand.")
-            except Exception:
-                autofill_done[assessment_type] = pdf_sig
-                fail("Couldn't read the measurements from the PDF. Please enter them by hand.", "PDF auto-fill failed", ai=True)
+            elif gemini_ready():
+                # the app's own reader could not read this PDF: the AI reads it, as before
+                try:
+                    with st.spinner("Reading the measurements from the PDF..."):
+                        found = extract_metrics_from_pdf(assessment_type, fields, pdf_bytes_content)
+                    st.session_state[f"raw::autofill::{assessment_type}"] = {"by": AI_PROVIDERS.get(current_provider(), current_provider()), "read": dict(found)}
+                    # Replace the boxes with what the PDF shows (blank where it shows nothing), so old values never linger.
+                    for label, _example, payload_key in fields:
+                        st.session_state[f"in::{assessment_type}::{label}"] = found.get(payload_key, "")
+                    autofill_done[assessment_type] = pdf_sig
+                    if found:
+                        autofill_unverified[assessment_type] = pdf_sig
+                    else:
+                        autofill_unverified.pop(assessment_type, None)
+                        st.warning("No measurements could be read from this PDF. Please enter them by hand.")
+                except PdfAttachError as e:
+                    autofill_done[assessment_type] = pdf_sig  # don't retry on every rerun; use the Re-read button
+                    st.warning(f"{e} You can enter the measurements by hand.")
+                except Exception:
+                    autofill_done[assessment_type] = pdf_sig
+                    fail("Couldn't read the measurements from the PDF. Please enter them by hand.", "PDF auto-fill failed", ai=True)
+        view = reader_views.get(assessment_type)
+        if view and view["sig"] == pdf_sig:
+            show_reader_result(view["result"], assessment_type)
 
     needs_verification = bool(pdf_sig) and autofill_unverified.get(assessment_type) == pdf_sig
     if needs_verification:
@@ -1849,12 +2011,26 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         elif not any((v or "").strip() for v in test_payload_data.values()):
             st.warning("Please enter at least one measurement before adding this assessment. Blank fields are left out of the report.")
         else:
-            st.session_state.participant_tests.append({
+            kept_values = {k: (v or "").strip() for k, v in test_payload_data.items()}
+            read_back = st.session_state.get(f"raw::autofill::{assessment_type}")
+            if read_back and autofill_done.get(assessment_type) == pdf_sig:
+                st.session_state.setdefault("autofill_log", []).append(
+                    {"type": assessment_type, "by": read_back["by"], "read": read_back["read"], "kept": kept_values}
+                )
+            new_test = {
                 "type": assessment_type,
-                "data": {k: (v or "").strip() for k, v in test_payload_data.items()},
+                "data": kept_values,
                 "pdf_filename": pdf_filename_str,
                 "pdf_bytes": pdf_bytes_content,
-            })
+            }
+            view = reader_views.get(assessment_type)
+            if read_back and read_back["by"].startswith("PDF reader") and autofill_done.get(assessment_type) == pdf_sig:
+                # the app's own reader supplied these values and you checked them, so the AI is not sent this PDF when drafting
+                new_test["from_reader"] = True
+                if view and view["sig"] == pdf_sig and view["result"].status == "ok":
+                    new_test["extra"] = {k: v.display for k, v in view["result"].values.items()}
+                    new_test["printed_ranges"] = list(view["result"].printed_ranges)
+            st.session_state.participant_tests.append(new_test)
             autofill_unverified.pop(assessment_type, None)
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
@@ -1889,10 +2065,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         try:
                             context_str = f"Participant details (age/sex only; identity withheld): {redact_for_ai(age_gender)}\n"
                             for t in mod_tests:
-                                context_str += f"Test: {t['type']} -> Metrics: {json.dumps(t['data'])}\n"
-                            file_refs = upload_pdfs(mod_tests)
+                                context_str += test_context_line(t)
+                            file_refs = upload_pdfs([t for t in mod_tests if not t.get("from_reader")])
                             prompt = build_module_prompt(mod, context_str)
-                            st.session_state[mod["state_key"]] = tidy_check_notes(strip_code_fences(generate([*file_refs, prompt])))
+                            store_draft(mod["state_key"], tidy_check_notes(strip_code_fences(generate([*file_refs, prompt]))))
                             drafted = True
                         except PdfAttachError as e:
                             st.error(str(e))
@@ -1928,7 +2104,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             if previous_scan:
                                 history_context = (
                                     f"\n\nPREVIOUS SCAN HISTORY (Date: {previous_scan.get('assessment_date')}):\n"
-                                    f"Previous Metrics / Summary: {json.dumps(strip_pdf_payloads(previous_scan.get('tests', [])), default=str)}\n"
+                                    f"Previous Metrics / Summary: {json.dumps(for_history(strip_pdf_payloads(previous_scan.get('tests', []))), default=str)}\n"
                                     f"Previous Master Summary: {previous_scan.get('master_html', 'None')}\n"
                                 )
 
@@ -1936,7 +2112,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                                 history_context,
                                 {k: st.session_state[k] for k in ("ta_mod1", "ta_mod2", "ta_mod3")},
                             )
-                            st.session_state.ta_master = tidy_check_notes(strip_code_fences(generate(master_prompt)))
+                            store_draft("ta_master", tidy_check_notes(strip_code_fences(generate(master_prompt))))
                             drafted = True
                         except Exception:
                             fail("Drafting failed. Please try again.", "Generation error in master synthesis", ai=True)
@@ -1954,7 +2130,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     with st.spinner("Drafting plain English coaching guide..."):
                         try:
                             pe_prompt = build_plain_english_prompt(st.session_state.ta_master)
-                            st.session_state.ta_pe = tidy_check_notes(strip_code_fences(generate(pe_prompt)))
+                            store_draft("ta_pe", tidy_check_notes(strip_code_fences(generate(pe_prompt))))
                             drafted = True
                         except Exception:
                             fail("Drafting failed. Please try again.", "Generation error in plain English breakdown", ai=True)
@@ -2008,7 +2184,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         raise ValueError("Plan response was not a JSON object")
                     for tier in TIERS:
                         value = plan_data.get(f"plan_{tier}", "")
-                        st.session_state[f"ta_plan_{tier}"] = tidy_check_notes(value if isinstance(value, str) else json.dumps(value))
+                        store_draft(f"ta_plan_{tier}", tidy_check_notes(value if isinstance(value, str) else json.dumps(value)))
                     drafted = True
                 except Exception:
                     fail("Generating tiered plans failed. Please try again.", "Generation error in tiered plans", ai=True)
