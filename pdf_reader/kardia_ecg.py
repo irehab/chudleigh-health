@@ -106,9 +106,7 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
         put("Age (years)", f"{g[1]}years")
     else:
         res.notes.append("Could not read: Sex and age")
-    g = grab(r"Recorded:\s*([^\n]+)", left)
-    if g:
-        v["Recorded"] = Value(text=" ".join(g[0].split()), number=None, unit="")
+    # the date and time the ECG was recorded are not read: the only date used is the assessment date the clinician enters
 
     # the line about how the recording was analysed (full width, at the bottom)
     if anchors["Analysis"]:
