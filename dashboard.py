@@ -15,7 +15,9 @@ The lights: green (doing well), amber (room to improve), red (a good place to fo
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
+import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -70,6 +72,8 @@ class Row:
     sources: list = field(default_factory=list)
     notes: str = ""
     broken: bool = False                           # a row with an error is never shown to participants, even if approved
+    gaps: list = field(default_factory=list)       # the wording still missing (a row with gaps can be a draft, but cannot be approved)
+    hash: str = ""                                 # a fingerprint of the wording: an approval only counts while it still matches
 
 
 @dataclass
@@ -113,6 +117,35 @@ def _check_words(label, text, problems):
             problems.append(f"WARNING: {label}: a sentence is {len(s.split())} words long. Shorter is easier to read: '{s[:60]}...'")
     if BANNED.search(text or ""):
         problems.append(f"WARNING: {label}: avoid words that promise or diagnose ('{BANNED.search(text).group(0).strip()}').")
+
+
+def wording_hash(row: Row) -> str:
+    """A short fingerprint of everything a participant could read or that decides a light: the words, the ranges, the sources. Not the order, the priority,
+    the notes or the approved column, so re-ordering the page does not undo an approval but changing a word does."""
+    payload = {"title": row.title, "group": row.group, "what_it_is": row.what_it_is, "rule": row.rule, "members": row.members, "facts": row.facts,
+               "value_from": row.value_from, "ranges": [row.green_min, row.green_max, row.amber_min, row.amber_max], "text": row.text, "book": row.book, "sources": row.sources}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def approval_status(row: Row, approvals: dict | None) -> str:
+    """'file' (approved in the CSV), 'approved' (approved in the app, and the wording is unchanged), 'changed' (it was approved but the wording has changed since),
+    'incomplete' (words still missing, so it cannot be approved), 'error' (a problem in its row), or 'none'."""
+    if row.broken:
+        return "error"
+    if row.gaps:
+        return "incomplete"
+    if row.approved:
+        return "file"
+    mine = (approvals or {}).get(row.key)
+    if mine and mine == row.hash:
+        return "approved"
+    return "changed" if mine else "none"
+
+
+def wording_for_review(row: Row) -> list:
+    """What a participant would read for each light, for the clinician to check before approving: [(light, headline, text, do)]."""
+    names = {"green": "Green", "amber": "Amber", "red": "Red", "low": "Lower than expected", "info": "For information"}
+    return [(names[l], row.text[l]["headline"], row.text[l]["text"], row.text[l]["do"]) for l in ("green", "amber", "red", "low", "info") if any(row.text[l].values())]
 
 
 def _parse_row(raw, line, problems):
@@ -159,15 +192,15 @@ def _parse_row(raw, line, problems):
     for sid in row.sources:
         if sid not in data.SOURCES:
             problems.append(f"ERROR: {label}: unknown source '{sid}'. Known sources: {', '.join(sorted(data.SOURCES))}.")
-    if row.approved:
-        needs = [("title", row.title), ("what_it_is", row.what_it_is), ("group", row.group)]
-        if row.rule == "info":
-            needs += [("info_text", row.text["info"]["text"])]
-        else:
-            needs += [(f"{light}_{f}", row.text[light][f]) for light in ("green", "amber", "red") for f in TEXT_FIELDS]
-        gaps = [n for n, v in needs if not v]
-        if gaps:
-            problems.append(f"ERROR: {label}: approved, but these are empty: {', '.join(gaps)}.")
+    needs = [("title", row.title), ("what_it_is", row.what_it_is), ("group", row.group)]
+    if row.rule == "info":
+        needs += [("info_text", row.text["info"]["text"])]
+    else:
+        needs += [(f"{light}_{f}", row.text[light][f]) for light in ("green", "amber", "red") for f in TEXT_FIELDS]
+    row.gaps = [n for n, v in needs if not v]
+    if row.approved and row.gaps:
+        problems.append(f"ERROR: {label}: approved, but these are empty: {', '.join(row.gaps)}.")
+    row.hash = wording_hash(row)
     texts = [row.what_it_is, row.facts] + [v for light in row.text.values() for v in light.values()]
     for t in texts:
         _check_words(label, t, problems)
@@ -254,10 +287,11 @@ class Tile:
     bar: str = ""
     parts: list = field(default_factory=list)         # for a tile that sums up several results: [{"label", "value_text", "light", "words"}]
     words: str = ""                                   # the chip's own words, when the usual ones do not fit (a result that is lower than expected)
+    hash: str = ""                                    # the fingerprint of the wording that was shown, kept with the saved report
 
     def record(self) -> dict:
         """What is kept with the saved report (no long text, which is re-created from the library)."""
-        return {"key": self.key, "title": self.title, "light": self.light, "value_text": self.value_text, "group": self.group}
+        return {"key": self.key, "title": self.title, "light": self.light, "value_text": self.value_text, "group": self.group, "wording": self.hash}
 
 
 def engine_light(c: dict) -> str:
@@ -310,8 +344,11 @@ def _words(S: dict, light: str) -> str:
     return S.get(f"legend_{'info' if light == GREY else light}", light)
 
 
-def build_tiles(tests: list, comparisons: list, library: Library, include_drafts: bool = False, exclude=()):
-    """Turn the results into tiles. Returns (tiles, hidden): hidden lists the rows left out because they are not approved yet (or have an error)."""
+def build_tiles(tests: list, comparisons: list, library: Library, include_drafts: bool = False, exclude=(), approvals: dict | None = None):
+    """Turn the results into tiles. Returns (tiles, hidden): hidden lists the rows left out because they are not approved yet (or have an error).
+
+    approvals: {result key: fingerprint of the wording approved in the app}. A row is approved if the CSV says yes, or if the app holds an approval whose
+    fingerprint still matches the row's wording. Incomplete or broken rows are never shown."""
     exclude = set(exclude or ())
     comps = {c["key"]: c for c in for_patient(comparisons or []) if c.get("status") != NO_REFERENCE}
     S = library.summary
@@ -319,7 +356,8 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
     for row in sorted(library.rows, key=lambda r: (r.order, r.key)):
         if row.key in exclude:
             continue
-        shown = row.approved and not row.broken
+        status = approval_status(row, approvals)
+        shown = status in ("file", "approved")
         tile = None
         if row.rule == "engine":
             c = comps.get(row.key)
@@ -331,7 +369,7 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 head, text, do = _pick(row, light, c["status"])
                 src = [c["source"]] if c.get("source") else []          # only the table the range came from; other sources are named in the row's 'sources' column
                 tile = Tile(row.key, row.group, row.title, light, c["value_text"], row.what_it_is, [c["sentence"]], head, text, do, row.book, src + row.sources,
-                            shown, row.priority, row.order, bar_html(c), [], (row.text["low"]["headline"] if low else ""))
+                            shown, row.priority, row.order, bar_html(c), [], (row.text["low"]["headline"] if low else ""), row.hash)
         elif row.rule == "composite":
             members = [comps[m] for m in row.members if m in comps and m not in exclude]
             if members:
@@ -342,7 +380,7 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 parts = [{"label": m.get("patient_label") or m["label"], "value_text": m["value_text"], "light": lt, "words": m.get("status_text") or _words(S, lt)}
                          for m, lt in zip(members, lights)]
                 src = [m["source"] for m in members if m.get("source")]
-                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [], head, text, do, row.book, src + row.sources, shown, row.priority, row.order, "", parts)
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [], head, text, do, row.book, src + row.sources, shown, row.priority, row.order, "", parts, "", row.hash)
         else:
             got = read_value(row.value_from, tests) if row.value_from else None
             if got:
@@ -350,13 +388,13 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 light = GREY if row.rule == "info" else range_light(number, row)
                 head, text, do = _pick(row, light)
                 tile = Tile(row.key, row.group, row.title, light, shown_text, row.what_it_is, [row.facts.replace("{value}", shown_text)], head, text, do, row.book,
-                            list(row.sources), shown, row.priority, row.order)
+                            list(row.sources), shown, row.priority, row.order, hash=row.hash)
         if tile is None:
             continue
         if tile.approved or include_drafts:
             tiles.append(tile)
         else:
-            hidden.append({"key": row.key, "title": row.title, "reason": "an error in its row" if row.broken else "not approved yet"})
+            hidden.append({"key": row.key, "title": row.title, "reason": {"error": "an error in its row", "incomplete": "its wording is not finished", "changed": "its wording has changed since it was approved"}.get(status, "not approved yet")})
     return tiles, hidden
 
 
@@ -484,7 +522,7 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
     if preview and (drafts or hidden):
         names = ", ".join(sorted({t.title for t in drafts} | {h["title"] for h in (hidden or [])}))
         banner = (f'<div class="draft-banner">PREVIEW ONLY. These results are drafts and will not be shown to the participant until they are approved '
-                  f'(set approved to yes in the library): {esc(names)}.</div>' if drafts else "")
+                  f'(approve them in the dashboard section of the clinician screen): {esc(names)}.</div>' if drafts else "")
     pills = "".join(f'<span class="pill {lt}">{_dot(lt, True)} {summary[lt]} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED) if summary[lt])
     head = (f'<div class="summary"><h2>{esc(S.get("page_title", ""))}</h2><p class="headline">{esc(summary["headline"])}</p><div class="pills">{pills}</div>'
             f'<p class="legend">' + "".join(f'<span>{_dot(lt, True)} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED, GREY)) + f'</p></div>') if summary["n"] else ""
