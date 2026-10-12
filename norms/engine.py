@@ -7,6 +7,10 @@ with the reason.
 The wording follows three rules. It states the fact first, then says plainly whether it is good news or something to work on, and
 then explains why. It only links a result to a health outcome where a source says so (WHO, the NCHS pulse report, the systematic
 review in data.SOURCES), and it never promises an outcome. Every sentence a participant reads is kept to 20 words or fewer.
+
+The AGE Reader (Diagnoptics) is the one device whose own norms are used: its printed average AGE level for the person's age, how far
+above or below it they are, its BodyAge against their age, and its own label. Those are judged here exactly as the report prints them.
+Dates, times and how long a test ran are never used.
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-11.3"
+NORMS_VERSION = "2026-10-12.1"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -39,8 +43,8 @@ PATIENT_TEXT = {
     "ecg_qtcb": ("Heart reset time (QTc, Bazett)", "How long your heart takes to reset between beats, adjusted for your heart rate."),
     "fat_pct": ("Body fat", "The share of your body weight that is fat, as estimated by the body composition scale."),
     "bmi": ("BMI", "A rough measure of whether your weight suits your height."),
-    "age_pos": ("Skin AGE level (compared with others your age)", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
-    "age_vs_avg": ("Skin AGE level (compared with the average)", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
+    "age_level": ("Skin AGE level", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
+    "age_bodyage": ("Skin age estimate (BodyAge)", "The age at which an average person has your skin AGE level, according to the AGE Reader."),
 }
 
 
@@ -64,6 +68,7 @@ class Comparison:
     reason: str = ""     # why a measure could not be compared
     calculated: bool = False
     also_sources: list = field(default_factory=list)
+    status_text: str = ""     # the words for the chip, when "within the usual range" is not the right wording
     patient_label: str = ""   # the name a participant reads
     measures: str = ""        # one plain line on what it measures
     low: float | None = None  # the usual range, as numbers, for the bar
@@ -134,13 +139,21 @@ def measures_from_tests(tests: list, height_cm: float | None = None) -> dict:
             if f:
                 out["ecg_qtcf"] = {"value": f, "assessment": a}
         elif a == A_AGE:
-            pos = _extra_num(t, "Position within age group (%)")
-            vs = _extra_num(t, "AGE level compared with average (%)")
-            if pos is not None:
-                out["age_pos"] = {"value": pos, "assessment": a}
-            if vs is not None:
-                out["age_vs_avg"] = {"value": vs, "assessment": a, "direction": ((t.get("extra") or {}).get("Comparison direction") or "").lower(),
-                                     "age_used": _extra_num(t, "Age used for comparison (years)")}
+            ex = t.get("extra") or {}
+            level, avg = _extra_num(t, "AGE level"), _extra_num(t, "AGE level, average for age")
+            pct, age_used = _extra_num(t, "AGE level compared with average (%)"), _extra_num(t, "Age used for comparison (years)")
+            direction = (ex.get("Comparison direction") or "").strip().lower()
+            calculated = False
+            if pct is None and level is not None and avg:           # the gauge numbers are printed even if the sentence could not be read
+                pct, calculated = round(abs(1 - level / avg) * 100, 1), True
+                direction = direction or ("below" if level < avg else "above" if level > avg else "")
+            if pct is not None or level is not None:
+                out["age_level"] = {"value": level if level is not None else pct, "assessment": a, "level": level, "average": avg, "pct": pct, "direction": direction,
+                                    "age_used": age_used, "label": (ex.get("Risk label (as printed)") or "").strip(), "calculated": calculated,
+                                    "position": _extra_num(t, "Position within age group (%)")}
+            body = _extra_num(t, "BodyAge (years)")
+            if body is not None:
+                out["age_bodyage"] = {"value": body, "assessment": a, "age_used": age_used, "diff": _extra_num(t, "BodyAge difference from age (years)")}
     return out
 
 
@@ -386,29 +399,90 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             detail=("If readings stay low, or you feel breathless, speak to your GP." if status == BELOW else ""),
         )
 
-    if key == "age_pos":
-        return Comparison(
-            key=key, label="Skin AGE level compared with others of your age", assessment=a, status=REPORTED, source="age_scanner_printed", value=v,
-            value_text=f"{_fmt(v)}%", range_text="the device's own comparison", headline="For your information", theme=INFO,
-            sentence=f"Your AGE Scanner report places you at {_fmt(v)}% within your age group, using the device maker's own reference group.",
-            meaning="This comes from the device maker's own comparison group, so treat it as a guide. We will talk it through with you.",
-        )
-    if key == "age_vs_avg":
-        way = m.get("direction") or ""
-        age_used = m.get("age_used")
-        if way not in ("below", "above"):
-            return _no_ref(key, "Skin AGE level compared with the average", a, v, "%", "The report's wording about above or below the average could not be read.")
-        return Comparison(
-            key=key, label="Skin AGE level compared with the average", assessment=a, status=REPORTED, source="age_scanner_printed", value=v,
-            value_text=f"{_fmt(v)}% {way}", range_text="the device's own comparison", headline="For your information", theme=INFO,
-            sentence=(f"Your AGE Scanner report says your AGE level is {_fmt(v)}% {way} the average for "
-                      f"{str(int(age_used)) + '-year-olds' if age_used else 'your age group'}. It uses the device maker's own reference group."),
-            meaning="This comes from the device maker's own comparison group, so treat it as a guide. We will talk it through with you.",
-        )
+    if key == "age_level":
+        return _age_level(m, age)
+    if key == "age_bodyage":
+        return _age_bodyage(m, age)
     return _no_ref(key, key, a, v, "", "No reference data is available for this measure.")
 
 
-_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "age_pos", "age_vs_avg"]
+def _label_kind(label: str) -> str:
+    """How the AGE Reader's own risk label reads: 'good' (no or low risk), 'bad' (moderate, medium, high or increased risk), or '' (anything else)."""
+    if re.search(r"\b(no|low)\s+risk\b", label, re.I):
+        return "good"
+    if re.search(r"\b(moderate|medium|high|very high|increased|elevated)\s+risk\b", label, re.I):
+        return "bad"
+    return ""
+
+
+def _age_level(m, age) -> Comparison:
+    """The AGE Reader's own comparison, judged as the report prints it. The reference is the average the device gives for the person's age."""
+    a, level, avg, pct, way = m["assessment"], m.get("level"), m.get("average"), m.get("pct"), m.get("direction") or ""
+    age_used = m.get("age_used") or (float(age) if age else None)
+    label, kind, pos = m.get("label") or "", _label_kind(m.get("label") or ""), m.get("position")
+    lower = {"below": "lower", "above": "higher"}.get(way, "")
+    if kind == "bad":
+        status, theme, headline = ABOVE, DISCUSS, "Worth discussing with your clinician"
+    elif kind == "good" or way == "below":
+        status, theme, headline = WITHIN, DOING_WELL, "A good result" if way == "below" else "Within the AGE Reader's usual group"
+    else:
+        status, theme, headline = ABOVE, INFO, "For your information"
+    if status == WITHIN:
+        words = "Lower than average for your age" if way == "below" else "Within the AGE Reader's usual group"
+    elif way == "above":
+        words = "Higher than average for your age"
+    else:
+        words = "As reported by the AGE Reader"
+    who = f"people aged {_fmt(age_used)}" if age_used else "your age group"
+    if level is not None and avg:
+        sentence = (f"Your skin AGE level was {_fmt(level)}. The AGE Reader's average for {who} is {_fmt(avg)}. "
+                    + (f"Yours is {_fmt(pct)}% {lower} than average." if pct is not None and lower else "Yours is about the same as the average."))
+        value_text, range_text = _fmt(level), f"the AGE Reader's average for {who}: {_fmt(avg)}"
+    elif pct is not None and lower:
+        sentence = f"Your AGE Scanner report says your AGE level is {_fmt(pct)}% {lower} than the average for {who}."
+        value_text, range_text = f"{_fmt(pct)}% {way}", "the AGE Reader's average for your age"
+    else:
+        sentence = f"Your skin AGE level was {_fmt(level)}." if level is not None else "Your AGE Scanner report compares your skin AGE level with an average."
+        value_text, range_text = (_fmt(level) if level is not None else "-"), "the AGE Reader's average for your age"
+    quoted = f"\u201c{label}\u201d" if label else ""
+    if theme == DOING_WELL and way == "below":
+        meaning = "That is lower than average for your age, which is a good sign." + (f" The AGE Reader's own label for this result is {quoted}." if quoted else "")
+    elif theme == DOING_WELL:
+        meaning = f"That is a little above average for your age, but the AGE Reader's own label for it is {quoted}."
+    elif theme == DISCUSS:
+        meaning = f"The AGE Reader's own label for this result is {quoted}. Your clinician will talk through what this means for you."
+    else:
+        meaning = "That is higher than average for your age. We will talk it through with you."
+    detail = "The average comes from the AGE Reader's own reference group, which the report does not publish."
+    if pos is not None:
+        detail += f" The report also places you at {_fmt(pos)}% within your age group."
+    return Comparison(key="age_level", label="Skin AGE level (AGE Reader)", assessment=a, status=status, source="age_scanner_printed", value=level if level is not None else pct,
+                      value_text=value_text, range_text=range_text, group=who, headline=headline, sentence=sentence, meaning=meaning, detail=detail, theme=theme,
+                      status_text=words, calculated=bool(m.get("calculated")))
+
+
+def _age_bodyage(m, age) -> Comparison:
+    """BodyAge against the person's age: the device's own estimate, judged only by whether it is younger or older than their age."""
+    a, body, diff = m["assessment"], m["value"], m.get("diff")
+    age_used = m.get("age_used") or (float(age) if age else None)
+    if age_used is None:
+        return _no_ref("age_bodyage", "BodyAge (AGE Reader)", a, body, "years", "An age is needed to compare the BodyAge with.")
+    years = diff if diff is not None else abs(age_used - body)
+    way = "younger" if body < age_used else "older" if body > age_used else "same"
+    sentence = f"The AGE Reader estimates your BodyAge at {_fmt(body)}. Your age is {_fmt(age_used)}. " + (
+        "That is the same as your age." if way == "same" else f"That is {_fmt(years)} years {way} than your age.")
+    if way in ("younger", "same"):
+        status, theme, headline, words = WITHIN, DOING_WELL, "A good result", "Younger than your age" if way == "younger" else "The same as your age"
+        meaning = "That is a good sign. BodyAge is the AGE Reader's own estimate, so treat it as a guide."
+    else:
+        status, theme, headline, words = ABOVE, INFO, "For your information", "Older than your age"
+        meaning = "BodyAge is the AGE Reader's own estimate, so treat it as a guide. We will talk it through with you."
+    return Comparison(key="age_bodyage", label="BodyAge (AGE Reader)", assessment=a, status=status, source="age_scanner_printed", value=body, value_text=f"{_fmt(body)} years",
+                      range_text=f"your age: {_fmt(age_used)}", group="the AGE Reader's estimate", headline=headline, sentence=sentence, meaning=meaning, theme=theme,
+                      status_text=words, detail="BodyAge comes from the AGE Reader's own reference group, which the report does not publish.")
+
+
+_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "age_level", "age_bodyage"]
 
 
 def _read_together(results: list):
@@ -534,8 +608,9 @@ def comparison_context(comparisons: list, assessments=None) -> str:
         if c["status"] == REPORTED:
             lines.append(f"- {c['label']}: {c['value_text']} (the device's own comparison, as printed on the report)")
         else:
-            lines.append(f"- {c['label']}: {c['value_text']}; for {c['group']} the reference range is {c['range_text']}; this is {c['status'].replace('_', ' ')} "
-                         f"(source: {data.SOURCES[c['source']]['short']})")
+            kind = "reference range" if c.get("low") is not None else "reference"      # a range for most; an average for the AGE Reader
+            lines.append(f"- {c['label']}: {c['value_text']}; for {c['group']} the {kind} is {c['range_text']}; this is "
+                         f"{(c.get('status_text') or c['status'].replace('_', ' ')).lower()} (source: {data.SOURCES[c['source']]['short']})")
     if not lines:
         return ""
     return ("Reference comparisons computed by the app from published tables. Use them exactly as given and do not add any other ranges:\n" + "\n".join(lines) + "\n")
