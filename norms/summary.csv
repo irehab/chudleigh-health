@@ -1,0 +1,25 @@
+key,text
+library_version,2026-10-12.1
+page_title,Your results
+all_green,Good news: all {n} results we could compare are within the expected range.
+all_green_one,Good news: the result we could compare is within the expected range.
+mixed_lead,{green} of your {n} results is within the expected range.|{green} of your {n} results are within the expected range.
+no_green,Your result is not within the expected range yet. We will work on it together.|None of your {n} results are within the expected range yet. We will work on them together.
+amber_clause,{count} has room to improve.|{count} have room to improve.
+red_clause,{count} is a good place to focus first.|{count} are a good place to focus first.
+priorities_heading,Your top things to work on
+priorities_intro,"Start here. Small, steady steps add up, and every choice counts."
+no_priorities,Nothing needs working on right now. The best thing to do is keep doing what you are doing.
+legend_green,Doing well
+legend_amber,Room to improve
+legend_red,Focus first
+legend_info,For your information
+note_heading,A note from your clinician
+tap_hint,Tap any result to see what it means and what you can do.
+how_to_read_heading,How to read this page
+how_to_read_1,"These results show where you are today. They are compared with the expected range for your age and sex, or with your device's own norms."
+how_to_read_2,"They are a starting point for a conversation about your long-term health. They are not a diagnosis, and many of them can change."
+how_to_read_3,"This is general education, not personal medical advice. If you ever have chest pain, severe breathlessness, dizziness or palpitations, stop and seek medical help."
+sources_heading,Where these ranges come from
+disclosure,This report compares your results with published reference ranges and with the norms printed by your devices. The wording was written by Chudleigh Health Hub and checked by a clinician. No AI wrote any part of it.
+book_label,In your booklet:

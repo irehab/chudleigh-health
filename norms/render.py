@@ -16,8 +16,8 @@ from .engine import (ABOVE, BELOW, CLOSING, ALL_GOOD, DISCUSS, INFO, NO_REFERENC
 
 esc = lambda s: html.escape("" if s is None else str(s), quote=True)
 
-_WORDS = {WITHIN: "Within the usual range", BELOW: "Lower than the usual range", ABOVE: "Higher than the usual range",
-          WELL_ABOVE: "Well above the usual range", REPORTED: "As reported by the device", NO_REFERENCE: "Not compared"}
+_WORDS = {WITHIN: "Within the expected range", BELOW: "Lower than the expected range", ABOVE: "Higher than the expected range",
+          WELL_ABOVE: "Well above the expected range", REPORTED: "As reported by the device", NO_REFERENCE: "Not compared"}
 # soft colours, and every chip sets its own text colour so it reads on a light or a dark page
 _CHIP = {WITHIN: ("#dcfce7", "#166534"), BELOW: ("#e0f2fe", "#075985"), ABOVE: ("#fef3c7", "#92400e"), WELL_ABOVE: ("#fef3c7", "#92400e"),
          REPORTED: ("#e2e8f0", "#334155"), NO_REFERENCE: ("#e2e8f0", "#334155")}
@@ -33,7 +33,7 @@ INTRO = [
 ]
 LIMITS = [
     "The people studied were mostly white and lived elsewhere, so they may not look like you.",
-    "People who are fitter or leaner than average often sit outside the usual range for good reasons.",
+    "People who are fitter or leaner than average often sit outside the expected range for good reasons.",
     "Devices differ slightly, so yours may not match the equipment used in the studies.",
     "A single measurement is a snapshot. It can change from day to day.",
     "Where we link a result to a health condition, that is a link seen in large groups of people. It is not a prediction for you.",
@@ -67,7 +67,7 @@ def bar_html(c) -> str:
     a = (lo - axis_min) / width * 100
     b = (hi - axis_min) / width * 100
     p = min(98.0, max(2.0, (v - axis_min) / width * 100))
-    say = f"Your result of {c['value_text']} is {_WORDS[c['status']].lower()}. The usual range is {c['range_text']}."
+    say = f"Your result of {c['value_text']} is {_WORDS[c['status']].lower()}. The expected range is {c['range_text']}."
     return (f'<div role="img" aria-label="{esc(say)}" style="margin:12px 4px 6px;">'
             '<div style="position:relative;height:16px;">'
             '<div style="display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid #cbd5e1;">'
@@ -76,7 +76,7 @@ def bar_html(c) -> str:
             f'<div style="width:{100 - b:.1f}%;background:#fcd34d;"></div></div>'
             f'<div style="position:absolute;top:-4px;left:{p:.1f}%;width:5px;height:22px;margin-left:-2px;background:#0f382b;border-radius:3px;border:1px solid #ffffff;"></div></div>'
             '<div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-top:8px;">'
-            f'<span>Lower</span><span>Usual range: {esc(c["range_text"])}</span><span>Higher</span></div></div>')
+            f'<span>Lower</span><span>Expected range: {esc(c["range_text"])}</span><span>Higher</span></div></div>')
 
 
 def _card(c) -> str:
@@ -170,7 +170,7 @@ def clinician_table(comparisons: list) -> str:
     comps = [c if isinstance(c, dict) else c.to_dict() for c in comparisons]
     if not comps:
         return ""
-    lines = ["| Measure | Result | Usual range | Group | Where it sits |", "|---|---|---|---|---|"]
+    lines = ["| Measure | Result | Expected range | Group | Where it sits |", "|---|---|---|---|---|"]
     for c in comps:
         where = (c.get("status_text") or _WORDS[c["status"]]) + (f": {c['reason']}" if c["status"] == NO_REFERENCE else "") + (f" ({c['headline']})" if c.get("headline") and c["status"] != NO_REFERENCE else "")
         cell = lambda s: str(s or "").replace("|", "/").replace("\n", " ")

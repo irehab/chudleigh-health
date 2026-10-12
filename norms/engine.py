@@ -68,7 +68,7 @@ class Comparison:
     reason: str = ""     # why a measure could not be compared
     calculated: bool = False
     also_sources: list = field(default_factory=list)
-    status_text: str = ""     # the words for the chip, when "within the usual range" is not the right wording
+    status_text: str = ""     # the words for the chip, when "within the expected range" is not the right wording
     patient_label: str = ""   # the name a participant reads
     measures: str = ""        # one plain line on what it measures
     low: float | None = None  # the usual range, as numbers, for the bar
@@ -221,7 +221,7 @@ def _where(status, pos) -> str:
 
 
 # ------------------------------------------------------------------------------------------------ the wording (every sentence is 20 words or fewer)
-_CAUTION = ("Your clinician will look at this closely with the rest of your ECG. A value outside the usual range is not a diagnosis. "
+_CAUTION = ("Your clinician will look at this closely with the rest of your ECG. A value outside the expected range is not a diagnosis. "
             "There are often harmless explanations.")
 _PULSE_LINK = "Studies have linked a higher resting pulse with a higher chance of heart disease."
 _GRADED = "The chance of type 2 diabetes and heart disease generally rises step by step as body fat goes up."
@@ -259,10 +259,10 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
                     f"Yours is {_where(status, pos)}.")
         if status == WITHIN and v <= med:
             headline, theme = "A good result", DOING_WELL
-            meaning = f"That is in the lower half of the typical range, which is a good place to be. {_PULSE_LINK} So a lower one is the better direction."
+            meaning = f"That is in the lower half of the expected range, which is a good place to be. {_PULSE_LINK} So a lower one is the better direction."
         elif status == WITHIN:
-            headline, theme = "Within the typical range", DOING_WELL
-            meaning = (f"That is in the upper half of the typical range, which is fine. {_PULSE_LINK} "
+            headline, theme = "Within the expected range", DOING_WELL
+            meaning = (f"That is in the upper half of the expected range, which is fine. {_PULSE_LINK} "
                        "If you would like to bring it down, regular exercise, good sleep and managing stress can all help.")
         elif status == ABOVE:
             headline, theme = "Worth working on", WORK_ON
@@ -537,7 +537,7 @@ def summary_sentence(comparisons: list) -> str:
     compared = c[WITHIN] + c[BELOW] + c[ABOVE] + c[WELL_ABOVE]
     if not compared:
         return "None of your results could be compared with reference data yet." if not c[REPORTED] else "Your AGE Scanner report includes its own comparison, shown below."
-    parts = [f"{c[WITHIN]} within the usual range"]
+    parts = [f"{c[WITHIN]} within the expected range"]
     if c[BELOW]:
         parts.append(f"{c[BELOW]} lower")
     if c[ABOVE] + c[WELL_ABOVE]:
@@ -557,9 +557,9 @@ def glance_verdict(comparisons: list) -> str:
     info = sum(1 for c in comps if c.get("theme") == INFO)
     watch = sum(1 for c in comps if c.get("theme") == WATCH)
     if within == n and not watch:
-        return (f"Good news: all {n} results we could compare are within the usual range for your age and sex." if n > 1
-                else "Good news: the result we could compare is within the usual range for your age and sex.")
-    parts = [f"{within} of your {n} results {'is' if within == 1 else 'are'} within the usual range for your age and sex."]
+        return (f"Good news: all {n} results we could compare are within the expected range." if n > 1
+                else "Good news: the result we could compare is within the expected range.")
+    parts = [f"{within} of your {n} results {'is' if within == 1 else 'are'} within the expected range."]
     if watch:
         parts.append(f"{watch} {'is' if watch == 1 else 'are'} worth keeping an eye on.")
     if work:
@@ -573,12 +573,12 @@ def glance_verdict(comparisons: list) -> str:
 
 # The groups on the 'at a glance' page, most important first: (theme, heading, a few plain words that apply to every result in it)
 _GROUPS = [
-    (WORK_ON, "Worth working on", "These can change. Steady, realistic steps add up. Bringing them towards the usual range is worth aiming for, to support your long-term health. "
+    (WORK_ON, "Worth working on", "These can change. Steady, realistic steps add up. Bringing them towards the expected range is worth aiming for, to support your long-term health. "
                                   "Your clinician will talk through what could help you."),
     (DISCUSS, "To talk through with your clinician", "This is not a diagnosis. Your clinician will look at these with your other results and tell you if anything needs following up."),
     (WATCH, "Worth keeping an eye on", "These are within the healthy range but toward the top of it, so they are worth keeping an eye on."),
     (INFO, "Best read alongside your other results", "We have said why next to each one, and we will go through them with you."),
-    (DOING_WELL, "Going well", "These are within the usual range for your age and sex. That is good news, and worth keeping up."),
+    (DOING_WELL, "Going well", "These are within the expected range. That is good news, and worth keeping up."),
 ]
 CLOSING = ("These numbers show where you are today compared with groups of healthy people. "
            "They are a starting point for a conversation about your long-term health. They are not a verdict, and many of them can change.")

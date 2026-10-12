@@ -83,6 +83,14 @@ SOURCES = {
         "population": "The device maker's own reference group, which the report does not publish.",
         "note": "Used exactly as printed on the report. It is not checked against any other reference data.",
     },
+    "tanita_bands": {
+        "short": "Tanita MC-780MA: the bands on your report",
+        "citation": ("Printed on the participant's Tanita MC-780MA report: the phase angle marks (7 degrees healthy, 5 'in-risk/ageing', 2 'severely malnourished'). "
+                     "The visceral fat band (1 to 12 healthy, 13 and above excess) is Tanita's own published band."),
+        "url": "",
+        "population": "The device maker's own reference bands.",
+        "note": "Used as printed or published by Tanita. They are not checked against any other reference data.",
+    },
 }
 
 # ---- Resting pulse, NHANES 1999-2008, Tables 2 (men) and 3 (women): 5th percentile, median, 95th percentile (beats per minute)
