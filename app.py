@@ -107,6 +107,12 @@ AI_USD_TO_GBP = _env_float("AI_USD_TO_GBP", 0.75)
 PRIVACY_NOTICE_URL = os.environ.get("PRIVACY_NOTICE_URL", "").strip()  # optional; must start with https://
 # Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
 AI_COMPARE_MODE = os.environ.get("AI_COMPARE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+# What the participant's report is. "dashboard" (the default): a traffic-light page whose words come from norms/measures.csv and norms/summary.csv, with no AI
+# writing any of it. "classic": the earlier report with AI-drafted pages, kept for now so nothing is lost.
+REPORT_MODE = os.environ.get("REPORT_MODE", "dashboard").strip().lower()
+if REPORT_MODE not in ("dashboard", "classic"):
+    REPORT_MODE = "dashboard"
+MEASURE_LIBRARY_PATH = os.environ.get("MEASURE_LIBRARY_PATH", "").strip()  # optional: a different measures.csv (used by tests)
 AI_SERVICE_PHRASES = {
     "gemini": "Google's Gemini service",
     "gemini-vertex": "Google's Gemini service on Google Cloud",
@@ -670,6 +676,11 @@ def build_comparison_export() -> str:
 def compare_page_shown(comparisons) -> bool:
     """The 'Your results at a glance' and 'Your results in detail' pages (and the clinician's note) are only shown if at least one result could be compared."""
     return bool(NORMS_AVAILABLE and comparisons and any(c["status"] != "no_reference" for c in comparisons))
+
+
+def dashboard_library():
+    """The measure library (norms/measures.csv and summary.csv), read fresh each time: they are small, and an edit takes effect on the next deploy."""
+    return norms.dashboard.load_library(MEASURE_LIBRARY_PATH or None)
 
 
 def compute_comparisons(tests, age_years, sex_choice, height_cm) -> list:
@@ -2010,8 +2021,16 @@ REPORT_TEMPLATE = """
 """
 
 
-def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by=""):
-    """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state."""
+def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by="", preview=False, exclude=()):
+    """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state.
+
+    In dashboard mode the page is built from the results and the measure library. A preview also shows results whose wording is still a draft (marked),
+    but a published report only ever contains approved wording."""
+    if REPORT_MODE == "dashboard" and NORMS_AVAILABLE:
+        lib = dashboard_library()
+        tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude)
+        meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
+        return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview), {k: "" for k in TEXT_KEYS}
     tests_html = ""
     for idx, t in enumerate(tests):
         items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
@@ -2483,117 +2502,121 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.divider()
 
-    # ==========================================
-    # MODULAR CLINICAL GENERATION ENGINES
-    # ==========================================
-    st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
-    st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
-    st.caption(
-        "If a draft flags something to check, a bold red box appears under the text box, and the note is marked in the text "
-        "with a warning sign. Notes are removed from the participant's report, and you cannot publish until each one is "
-        "resolved and its whole line deleted."
-    )
-
     comparisons_all = compute_comparisons(st.session_state.participant_tests, age_years, sex_choice, height_cm)
-    comparisons = [c for c in comparisons_all if c["key"] not in (st.session_state.get("cmp_excluded") or [])]
+    excluded = list(st.session_state.get("cmp_excluded") or [])
+    # in dashboard mode the report is built from all the comparisons and the left-out list is applied to its tiles; in classic mode it is applied here
+    comparisons = comparisons_all if REPORT_MODE == "dashboard" else [c for c in comparisons_all if c["key"] not in excluded]
     report_note = clean_note(st.session_state.get("cmp_note", ""))
     report_note_by = clean_note(st.session_state.get("cmp_note_by", ""), 60, single_line=True)
+    dash_lib, dash_tiles, dash_all = None, [], []
 
-    for mod in MODULES:
+    if REPORT_MODE == "classic":
+        # ==========================================
+        # MODULAR CLINICAL GENERATION ENGINES
+        # ==========================================
+        st.subheader("🧩 Expert Clinical Review & Synthesis Engine")
+        st.markdown("Compile, review, and refine clinical evaluations by physiological domain.")
+        st.caption(
+            "If a draft flags something to check, a bold red box appears under the text box, and the note is marked in the text "
+            "with a warning sign. Notes are removed from the participant's report, and you cannot publish until each one is "
+            "resolved and its whole line deleted."
+        )
+
+        for mod in MODULES:
+            with st.container():
+                st.markdown(mod["heading"])
+                mod_tests = [t for t in st.session_state.participant_tests if mod["match"](t["type"])]
+
+                if st.button(mod["button"], use_container_width=True, key=mod["button_key"]):
+                    if not participant_name:
+                        st.warning("Please enter participant name.")
+                    elif not mod_tests:
+                        st.info(mod["empty_msg"])
+                    elif gemini_ready():
+                        drafted = False
+                        with st.spinner(mod["spinner"]):
+                            file_refs = []
+                            try:
+                                context_str = f"Participant details (age/sex only; identity withheld): {redact_for_ai(age_gender)}\n"
+                                for t in mod_tests:
+                                    context_str += test_context_line(t)
+                                if NORMS_AVAILABLE:
+                                    context_str += norms.comparison_context(comparisons, {t["type"] for t in mod_tests})
+                                file_refs = upload_pdfs([t for t in mod_tests if not t.get("from_reader")])
+                                prompt = build_module_prompt(mod, context_str)
+                                store_draft(mod["state_key"], tidy_check_notes(strip_code_fences(generate([*file_refs, prompt]))))
+                                drafted = True
+                            except PdfAttachError as e:
+                                st.error(str(e))
+                            except Exception:
+                                fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}", ai=True)
+                            finally:
+                                delete_uploaded(file_refs)
+                        if drafted:
+                            st.rerun()
+
+                st.text_area(mod["edit_label"], height=180, key=mod["state_key"])
+                show_check_notes(st.session_state.get(mod["state_key"], ""))
+
+            st.divider()
+
+        # Module 4: Master Synthesis & Plain English Breakdown
         with st.container():
-            st.markdown(mod["heading"])
-            mod_tests = [t for t in st.session_state.participant_tests if mod["match"](t["type"])]
+            st.subheader("🎯 Module 4: Master Synthesis & Longitudinal Progress Analysis")
+            st.markdown("Synthesize all modules, evaluate historical progress deltas against previous scans, and generate patient-friendly coaching guides.")
 
-            if st.button(mod["button"], use_container_width=True, key=mod["button_key"]):
-                if not participant_name:
-                    st.warning("Please enter participant name.")
-                elif not mod_tests:
-                    st.info(mod["empty_msg"])
-                elif gemini_ready():
-                    drafted = False
-                    with st.spinner(mod["spinner"]):
-                        file_refs = []
-                        try:
-                            context_str = f"Participant details (age/sex only; identity withheld): {redact_for_ai(age_gender)}\n"
-                            for t in mod_tests:
-                                context_str += test_context_line(t)
-                            if NORMS_AVAILABLE:
-                                context_str += norms.comparison_context(comparisons, {t["type"] for t in mod_tests})
-                            file_refs = upload_pdfs([t for t in mod_tests if not t.get("from_reader")])
-                            prompt = build_module_prompt(mod, context_str)
-                            store_draft(mod["state_key"], tidy_check_notes(strip_code_fences(generate([*file_refs, prompt]))))
-                            drafted = True
-                        except PdfAttachError as e:
-                            st.error(str(e))
-                        except Exception:
-                            fail("Drafting failed. Please try again.", f"Generation error in {mod['button_key']}", ai=True)
-                        finally:
-                            delete_uploaded(file_refs)
-                    if drafted:
-                        st.rerun()
+            col_gen1, col_gen2 = st.columns(2)
+            with col_gen1:
+                if st.button("✨ Draft Master Executive Synthesis & Delta Analysis", use_container_width=True, key="btn_master"):
+                    if not any(st.session_state[k].strip() for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
+                        st.warning("Please draft at least one module review first.")
+                    elif any(has_unresolved_notes(st.session_state[k]) for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
+                        st.warning("Please resolve and delete the CHECK notes in the module reviews before drafting the summary.")
+                    elif gemini_ready():
+                        drafted = False
+                        with st.spinner("Synthesizing master executive review and tracking longitudinal progress..."):
+                            try:
+                                history_context = ""
+                                if previous_scan:
+                                    history_context = (
+                                        f"\n\nPREVIOUS SCAN HISTORY (Date: {previous_scan.get('assessment_date')}):\n"
+                                        f"Previous Metrics / Summary: {json.dumps(for_history(strip_pdf_payloads(previous_scan.get('tests', []))), default=str)}\n"
+                                        f"Previous Master Summary: {previous_scan.get('master_html', 'None')}\n"
+                                    )
 
-            st.text_area(mod["edit_label"], height=180, key=mod["state_key"])
-            show_check_notes(st.session_state.get(mod["state_key"], ""))
-
-        st.divider()
-
-    # Module 4: Master Synthesis & Plain English Breakdown
-    with st.container():
-        st.subheader("🎯 Module 4: Master Synthesis & Longitudinal Progress Analysis")
-        st.markdown("Synthesize all modules, evaluate historical progress deltas against previous scans, and generate patient-friendly coaching guides.")
-
-        col_gen1, col_gen2 = st.columns(2)
-        with col_gen1:
-            if st.button("✨ Draft Master Executive Synthesis & Delta Analysis", use_container_width=True, key="btn_master"):
-                if not any(st.session_state[k].strip() for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
-                    st.warning("Please draft at least one module review first.")
-                elif any(has_unresolved_notes(st.session_state[k]) for k in ("ta_mod1", "ta_mod2", "ta_mod3")):
-                    st.warning("Please resolve and delete the CHECK notes in the module reviews before drafting the summary.")
-                elif gemini_ready():
-                    drafted = False
-                    with st.spinner("Synthesizing master executive review and tracking longitudinal progress..."):
-                        try:
-                            history_context = ""
-                            if previous_scan:
-                                history_context = (
-                                    f"\n\nPREVIOUS SCAN HISTORY (Date: {previous_scan.get('assessment_date')}):\n"
-                                    f"Previous Metrics / Summary: {json.dumps(for_history(strip_pdf_payloads(previous_scan.get('tests', []))), default=str)}\n"
-                                    f"Previous Master Summary: {previous_scan.get('master_html', 'None')}\n"
+                                master_prompt = build_master_prompt(
+                                    history_context,
+                                    {k: st.session_state[k] for k in ("ta_mod1", "ta_mod2", "ta_mod3")},
                                 )
+                                store_draft("ta_master", tidy_check_notes(strip_code_fences(generate(master_prompt))))
+                                drafted = True
+                            except Exception:
+                                fail("Drafting failed. Please try again.", "Generation error in master synthesis", ai=True)
+                        if drafted:
+                            st.rerun()
 
-                            master_prompt = build_master_prompt(
-                                history_context,
-                                {k: st.session_state[k] for k in ("ta_mod1", "ta_mod2", "ta_mod3")},
-                            )
-                            store_draft("ta_master", tidy_check_notes(strip_code_fences(generate(master_prompt))))
-                            drafted = True
-                        except Exception:
-                            fail("Drafting failed. Please try again.", "Generation error in master synthesis", ai=True)
-                    if drafted:
-                        st.rerun()
+            with col_gen2:
+                if st.button("🗣️ Draft Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
+                    if not st.session_state.ta_master.strip():
+                        st.warning("Please generate the Master Executive Synthesis first.")
+                    elif has_unresolved_notes(st.session_state.ta_master):
+                        st.warning("Please resolve and delete the CHECK notes in the master summary first.")
+                    elif gemini_ready():
+                        drafted = False
+                        with st.spinner("Drafting plain English coaching guide..."):
+                            try:
+                                pe_prompt = build_plain_english_prompt(st.session_state.ta_master)
+                                store_draft("ta_pe", tidy_check_notes(strip_code_fences(generate(pe_prompt))))
+                                drafted = True
+                            except Exception:
+                                fail("Drafting failed. Please try again.", "Generation error in plain English breakdown", ai=True)
+                        if drafted:
+                            st.rerun()
 
-        with col_gen2:
-            if st.button("🗣️ Draft Plain English Patient Breakdown", use_container_width=True, key="btn_pe"):
-                if not st.session_state.ta_master.strip():
-                    st.warning("Please generate the Master Executive Synthesis first.")
-                elif has_unresolved_notes(st.session_state.ta_master):
-                    st.warning("Please resolve and delete the CHECK notes in the master summary first.")
-                elif gemini_ready():
-                    drafted = False
-                    with st.spinner("Drafting plain English coaching guide..."):
-                        try:
-                            pe_prompt = build_plain_english_prompt(st.session_state.ta_master)
-                            store_draft("ta_pe", tidy_check_notes(strip_code_fences(generate(pe_prompt))))
-                            drafted = True
-                        except Exception:
-                            fail("Drafting failed. Please try again.", "Generation error in plain English breakdown", ai=True)
-                    if drafted:
-                        st.rerun()
-
-        st.text_area("Edit Master Executive Synthesis (HTML)", height=220, key="ta_master")
-        show_check_notes(st.session_state.get("ta_master", ""))
-        st.text_area("Edit Plain English Breakdown (HTML)", height=220, key="ta_pe")
-        show_check_notes(st.session_state.get("ta_pe", ""))
+            st.text_area("Edit Master Executive Synthesis (HTML)", height=220, key="ta_master")
+            show_check_notes(st.session_state.get("ta_master", ""))
+            st.text_area("Edit Plain English Breakdown (HTML)", height=220, key="ta_pe")
+            show_check_notes(st.session_state.get("ta_pe", ""))
 
     st.divider()
 
@@ -2625,33 +2648,88 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.divider()
 
-    # --- COMPARISON WITH REFERENCE DATA ---
-    st.markdown("#### 📊 Comparison with reference data")
-    if not NORMS_AVAILABLE:
-        st.caption("Reference data is not installed on this server, so no comparisons are made.")
-    elif not st.session_state.participant_tests:
-        st.caption("Add assessments to see how the results compare with published reference data for the participant's age and sex.")
-    else:
-        if not age_years or sex_choice == "Not stated":
-            st.info("Enter the participant's age and sex at the top to compare their results with reference data for their age and sex. Some comparisons need only an age.")
-        if comparisons_all:
-            st.markdown(norms.clinician_table(comparisons_all))
-            labels = {c["key"]: c["label"] for c in comparisons_all}
-            st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
-                           help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
-            st.caption("The participant sees these on two pages, 'Your results at a glance' and 'Your results in detail', with plain-English sentences and the full source "
-                       "for every range. The sentences come from fixed wording, not from the AI. Preview the report to see them.")
-            if compare_page_shown(comparisons_all):  # the note goes on that page, so only offer it when there will be one
+    # --- THE DASHBOARD THE PARTICIPANT WILL SEE ---
+    if REPORT_MODE == "dashboard":
+        st.markdown("#### 📊 The participant's dashboard")
+        if not NORMS_AVAILABLE:
+            st.error("The dashboard code is not installed on this server (the norms folder is missing), so no report can be built.")
+        else:
+            dash_lib = dashboard_library()
+            for problem in dash_lib.errors:
+                st.error(problem)
+            with st.expander(f"Wording library check: {len(dash_lib.errors)} problems, {len(dash_lib.warnings)} suggestions, {sum(1 for r in dash_lib.rows if r.approved and not r.broken)} of {len(dash_lib.rows)} results approved"):
+                st.caption("The words on the participant's page come from norms/measures.csv and norms/summary.csv. Edit them in Excel or Google Sheets, save as CSV UTF-8, and upload them. "
+                           "A result is only shown to participants when its 'approved' column says yes. See DASHBOARD.md.")
+                for problem in dash_lib.warnings:
+                    st.caption(problem)
+                if not dash_lib.problems:
+                    st.caption("No problems found.")
+            if not age_years or sex_choice == "Not stated":
+                st.info("Enter the participant's age and sex at the top so results can be compared with the expected range for their age and sex. Some results need only an age, and some need neither.")
+            dash_all, _unused = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=True, exclude=())
+            labels = {t.key: t.title for t in dash_all}
+            st.session_state["cmp_excluded"] = [k for k in (st.session_state.get("cmp_excluded") or []) if k in labels]
+            excluded = list(st.session_state["cmp_excluded"])
+            if dash_all:
+                st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
+                               help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
+                excluded = list(st.session_state.get("cmp_excluded") or [])
+            dash_tiles, dash_hidden = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=False, exclude=excluded)
+            if not st.session_state.participant_tests:
+                st.caption("Add assessments above to see the dashboard the participant will receive.")
+            elif dash_all:
+                light_word = {"green": "🟢 doing well", "amber": "🟠 room to improve", "red": "🔴 focus first", "info": "⚪ for information"}
+                st.markdown("| Result | Value | Light | Wording |\n|---|---|---|---|\n" + "\n".join(
+                    f"| {t.title} | {t.value_text or '-'} | {light_word[t.light]} | {'approved' if (t.approved and t.key not in excluded) else ('left out' if t.key in excluded else 'DRAFT: not shown yet')} |"
+                    for t in dash_all))
+            else:
+                st.warning("None of the results entered can be shown on the dashboard yet.")
+            not_shown = [h for h in dash_hidden if h["key"] not in excluded]
+            if not_shown:
+                st.warning("These results will not be shown to the participant, because their wording is not approved yet: " + ", ".join(h["title"] for h in not_shown)
+                           + ". Preview shows them marked as drafts. Set approved to yes in measures.csv once you are happy with the words.")
+            missing = norms.dashboard.uncovered(st.session_state.participant_tests)
+            if missing:
+                st.caption("Saved, but with no dashboard tiles yet: " + "; ".join(missing) + ".")
+            if comparisons_all:
+                with st.expander("How each result compares with reference data (for you, not the participant)"):
+                    st.markdown(norms.clinician_table(comparisons_all))
+            if dash_all:
                 st.text_area("Your personal note to the participant (optional)", key="cmp_note", max_chars=NOTE_MAX, height=140,
                              placeholder="e.g. Lovely to see you again. Your numbers are heading the right way, and I'd like us to focus on... ",
-                             help="Shown at the top of the 'Your results at a glance' page, in your own words. Plain text. It is never sent to any AI service.")
+                             help="Shown at the top of the participant's page, in your own words. Plain text. It is never sent to any AI service.")
                 st.text_input("Sign it as", key="cmp_note_by", max_chars=60, placeholder="e.g. John (leave blank for 'Your clinician')")
+            if report_note and not dash_tiles:
+                st.warning("Your personal note will not appear in the report, because none of the results have approved wording yet.")
+        st.divider()
+    else:
+        # --- COMPARISON WITH REFERENCE DATA ---
+        st.markdown("#### 📊 Comparison with reference data")
+        if not NORMS_AVAILABLE:
+            st.caption("Reference data is not installed on this server, so no comparisons are made.")
+        elif not st.session_state.participant_tests:
+            st.caption("Add assessments to see how the results compare with published reference data for the participant's age and sex.")
         else:
-            st.caption("None of the results entered can be compared with reference data yet.")
-        if report_note and not compare_page_shown(comparisons):
-            st.warning("Your personal note will not appear in the report. It goes on the 'Your results at a glance' page, and that page is only shown when at least one result "
-                       "can be compared (and has not been left out).")
-    st.divider()
+            if not age_years or sex_choice == "Not stated":
+                st.info("Enter the participant's age and sex at the top to compare their results with reference data for their age and sex. Some comparisons need only an age.")
+            if comparisons_all:
+                st.markdown(norms.clinician_table(comparisons_all))
+                labels = {c["key"]: c["label"] for c in comparisons_all}
+                st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
+                               help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
+                st.caption("The participant sees these on two pages, 'Your results at a glance' and 'Your results in detail', with plain-English sentences and the full source "
+                           "for every range. The sentences come from fixed wording, not from the AI. Preview the report to see them.")
+                if compare_page_shown(comparisons_all):  # the note goes on that page, so only offer it when there will be one
+                    st.text_area("Your personal note to the participant (optional)", key="cmp_note", max_chars=NOTE_MAX, height=140,
+                                 placeholder="e.g. Lovely to see you again. Your numbers are heading the right way, and I'd like us to focus on... ",
+                                 help="Shown at the top of the 'Your results at a glance' page, in your own words. Plain text. It is never sent to any AI service.")
+                    st.text_input("Sign it as", key="cmp_note_by", max_chars=60, placeholder="e.g. John (leave blank for 'Your clinician')")
+            else:
+                st.caption("None of the results entered can be compared with reference data yet.")
+            if report_note and not compare_page_shown(comparisons):
+                st.warning("Your personal note will not appear in the report. It goes on the 'Your results at a glance' page, and that page is only shown when at least one result "
+                           "can be compared (and has not been left out).")
+        st.divider()
 
     # --- REVIEW, APPROVE & PUBLISH ---
     st.markdown("#### ✅ Review & Approve")
@@ -2659,7 +2737,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         if participant_name:
             preview_html, _ = build_report(
                 participant_name, age_gender, assessment_date, body_mass_height,
-                st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by,
+                st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, preview=True, exclude=excluded,
             )
             components.html(preview_html, height=700, scrolling=True)
         else:
@@ -2672,7 +2750,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     else:
         approver = st.text_input("Approving clinician (full name)", key="approver_name", max_chars=80)
     approved = st.checkbox(
-        "I confirm a clinician has reviewed and approved this report, including all AI-assisted drafting, before it is released to the participant.",
+        ("I confirm I have reviewed this report and approve it for release to the participant." if REPORT_MODE == "dashboard"
+         else "I confirm a clinician has reviewed and approved this report, including all AI-assisted drafting, before it is released to the participant."),
         key="chk_approved",
     )
 
@@ -2681,6 +2760,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         pin = (patient_pin or "").strip()
         if not participant_name or not c_key:
             st.warning("Please ensure a valid participant name is entered.")
+        elif REPORT_MODE == "dashboard" and not dash_tiles:
+            st.warning("There is nothing to publish yet: none of this participant's results have approved wording. See the dashboard section above.")
         elif any(has_unresolved_notes(st.session_state.get(k, "")) for k in TEXT_KEYS):
             st.warning("Some drafts still contain CHECK notes or stray pieces of them. Resolve each one and delete its whole line before publishing.")
         elif pin and not re.fullmatch(rf"[0-9]{{{MIN_NEW_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin):
@@ -2699,8 +2780,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             try:
                 final_html_output, safe = build_report(
                     participant_name, age_gender, assessment_date, body_mass_height,
-                    st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by,
+                    st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, exclude=excluded,
                 )
+                note_shown = bool(dash_tiles) if REPORT_MODE == "dashboard" else compare_page_shown(comparisons)
 
                 scan_id = str(assessment_date)
                 scan_record = {
@@ -2715,8 +2797,11 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "comparisons": comparisons,
                     "norms_version": norms.NORMS_VERSION if NORMS_AVAILABLE else "",
                     # the note is only kept if it was actually shown to the participant
-                    "clinician_note": report_note if compare_page_shown(comparisons) else "",
-                    "clinician_note_by": report_note_by if (report_note and compare_page_shown(comparisons)) else "",
+                    "clinician_note": report_note if note_shown else "",
+                    "clinician_note_by": report_note_by if (report_note and note_shown) else "",
+                    "report_mode": REPORT_MODE,
+                    "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
+                    "library_version": dash_lib.version if (REPORT_MODE == "dashboard" and dash_lib) else "",
                     "master_html": safe["ta_master"],
                     "plain_english_html": safe["ta_pe"],
                     "html_output": final_html_output,
