@@ -44,9 +44,9 @@ def _label(c) -> str:
     return c.get("patient_label") or c["label"]   # a comparison saved by an earlier version has no plain name
 
 
-def _chip(status):
+def _chip(status, text=""):
     bg, fg = _CHIP[status]
-    return f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;background:{bg};color:{fg};font-size:13px;font-weight:600;">{esc(_WORDS[status])}</span>'
+    return f'<span style="display:inline-block;padding:3px 10px;border-radius:12px;background:{bg};color:{fg};font-size:13px;font-weight:600;">{esc(text or _WORDS[status])}</span>'
 
 
 def note_to_html(text: str) -> str:
@@ -83,7 +83,7 @@ def _card(c) -> str:
     colour = _HEAD.get(c.get("theme", ""), "#334155")
     parts = [
         '<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin-bottom:14px;background:#ffffff;">',
-        f'<div style="margin-bottom:4px;"><b style="color:#0f382b;font-size:16px;">{esc(_label(c))}</b> &nbsp;{_chip(c["status"])}</div>',
+        f'<div style="margin-bottom:4px;"><b style="color:#0f382b;font-size:16px;">{esc(_label(c))}</b> &nbsp;{_chip(c["status"], c.get("status_text"))}</div>',
     ]
     if c.get("measures"):
         parts.append(f'<p style="margin:2px 0 8px;color:#64748b;font-size:13px;line-height:1.5;">{esc(c["measures"])}</p>')
@@ -117,7 +117,7 @@ def render_glance_html(comparisons: list, note: str = "", note_by: str = "") -> 
         colour = _HEAD.get(g["theme"], "#334155")
         rows = "".join(
             f'<div style="padding:8px 0;border-top:1px solid #e2e8f0;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;">'
-            f'<span style="color:#1e293b;font-size:15px;"><b>{esc(_label(c))}</b>: {esc(c["value_text"])}</span>{_chip(c["status"])}</div>'
+            f'<span style="color:#1e293b;font-size:15px;"><b>{esc(_label(c))}</b>: {esc(c["value_text"])}</span>{_chip(c["status"], c.get("status_text"))}</div>'
             for c in g["items"])
         parts.append(f'<div style="margin:0 0 16px;padding:14px 16px;border-radius:10px;background:#ffffff;border:1px solid #e2e8f0;border-left:5px solid {colour};">'
                      f'<h3 style="margin:0 0 4px;color:{colour};font-size:17px;"><span aria-hidden="true">{_SYMBOL[g["theme"]]}</span> {esc(g["heading"])}</h3>'
@@ -172,7 +172,7 @@ def clinician_table(comparisons: list) -> str:
         return ""
     lines = ["| Measure | Result | Usual range | Group | Where it sits |", "|---|---|---|---|---|"]
     for c in comps:
-        where = _WORDS[c["status"]] + (f": {c['reason']}" if c["status"] == NO_REFERENCE else "") + (f" ({c['headline']})" if c.get("headline") and c["status"] != NO_REFERENCE else "")
+        where = (c.get("status_text") or _WORDS[c["status"]]) + (f": {c['reason']}" if c["status"] == NO_REFERENCE else "") + (f" ({c['headline']})" if c.get("headline") and c["status"] != NO_REFERENCE else "")
         cell = lambda s: str(s or "").replace("|", "/").replace("\n", " ")
         lines.append(f"| {cell(c['label'])} | {cell(c['value_text'])}{' (calculated)' if c.get('calculated') else ''} | {cell(c['range_text'])} | {cell(c['group'])} | {cell(where)} |")
     return "\n".join(lines)
