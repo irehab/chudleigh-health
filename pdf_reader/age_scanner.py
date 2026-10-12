@@ -1,11 +1,19 @@
 """Reader for the AGE Scanner (Diagnoptics) 'Measurement report'.
 
 The sentences on this report are text, but the large gauge numbers are drawn graphics, so those are read by OCR from the gauge
-area and cross-checked against the text. The person's name and birth date are never read.
+area and cross-checked against the text. The person's name and birth date are never read, and neither is the date on the report:
+the only date used is the assessment date the clinician enters.
+
+What the report says about norms IS used: the average AGE level for the person's age, how far above or below it they are, the
+BodyAge against their age, the percentage position in their age group, the device's own risk label, and the device's written
+interpretation (kept as the device's wording, and passed on as such).
 """
 from __future__ import annotations
 
+import io
 import re
+
+import pdfplumber
 
 from . import ocr
 from .base import Check, Page, ReadResult, Value, close, make_value, status_from
@@ -30,6 +38,20 @@ def _col(words, x0, x1, t0, t1):
     return " ".join(" ".join(x["text"] for x in sorted(r, key=lambda x: x["x0"])) for _, r in sorted(rows.items()))
 
 
+def _interpretation(data: bytes | None, words, interp_top: float) -> str:
+    """The device's written interpretation, below the 'Interpretation' heading. This report has no space characters, so the words are
+    separated by their gaps, using a tighter tolerance than the other sentences need."""
+    if data is not None:
+        try:
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                page = pdf.pages[0]
+                text = page.within_bbox((0, interp_top + 6, page.width, page.height)).extract_text(x_tolerance=1.5) or ""
+            return re.sub(r"\s*Diagnoptics\s*$", "", " ".join(text.split())).strip()
+        except Exception:
+            pass
+    return re.sub(r"\s*(?:Diagnoptics)\s*$", "", _col(words, 0, 10_000, interp_top + 6, 10_000)).strip()
+
+
 def read(pages: list, data: bytes | None = None) -> ReadResult:
     res = ReadResult(device=DEVICE, device_label=LABEL, has_text_layer=True)
     words = pages[0]
@@ -52,21 +74,18 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
         percent_dir = m.group(2).lower()
         v["Comparison direction"] = Value(text=percent_dir, number=None, unit="")
         v["Age used for comparison (years)"] = make_value(m.group(3) + "years")
-    flat = " ".join(w["text"] for w in sorted(words, key=lambda w: (round(w["top"] / 4), w["x0"])))
-    m = re.search(r"(?<![A-Za-z])Date:\s*(\d{1,2}/\d{1,2}/\d{4})", flat)
-    if m:
-        v["Report date"] = Value(text=m.group(1), number=None, unit="")
     for key, val in list(v.items()):
         if val is None:
             res.notes.append(f"Could not read: {key}")
             del v[key]
 
     if interp:
-        para = _col(words, 0, 10_000, interp["top"] + 6, 10_000)
-        para = re.sub(r"\s*(?:Diagnoptics)\s*$", "", para).strip()
+        para = _interpretation(data, words, interp["top"])
         if para:
-            res.statements.append({"text": para, "kind": "device_interpretation",
-                                   "caution": "The device's own wording, not a clinical finding. Not added to reports automatically."})
+            # what the device says about the person's result against its norms. It is kept in the device's own words and given to the AI as such.
+            v["Device interpretation (as printed)"] = Value(text=para, number=None, unit="")
+            res.notes.append("The device's own written interpretation was read. It is given to the AI as the device's wording, "
+                             "and the AI is told not to repeat anything in it about habits or future health.")
 
     # the gauge numbers: drawn graphics, read by OCR
     gauge = None
