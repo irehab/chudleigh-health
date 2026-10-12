@@ -178,6 +178,7 @@ TIER_INFO = {
     },
 }
 PLAN_REQUESTS = "plan_requests"
+WORDING_APPROVALS = "wording_approvals"   # one document per dashboard result: the fingerprint of the wording a clinician approved, who, and when
 PLAN_NOTICE = (
     "This plan was written for you by a Chudleigh Health Hub clinician. It is general health and performance guidance, not a medical "
     "diagnosis, and it does not replace advice from your GP. If you feel unwell or are worried about your health, contact your GP or "
@@ -681,6 +682,50 @@ def compare_page_shown(comparisons) -> bool:
 def dashboard_library():
     """The measure library (norms/measures.csv and summary.csv), read fresh each time: they are small, and an edit takes effect on the next deploy."""
     return norms.dashboard.load_library(MEASURE_LIBRARY_PATH or None)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_wording_approvals() -> dict:
+    """The approvals made in the app: {result key: {"hash": ..., "approved_by": ..., "approved_at": ...}}. Empty if the database cannot be read."""
+    if not db:
+        return {}
+    try:
+        return {d.id: (d.to_dict() or {}) for d in db.collection(WORDING_APPROVALS).stream()}
+    except Exception:
+        log.exception("Reading the wording approvals failed")
+        return {}
+
+
+def approval_hashes() -> dict:
+    """{result key: fingerprint of the wording that was approved}: what the dashboard checks each result's wording against."""
+    return {k: (v or {}).get("hash", "") for k, v in load_wording_approvals().items()}
+
+
+def approve_wording(key: str, wording_hash: str, title: str, who: str) -> bool:
+    """Record that a clinician has read this result's wording and approves it. The approval is for exactly this wording: change a word and it lapses."""
+    if not db:
+        return False
+    try:
+        db.collection(WORDING_APPROVALS).document(key).set({"hash": wording_hash, "title": title, "approved_by": who, "approved_at": firestore.SERVER_TIMESTAMP})
+        audit("wording_approved", "", result=key, wording=wording_hash, approved_by=who)
+        load_wording_approvals.clear()
+        return True
+    except Exception:
+        log.exception("Approving wording failed")
+        return False
+
+
+def withdraw_wording(key: str, who: str) -> bool:
+    if not db:
+        return False
+    try:
+        db.collection(WORDING_APPROVALS).document(key).delete()
+        audit("wording_withdrawn", "", result=key, withdrawn_by=who)
+        load_wording_approvals.clear()
+        return True
+    except Exception:
+        log.exception("Withdrawing wording approval failed")
+        return False
 
 
 def compute_comparisons(tests, age_years, sex_choice, height_cm) -> list:
@@ -2028,7 +2073,7 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
     but a published report only ever contains approved wording."""
     if REPORT_MODE == "dashboard" and NORMS_AVAILABLE:
         lib = dashboard_library()
-        tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude)
+        tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude, approvals=approval_hashes())
         meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
         return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview), {k: "" for k in TEXT_KEYS}
     tests_html = ""
@@ -2655,18 +2700,66 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.error("The dashboard code is not installed on this server (the norms folder is missing), so no report can be built.")
         else:
             dash_lib = dashboard_library()
+            approvals = approval_hashes()
             for problem in dash_lib.errors:
                 st.error(problem)
-            with st.expander(f"Wording library check: {len(dash_lib.errors)} problems, {len(dash_lib.warnings)} suggestions, {sum(1 for r in dash_lib.rows if r.approved and not r.broken)} of {len(dash_lib.rows)} results approved"):
-                st.caption("The words on the participant's page come from norms/measures.csv and norms/summary.csv. Edit them in Excel or Google Sheets, save as CSV UTF-8, and upload them. "
-                           "A result is only shown to participants when its 'approved' column says yes. See DASHBOARD.md.")
+            n_approved = sum(1 for r in dash_lib.rows if norms.dashboard.approval_status(r, approvals) in ("file", "approved"))
+            with st.expander(f"Wording library check: {len(dash_lib.errors)} problems, {len(dash_lib.warnings)} suggestions, {n_approved} of {len(dash_lib.rows)} results approved"):
+                st.caption("The words on the participant's page come from norms/measures.csv and norms/summary.csv. To change a word, edit those files in Excel or Google Sheets, save as CSV UTF-8, "
+                           "and upload them. A result is only shown to participants once you approve it in the box below. See DASHBOARD.md.")
                 for problem in dash_lib.warnings:
                     st.caption(problem)
                 if not dash_lib.problems:
                     st.caption("No problems found.")
+            who = (st.session_state.get("clinician_email") or "").strip()
+            status_words = {"file": "approved (in the file)", "approved": "✅ approved", "changed": "⚠️ the wording changed since you approved it: approve it again",
+                            "incomplete": "not finished: some words are missing in measures.csv", "error": "has an error: see the problems above", "none": "not approved yet"}
+            with st.expander("✅ Approve the wording (read each one, then approve)", expanded=n_approved == 0):
+                st.caption("Nothing reaches a participant until you approve it here. Your name and the date are recorded. If a word is changed in measures.csv later, that result "
+                           "needs approving again. Approve only what you would be happy to say to a patient.")
+                if not who:
+                    st.text_input("Your name (recorded with each approval)", key="wording_approver", max_chars=80)
+                    who = (st.session_state.get("wording_approver") or "").strip()
+                records = load_wording_approvals()
+                todo = []
+                for row in sorted(dash_lib.rows, key=lambda r: (r.order, r.key)):
+                    status = norms.dashboard.approval_status(row, approvals)
+                    with st.container():
+                        st.markdown(f"**{row.title}** · {status_words[status]}")
+                        st.caption(row.what_it_is)
+                        for light_name, head, text, do in norms.dashboard.wording_for_review(row):
+                            st.markdown(f"*{light_name}:* **{head}** {text} **What to do:** {do}")
+                        if status == "approved" and (records.get(row.key) or {}).get("approved_by"):
+                            st.caption(f"Approved by {records[row.key]['approved_by']}.")
+                        if status in ("none", "changed"):
+                            todo.append(row)
+                            if st.button(f"✅ Approve: {row.title}", key=f"appr_{row.key}"):
+                                if not who:
+                                    st.warning("Enter your name above first, so the approval can be recorded.")
+                                elif approve_wording(row.key, row.hash, row.title, who):
+                                    st.rerun()
+                                else:
+                                    st.error("The approval could not be saved. Please try again.")
+                        elif status == "approved":
+                            if st.button(f"↩ Withdraw approval: {row.title}", key=f"wdr_{row.key}"):
+                                if withdraw_wording(row.key, who or "clinician"):
+                                    st.rerun()
+                        st.divider()
+                if todo:
+                    st.checkbox("I have read all of the wording above and I approve it", key="appr_all_read")
+                    if st.button("✅ Approve all the finished wording above", key="appr_all"):
+                        if not st.session_state.get("appr_all_read"):
+                            st.warning("Please tick the box to say you have read it all first.")
+                        elif not who:
+                            st.warning("Enter your name above first, so the approvals can be recorded.")
+                        else:
+                            saved = [approve_wording(r.key, r.hash, r.title, who) for r in todo]
+                            if all(saved):
+                                st.rerun()
+                            st.error("Some approvals could not be saved. Please try again.")
             if not age_years or sex_choice == "Not stated":
                 st.info("Enter the participant's age and sex at the top so results can be compared with the expected range for their age and sex. Some results need only an age, and some need neither.")
-            dash_all, _unused = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=True, exclude=())
+            dash_all, _unused = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=True, exclude=(), approvals=approvals)
             labels = {t.key: t.title for t in dash_all}
             st.session_state["cmp_excluded"] = [k for k in (st.session_state.get("cmp_excluded") or []) if k in labels]
             excluded = list(st.session_state["cmp_excluded"])
@@ -2674,7 +2767,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 st.multiselect("Leave these out of the report", options=list(labels), format_func=lambda k: labels[k], key="cmp_excluded",
                                help="Anything left out is not shown to the participant. Use this if a result looks unreliable.")
                 excluded = list(st.session_state.get("cmp_excluded") or [])
-            dash_tiles, dash_hidden = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=False, exclude=excluded)
+            dash_tiles, dash_hidden = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=False, exclude=excluded, approvals=approvals)
             if not st.session_state.participant_tests:
                 st.caption("Add assessments above to see the dashboard the participant will receive.")
             elif dash_all:
@@ -2687,7 +2780,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             not_shown = [h for h in dash_hidden if h["key"] not in excluded]
             if not_shown:
                 st.warning("These results will not be shown to the participant, because their wording is not approved yet: " + ", ".join(h["title"] for h in not_shown)
-                           + ". Preview shows them marked as drafts. Set approved to yes in measures.csv once you are happy with the words.")
+                           + ". Preview shows them marked as drafts. Approve them in the box above once you are happy with the words.")
             missing = norms.dashboard.uncovered(st.session_state.participant_tests)
             if missing:
                 st.caption("Saved, but with no dashboard tiles yet: " + "; ".join(missing) + ".")
@@ -2801,6 +2894,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "clinician_note_by": report_note_by if (report_note and note_shown) else "",
                     "report_mode": REPORT_MODE,
                     "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
+                    "wording": {t.key: t.hash for t in dash_tiles} if REPORT_MODE == "dashboard" else {},
                     "library_version": dash_lib.version if (REPORT_MODE == "dashboard" and dash_lib) else "",
                     "master_html": safe["ta_master"],
                     "plain_english_html": safe["ta_pe"],
