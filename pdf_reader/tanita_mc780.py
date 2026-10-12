@@ -78,9 +78,7 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
     m = re.search(r"(\d+)years·(\d+)cm", header.replace(" ", ""))
     put("Age (years)", f"{m.group(1)}years" if m else None)
     put("Height (cm)", f"{m.group(2)}cm" if m else None)
-    m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})\s*(\d{1,2}:\d{2})", header)
-    if m:
-        v["Measured"] = Value(text=f"{m.group(1)} {m.group(2)}", number=None, unit="")
+    # the date and time printed in the header are not read: the only date used is the assessment date the clinician enters
     m = re.search(r"TANITA\s*(MC-\w+)", header, re.I)
     if m:
         v["Device model"] = Value(text=f"TANITA {m.group(1)}", number=None, unit="")
