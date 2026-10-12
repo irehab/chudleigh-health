@@ -76,11 +76,12 @@ SOURCES = {
         "note": "This is a widely used typical range and not an age- and sex-specific study. A single short reading can be affected by cold hands, movement or nail polish.",
     },
     "age_scanner_printed": {
-        "short": "The AGE Scanner's own comparison, as printed on your report",
-        "citation": "Printed on the participant's AGE Scanner (Diagnoptics) measurement report. It compares with the device maker's own reference group, which is not published in the report.",
+        "short": "The AGE Reader (Diagnoptics): its own norms, as printed on your report",
+        "citation": ("Printed on the participant's AGE Reader (Diagnoptics) measurement report: the average AGE level for their age, how far above or below it they are, "
+                     "the BodyAge, and the device's own label."),
         "url": "",
-        "population": "The device maker's reference group.",
-        "note": "Shown exactly as printed. It is not checked against any other reference data.",
+        "population": "The device maker's own reference group, which the report does not publish.",
+        "note": "Used exactly as printed on the report. It is not checked against any other reference data.",
     },
 }
 
