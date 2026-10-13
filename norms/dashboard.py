@@ -45,6 +45,12 @@ REQUIRED_COLUMNS = ["key", "group", "order", "priority", "approved", "title", "w
 REQUIRED_SUMMARY = ["library_version", "page_title", "all_green", "all_green_one", "mixed_lead", "no_green", "amber_clause", "red_clause", "priorities_heading",
                     "priorities_intro", "no_priorities", "legend_green", "legend_amber", "legend_red", "legend_info", "note_heading", "tap_hint",
                     "how_to_read_heading", "how_to_read_1", "how_to_read_2", "how_to_read_3", "sources_heading", "disclosure", "book_label"]
+LIGHT_NAMES = {"green": "Green", "amber": "Amber", "red": "Red", "low": "Lower than expected", "info": "For information"}
+# Only the WORDS can be edited in the app. The rule, the ranges, the sources and the order stay in the file, because they decide the lights.
+EDITABLE_COLUMNS = ["title", "what_it_is", "facts", "book"] + [f"{light}_{f}" for light in LIGHT_NAMES for f in TEXT_FIELDS]
+FIELD_LIMITS = {"title": 80, "what_it_is": 300, "facts": 200, "book": 160, "headline": 80, "text": 400, "do": 400}
+COLUMN_LABELS = {"title": "Name the participant sees", "what_it_is": "What it is", "facts": "Sentence of facts (must include {value})", "book": "Booklet line"}
+COLUMN_LABELS.update({f"{light}_{f}": f"{name}: {label}" for light, name in LIGHT_NAMES.items() for f, label in (("headline", "headline"), ("text", "what it means"), ("do", "what to do"))})
 MAX_SENTENCE_WORDS = 25            # longer than this is flagged to the clinician as hard to read (a warning, not a block)
 BANNED = re.compile(r"\b(guarantee[ds]?|will improve|cures?|abnormal|you have (?:a|an) )\b", re.I)
 
@@ -82,6 +88,9 @@ class Library:
     summary: dict
     problems: list                                 # strings starting ERROR or WARNING, for the clinician
     path: str = ""
+    file_raw: dict = field(default_factory=dict)   # {key: the row exactly as it is in the file}, so an edit can be compared with it and undone
+    file_hash: dict = field(default_factory=dict)  # {key: fingerprint of the file's own wording}, for the rows that have been edited in the app
+    overridden: dict = field(default_factory=dict) # {key: the edit saved in the app}
 
     @property
     def errors(self):
@@ -221,12 +230,65 @@ def fmt_pair(template, count, **kw):
     return chosen.format(count=count, **kw)
 
 
-def load_library(path=None, summary_path=None) -> Library:
-    """Read and check measures.csv and summary.csv. Never raises: problems come back in the list, and a broken row is never shown."""
+def clean_field(column: str, value) -> str:
+    """Wording is kept on one line: no control characters, spaces tidied, cut to the limit for that kind of field."""
+    t = re.sub(r"[\x00-\x1f\x7f]", " ", str(value if value is not None else ""))
+    limit = FIELD_LIMITS.get(column) or FIELD_LIMITS.get(column.split("_", 1)[-1], 400)      # 'green_headline' is limited like 'headline'
+    return " ".join(t.split())[:limit].strip()
+
+
+def apply_overrides(raw: dict, override: dict | None) -> dict:
+    """The file's row with an edit made in the app laid over it. Only the editable wording can be changed this way: never the rule, the ranges or the sources."""
+    out = dict(raw)
+    for column, value in ((override or {}).get("fields") or {}).items():
+        if column in EDITABLE_COLUMNS:
+            out[column] = clean_field(column, value)
+    return out
+
+
+def effective_fields(row: Row) -> dict:
+    """The editable wording as it is now (the file's, with any edit laid over it): what the editor shows."""
+    out = {"title": row.title, "what_it_is": row.what_it_is, "facts": row.facts, "book": row.book}
+    out.update({f"{light}_{f}": row.text[light][f] for light in LIGHT_NAMES for f in TEXT_FIELDS})
+    return out
+
+
+def file_fields(raw: dict) -> dict:
+    return {c: clean_field(c, raw.get(c)) for c in EDITABLE_COLUMNS}
+
+
+def diff_fields(raw: dict, new_fields: dict) -> dict:
+    """Only what differs from the file, so a later change to the file in a field you did not touch still comes through."""
+    base = file_fields(raw)
+    return {c: clean_field(c, new_fields[c]) for c in EDITABLE_COLUMNS if c in new_fields and clean_field(c, new_fields[c]) != base[c]}
+
+
+def check_edit(library: Library, key: str, new_fields: dict):
+    """Check an edit before it is saved. Returns (errors, warnings): errors stop it being saved, warnings are advice."""
+    raw = library.file_raw.get(key)
+    if raw is None:
+        return ["That result is not in the library."], []
+    merged = apply_overrides(raw, {"fields": {c: v for c, v in new_fields.items() if c in EDITABLE_COLUMNS}})
+    problems: list = []
+    row = _parse_row(merged, 0, problems)
+    tidy = lambda p: re.sub(r"^(?:ERROR|WARNING): Row \d+ \([^)]*\): ", "", p)
+    errors = [tidy(p) for p in problems if p.startswith("ERROR")]
+    if row.gaps:
+        errors.append("These cannot be left empty: " + ", ".join(COLUMN_LABELS.get(g, g) for g in row.gaps) + ".")
+    return errors, [tidy(p) for p in problems if p.startswith("WARNING")]
+
+
+def load_library(path=None, summary_path=None, overrides: dict | None = None) -> Library:
+    """Read and check measures.csv and summary.csv, with any edits made in the app laid over the file's wording.
+    Never raises: problems come back in the list, and a broken row is never shown."""
     path, summary_path = path or LIBRARY_FILE, summary_path or SUMMARY_FILE
+    overrides = overrides or {}
     problems: list = []
     rows: list = []
     summary: dict = {}
+    file_raw: dict = {}
+    file_hash: dict = {}
+    overridden: dict = {}
     try:
         raw_rows, header = _read_csv(path)
     except Exception as e:
@@ -238,6 +300,12 @@ def load_library(path=None, summary_path=None) -> Library:
     for i, raw in enumerate(raw_rows, start=2):
         if not any((v or "").strip() for v in raw.values()):
             continue
+        key = (raw.get("key") or "").strip()
+        file_raw[key] = dict(raw)
+        if key in overrides and (overrides[key] or {}).get("fields"):
+            file_hash[key] = _parse_row(dict(raw), i, []).hash
+            overridden[key] = overrides[key]
+            raw = apply_overrides(raw, overrides[key])
         row = _parse_row(raw, i, problems)
         if row.key in seen:
             problems.append(f"ERROR: Row {i} ({row.key}): this key is used twice.")
@@ -263,7 +331,7 @@ def load_library(path=None, summary_path=None) -> Library:
             problems.append(f"ERROR: a summary line uses a placeholder it should not ({e}). Only {{n}}, {{green}} and {{count}} are allowed.")
     for k in ("all_green", "all_green_one", "mixed_lead", "no_green", "amber_clause", "red_clause", "priorities_intro", "no_priorities", "how_to_read_1", "how_to_read_2", "how_to_read_3"):
         _check_words(f"summary '{k}'", summary.get(k, ""), problems)
-    return Library(rows, summary, problems, path)
+    return Library(rows, summary, problems, path, file_raw, file_hash, overridden)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ the tiles
