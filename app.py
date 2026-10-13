@@ -113,6 +113,8 @@ REPORT_MODE = os.environ.get("REPORT_MODE", "dashboard").strip().lower()
 if REPORT_MODE not in ("dashboard", "classic"):
     REPORT_MODE = "dashboard"
 MEASURE_LIBRARY_PATH = os.environ.get("MEASURE_LIBRARY_PATH", "").strip()  # optional: a different measures.csv (used by tests)
+# Who may edit the dashboard wording in the app: Google accounts, separated by commas. Empty means nobody can (editing is off until you switch it on).
+WORDING_EDITORS = {e.strip().lower() for e in os.environ.get("WORDING_EDITORS", "").split(",") if e.strip()}
 AI_SERVICE_PHRASES = {
     "gemini": "Google's Gemini service",
     "gemini-vertex": "Google's Gemini service on Google Cloud",
@@ -178,6 +180,8 @@ TIER_INFO = {
     },
 }
 PLAN_REQUESTS = "plan_requests"
+WORDING_OVERRIDES = "wording_overrides"   # one document per dashboard result that has been edited in the app: only the words that differ from the file
+WORDING_HISTORY = "wording_history"       # every edit and revert: who, when, and the wording before and after
 WORDING_APPROVALS = "wording_approvals"   # one document per dashboard result: the fingerprint of the wording a clinician approved, who, and when
 PLAN_NOTICE = (
     "This plan was written for you by a Chudleigh Health Hub clinician. It is general health and performance guidance, not a medical "
@@ -681,7 +685,7 @@ def compare_page_shown(comparisons) -> bool:
 
 def dashboard_library():
     """The measure library (norms/measures.csv and summary.csv), read fresh each time: they are small, and an edit takes effect on the next deploy."""
-    return norms.dashboard.load_library(MEASURE_LIBRARY_PATH or None)
+    return norms.dashboard.load_library(MEASURE_LIBRARY_PATH or None, overrides=load_wording_overrides())
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -713,6 +717,71 @@ def approve_wording(key: str, wording_hash: str, title: str, who: str) -> bool:
     except Exception:
         log.exception("Approving wording failed")
         return False
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_wording_overrides() -> dict:
+    """Edits made in the app: {result key: {"fields": {column: wording}, "updated_by": ..., "base_hash": ...}}. Empty if the database cannot be read."""
+    if not db:
+        return {}
+    try:
+        return {d.id: (d.to_dict() or {}) for d in db.collection(WORDING_OVERRIDES).stream()}
+    except Exception:
+        log.exception("Reading the wording edits failed")
+        return {}
+
+
+def can_edit_wording() -> bool:
+    """Only the Google accounts named in WORDING_EDITORS may edit the wording."""
+    email = (st.session_state.get("clinician_email") or "").strip().lower()
+    return bool(email) and email in WORDING_EDITORS
+
+
+def save_wording_edit(key: str, fields: dict, before: dict, after: dict, file_hash: str) -> bool:
+    """Save an edit: the fields that differ from the file, the history entry, and the audit entry. Checks the person may edit, whatever the screen allowed."""
+    if not db or not can_edit_wording():
+        return False
+    who = st.session_state.get("clinician_email")
+    try:
+        db.collection(WORDING_OVERRIDES).document(key).set({"fields": fields, "updated_by": who, "updated_at": firestore.SERVER_TIMESTAMP, "base_hash": file_hash})
+        changed = sorted(c for c in after if after.get(c) != before.get(c))
+        db.collection(WORDING_HISTORY).add({"key": key, "at": firestore.SERVER_TIMESTAMP, "by": who, "action": "edit", "changed": changed, "before": before, "after": after})
+        audit("wording_edited", "", result=key, edited_by=who, changed=changed)
+        load_wording_overrides.clear()
+        return True
+    except Exception:
+        log.exception("Saving a wording edit failed")
+        return False
+
+
+def revert_wording(key: str, before: dict, after: dict) -> bool:
+    """Go back to the file's own wording for this result."""
+    if not db or not can_edit_wording():
+        return False
+    who = st.session_state.get("clinician_email")
+    try:
+        db.collection(WORDING_OVERRIDES).document(key).delete()
+        changed = sorted(c for c in after if after.get(c) != before.get(c))
+        db.collection(WORDING_HISTORY).add({"key": key, "at": firestore.SERVER_TIMESTAMP, "by": who, "action": "revert", "changed": changed, "before": before, "after": after})
+        audit("wording_reverted", "", result=key, reverted_by=who)
+        load_wording_overrides.clear()
+        return True
+    except Exception:
+        log.exception("Reverting a wording edit failed")
+        return False
+
+
+def wording_history(key: str, limit: int = 8) -> list:
+    """The latest edits to one result, newest first."""
+    if not db:
+        return []
+    try:
+        items = [d.to_dict() or {} for d in db.collection(WORDING_HISTORY).where(filter=FieldFilter("key", "==", key)).stream()]
+    except Exception:
+        log.exception("Reading the wording history failed")
+        return []
+    items.sort(key=lambda h: str(h.get("at") or ""), reverse=True)
+    return items[:limit]
 
 
 def withdraw_wording(key: str, who: str) -> bool:
@@ -2727,6 +2796,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     with st.container():
                         st.markdown(f"**{row.title}** · {status_words[status]}")
                         st.caption(row.what_it_is)
+                        if row.key in dash_lib.overridden:
+                            st.caption(f"✏️ Edited in the app by {dash_lib.overridden[row.key].get('updated_by', 'a clinician')}.")
                         for light_name, head, text, do in norms.dashboard.wording_for_review(row):
                             st.markdown(f"*{light_name}:* **{head}** {text} **What to do:** {do}")
                         if status == "approved" and (records.get(row.key) or {}).get("approved_by"):
@@ -2757,6 +2828,76 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             if all(saved):
                                 st.rerun()
                             st.error("Some approvals could not be saved. Please try again.")
+            with st.expander("✏️ Edit the wording (only you)"):
+                if not can_edit_wording():
+                    st.info(f"Editing the wording is switched off for this account. You are signed in as {st.session_state.get('clinician_email') or 'no Google account'}. "
+                            "To switch it on, add a setting called WORDING_EDITORS to the Cloud Run service, with your Google email as its value (see DASHBOARD.md).")
+                else:
+                    if st.session_state.pop("ed_reset", None):
+                        for k in [k for k in st.session_state if str(k).startswith("ed::")]:
+                            st.session_state.pop(k, None)
+                    if st.session_state.get("ed_notice"):
+                        st.success(st.session_state.pop("ed_notice"))
+                    st.caption("Change any of the words a participant reads. The ranges and the rules that decide the lights stay as they are. A result you edit goes back to draft "
+                               "until you approve it again. Reports you have already published do not change.")
+                    by_key = {r.key: r for r in dash_lib.rows}
+                    order = [r.key for r in sorted(dash_lib.rows, key=lambda r: (r.order, r.key))]
+                    pick = st.selectbox("Result to edit", order, format_func=lambda k: by_key[k].title, key="ed_pick")
+                    row = by_key[pick]
+                    now = norms.dashboard.effective_fields(row)
+                    lights = {"info": ("info",), "range": ("green", "amber", "red"), "composite": ("green", "amber", "red")}.get(row.rule, ("green", "amber", "red", "low", "info"))
+                    cols = ["title", "what_it_is"] + (["facts"] if row.rule in ("range", "info") else []) + ["book"] + [f"{lt}_{f}" for lt in lights for f in norms.dashboard.TEXT_FIELDS]
+                    if pick in dash_lib.overridden:
+                        ov = dash_lib.overridden[pick]
+                        st.caption(f"✏️ Edited in the app by {ov.get('updated_by', 'a clinician')}. Only the words you changed differ from the file.")
+                        if ov.get("base_hash") and ov["base_hash"] != dash_lib.file_hash.get(pick):
+                            st.caption("measures.csv has also been changed since this edit. Your edited words are used, and the rest follow the file.")
+                    typed = {}
+                    for col in cols:
+                        label = norms.dashboard.COLUMN_LABELS[col]
+                        limit = norms.dashboard.FIELD_LIMITS.get(col) or norms.dashboard.FIELD_LIMITS.get(col.split("_", 1)[-1], 400)
+                        if col in ("title", "book") or col.endswith("_headline"):
+                            typed[col] = st.text_input(label, value=now[col], key=f"ed::{pick}::{col}", max_chars=limit)
+                        else:
+                            typed[col] = st.text_area(label, value=now[col], key=f"ed::{pick}::{col}", max_chars=limit, height=90)
+                    save_clicked = st.button("💾 Save the wording", key="ed_save")
+                    revert_clicked = pick in dash_lib.overridden and st.button("↩ Revert to the file's wording", key="ed_revert")
+                    full = {**now, **{c: norms.dashboard.clean_field(c, v) for c, v in typed.items()}}
+                    if save_clicked:
+                        errors, warnings = norms.dashboard.check_edit(dash_lib, pick, full)
+                        for e in errors:
+                            st.error(e)
+                        for w in warnings:
+                            st.caption(w)
+                        if not errors:
+                            diff = norms.dashboard.diff_fields(dash_lib.file_raw[pick], full)
+                            if not diff and pick not in dash_lib.overridden:
+                                st.info("Nothing has changed.")
+                            elif not diff:
+                                if revert_wording(pick, now, norms.dashboard.file_fields(dash_lib.file_raw[pick])):
+                                    st.session_state["ed_reset"] = True
+                                    st.session_state["ed_notice"] = "That is the same as the file's own wording, so the edit has been removed."
+                                    st.rerun()
+                                st.error("The change could not be saved. Please try again.")
+                            elif save_wording_edit(pick, diff, now, full, dash_lib.file_hash.get(pick) or row.hash):
+                                st.session_state["ed_notice"] = f"Saved. {row.title} is back to draft until you approve it again, in the box above."
+                                st.rerun()
+                            else:
+                                st.error("The change could not be saved. Please try again.")
+                    if revert_clicked:
+                        if revert_wording(pick, now, norms.dashboard.file_fields(dash_lib.file_raw[pick])):
+                            st.session_state["ed_reset"] = True
+                            st.session_state["ed_notice"] = f"{row.title} is back to the file's own wording, and needs approving again."
+                            st.rerun()
+                        st.error("The change could not be saved. Please try again.")
+                    history = wording_history(pick)
+                    if history:
+                        st.markdown("**Recent changes to this result**")
+                        for h in history:
+                            when = h.get("at")
+                            when = when.strftime("%d %b %Y %H:%M") if hasattr(when, "strftime") else ""
+                            names = ", ".join(norms.dashboard.COLUMN_LABELS.get(c, c) for c in (h.get("changed") or [])) or "no words"
+                            st.caption(f"{when} · {h.get('by', '')} · {'reverted to the file' if h.get('action') == 'revert' else 'edited'}: {names}")
             if not age_years or sex_choice == "Not stated":
                 st.info("Enter the participant's age and sex at the top so results can be compared with the expected range for their age and sex. Some results need only an age, and some need neither.")
             dash_all, _unused = norms.dashboard.build_tiles(st.session_state.participant_tests, comparisons_all, dash_lib, include_drafts=True, exclude=(), approvals=approvals)
