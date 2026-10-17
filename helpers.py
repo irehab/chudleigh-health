@@ -221,3 +221,88 @@ def clean_note(text, limit: int = NOTE_MAX, single_line: bool = False) -> str:
     else:
         t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()[:limit].strip()
+
+
+# --- Device reports (PDFs) kept in a private Google Cloud Storage bucket ---
+# These talk to Cloud Storage over its plain web API, with the credentials the app already has, so nothing new needs installing.
+# `session` is anything that behaves like a requests session (google.auth.transport.requests.AuthorizedSession in the app).
+GCS_UPLOAD_URL = "https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o"
+GCS_OBJECT_URL = "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{name}"
+MAX_SHARED_PDF_BYTES = 20 * 1024 * 1024         # one report
+MAX_SHARED_TOTAL_BYTES = 40 * 1024 * 1024       # all the reports on one scan
+_OBJECT_NAME_RE = re.compile(r"^[0-9a-f]{32}\.pdf$")
+
+
+class StorageError(Exception):
+    """A report file could not be stored, fetched or removed."""
+
+
+def is_pdf(data) -> bool:
+    return isinstance(data, (bytes, bytearray)) and bytes(data[:5]) == b"%PDF-"
+
+
+def new_object_name() -> str:
+    """A random name with nothing about the participant in it."""
+    return secrets.token_hex(16) + ".pdf"
+
+
+def valid_object_name(name) -> bool:
+    return isinstance(name, str) and bool(_OBJECT_NAME_RE.fullmatch(name))
+
+
+def safe_download_name(label: str, date_text: str) -> str:
+    """The file name a participant is offered: the device and the date, never the original file name (which may carry a name)."""
+    base = re.sub(r"[^A-Za-z0-9]+", "_", str(label or "Report")).strip("_")[:60] or "Report"
+    day = re.sub(r"[^0-9-]", "", str(date_text or ""))[:10]
+    return f"{base}_{day}.pdf" if day else f"{base}.pdf"
+
+
+def friendly_size(num_bytes) -> str:
+    n = int(num_bytes or 0)
+    return f"{n / 1024 / 1024:.1f} MB" if n >= 1024 * 1024 else f"{max(1, round(n / 1024))} KB"
+
+
+def _quote(name: str) -> str:
+    from urllib.parse import quote
+    return quote(name, safe="")
+
+
+def gcs_upload(session, bucket: str, name: str, data: bytes) -> None:
+    """Store one PDF. Never overwrites an existing object (ifGenerationMatch=0), and checks the stored size matches what was sent."""
+    if not valid_object_name(name):
+        raise StorageError("invalid object name")
+    if not is_pdf(data):
+        raise StorageError("not a PDF")
+    resp = session.post(GCS_UPLOAD_URL.format(bucket=bucket), params={"uploadType": "media", "name": name, "ifGenerationMatch": "0"},
+                        data=bytes(data), headers={"Content-Type": "application/pdf"}, timeout=60)
+    if resp.status_code != 200:
+        raise StorageError(f"upload failed ({resp.status_code})")
+    try:
+        stored = int(resp.json().get("size", -1))
+    except Exception:
+        stored = -1
+    if stored != len(data):
+        raise StorageError("the stored size does not match")
+
+
+def gcs_download(session, bucket: str, name: str) -> bytes:
+    if not valid_object_name(name):
+        raise StorageError("invalid object name")
+    resp = session.get(GCS_OBJECT_URL.format(bucket=bucket, name=_quote(name)), params={"alt": "media"}, timeout=60)
+    if resp.status_code == 404:
+        raise FileNotFoundError(name)
+    if resp.status_code != 200:
+        raise StorageError(f"download failed ({resp.status_code})")
+    return bytes(resp.content)
+
+
+def gcs_delete(session, bucket: str, name: str) -> bool:
+    """Remove one object. True if it was deleted, False if it was already gone. Anything else is an error, so a deletion is never assumed."""
+    if not valid_object_name(name):
+        raise StorageError("invalid object name")
+    resp = session.delete(GCS_OBJECT_URL.format(bucket=bucket, name=_quote(name)), timeout=60)
+    if resp.status_code in (200, 204):
+        return True
+    if resp.status_code == 404:
+        return False
+    raise StorageError(f"delete failed ({resp.status_code})")
