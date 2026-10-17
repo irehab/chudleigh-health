@@ -51,6 +51,7 @@ EDITABLE_COLUMNS = ["title", "what_it_is", "facts", "book"] + [f"{light}_{f}" fo
 FIELD_LIMITS = {"title": 80, "what_it_is": 300, "facts": 200, "book": 160, "headline": 80, "text": 400, "do": 400}
 COLUMN_LABELS = {"title": "Name the participant sees", "what_it_is": "What it is", "facts": "Sentence of facts (must include {value})", "book": "Booklet line"}
 COLUMN_LABELS.update({f"{light}_{f}": f"{name}: {label}" for light, name in LIGHT_NAMES.items() for f, label in (("headline", "headline"), ("text", "what it means"), ("do", "what to do"))})
+DEFAULT_REPORTS_HINT = "Your original reports from your devices are below this page, ready to open."
 MAX_SENTENCE_WORDS = 25            # longer than this is flagged to the clinician as hard to read (a warning, not a block)
 BANNED = re.compile(r"\b(guarantee[ds]?|will improve|cures?|abnormal|you have (?:a|an) )\b", re.I)
 
@@ -329,7 +330,7 @@ def load_library(path=None, summary_path=None, overrides: dict | None = None) ->
             summary["all_green"].format(n=4)
         except (KeyError, IndexError, ValueError) as e:
             problems.append(f"ERROR: a summary line uses a placeholder it should not ({e}). Only {{n}}, {{green}} and {{count}} are allowed.")
-    for k in ("all_green", "all_green_one", "mixed_lead", "no_green", "amber_clause", "red_clause", "priorities_intro", "no_priorities", "how_to_read_1", "how_to_read_2", "how_to_read_3"):
+    for k in ("all_green", "all_green_one", "mixed_lead", "no_green", "amber_clause", "red_clause", "priorities_intro", "no_priorities", "how_to_read_1", "how_to_read_2", "how_to_read_3", "reports_hint"):
         _check_words(f"summary '{k}'", summary.get(k, ""), problems)
     return Library(rows, summary, problems, path, file_raw, file_hash, overridden)
 
@@ -581,7 +582,8 @@ def _sources_html(tiles: list, S: dict) -> str:
     return f'<div class="sources"><h2>{esc(S.get("sources_heading", ""))}</h2><ul>{"".join(items)}</ul></div>'
 
 
-def render_report(meta: dict, tiles: list, library: Library, note: str = "", note_by: str = "", hidden: list | None = None, preview: bool = False) -> str:
+def render_report(meta: dict, tiles: list, library: Library, note: str = "", note_by: str = "", hidden: list | None = None, preview: bool = False,
+                  files_shared: bool = False) -> str:
     """The whole page, as one self-contained HTML document. meta: participant_name, age_gender, assessment_date, body_mass_height."""
     S = library.summary
     summary = summarize(tiles, S)
@@ -607,6 +609,8 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
         groups.setdefault(t.group, []).append(t)
     sections = "".join(f'<div class="group"><h2>{esc(g)}</h2><div class="grid">{"".join(_tile_html(t, S, preview) for t in ts)}</div></div>' for g, ts in groups.items())
     tap = f'<p class="book" style="margin-top:14px">{esc(S.get("tap_hint", ""))}</p>' if tiles else ""
+    if tiles and files_shared:
+        tap += f'<p class="book" style="margin-top:4px">&#128196; {esc(S.get("reports_hint") or DEFAULT_REPORTS_HINT)}</p>'
     how = (f'<div class="how"><h2>{esc(S["how_to_read_heading"])}</h2>' + "".join(f'<p>{esc(S[k])}</p>' for k in ("how_to_read_1", "how_to_read_2", "how_to_read_3")) + "</div>") if tiles else ""
     version = f'Reference data version {esc(NORMS_VERSION)} &middot; Wording version {esc(library.version)}'
     return (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
