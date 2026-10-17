@@ -54,6 +54,19 @@ from helpers import (
     strip_code_fences,
     verify_pin,
 )
+from helpers import (  # noqa: E402  (report files kept in private storage)
+    MAX_SHARED_PDF_BYTES,
+    MAX_SHARED_TOTAL_BYTES,
+    StorageError,
+    friendly_size,
+    gcs_delete,
+    gcs_download,
+    gcs_upload,
+    is_pdf,
+    new_object_name,
+    safe_download_name,
+    valid_object_name,
+)
 
 # --- LOGGING (stdout -> Cloud Logging). Never log patient names, PINs or clinical content. ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -113,6 +126,10 @@ REPORT_MODE = os.environ.get("REPORT_MODE", "dashboard").strip().lower()
 if REPORT_MODE not in ("dashboard", "classic"):
     REPORT_MODE = "dashboard"
 MEASURE_LIBRARY_PATH = os.environ.get("MEASURE_LIBRARY_PATH", "").strip()  # optional: a different measures.csv (used by tests)
+# The private Cloud Storage bucket that holds the device reports shared with participants. Empty means sharing is off, and nothing is stored.
+REPORTS_BUCKET = os.environ.get("REPORTS_BUCKET", "").strip()
+FILE_SHARING_ON = bool(REPORTS_BUCKET)
+UNSHARED_BY_DEFAULT = {"12-Lead ECG (Electrocardiogram)"}   # its report carries the machine's own automatic statements, so it is only shared if you tick it
 # Who may edit the dashboard wording in the app: Google accounts, separated by commas. Empty means nobody can (editing is off until you switch it on).
 WORDING_EDITORS = {e.strip().lower() for e in os.environ.get("WORDING_EDITORS", "").split(",") if e.strip()}
 AI_SERVICE_PHRASES = {
@@ -784,6 +801,29 @@ def wording_history(key: str, limit: int = 8) -> list:
     return items[:limit]
 
 
+@st.cache_resource(show_spinner=False)
+def storage_session():
+    """An authorised web session for Cloud Storage, made once, using the same credentials as the rest of the app."""
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+    credentials, _project = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_write"])
+    return AuthorizedSession(credentials)
+
+
+def shared_file_upload(data: bytes) -> str:
+    name = new_object_name()
+    gcs_upload(storage_session(), REPORTS_BUCKET, name, data)
+    return name
+
+
+def shared_file_fetch(name: str) -> bytes:
+    return gcs_download(storage_session(), REPORTS_BUCKET, name)
+
+
+def shared_file_delete(name: str) -> bool:
+    return gcs_delete(storage_session(), REPORTS_BUCKET, name)
+
+
 def withdraw_wording(key: str, who: str) -> bool:
     if not db:
         return False
@@ -1224,12 +1264,22 @@ def export_participant(key: str) -> str:
         for d in db.collection("payments").where(filter=FieldFilter("patient_key", "==", key)).stream()
     ]
     plans = [_with_id(d) for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream()]
-    return json.dumps({"profile": profile, "scans": scans, "payments": payments, "plan_requests": plans}, default=str, indent=2)
+    out = {"profile": profile, "scans": scans, "payments": payments, "plan_requests": plans}
+    if any((sc or {}).get("shared_files") for sc in scans.values()):
+        out["shared_report_files_note"] = ("The PDF reports shared with this participant are kept in private storage. They are listed under each scan's shared_files "
+                                           "(label, size, who shared them). The files themselves can be supplied separately.")
+    return json.dumps(out, default=str, indent=2)
 
 
 def delete_participant(key: str) -> int:
     """Permanently delete a participant's profile, scans and plan requests (their answers and plans). Payment records are kept for accounting."""
     profile_ref = db.collection(REPORTS).document(key)
+    files = [f.get("object") for d in profile_ref.collection("scans").stream() for f in ((d.to_dict() or {}).get("shared_files") or []) if f.get("object")]
+    if files:
+        if not FILE_SHARING_ON:
+            raise StorageError("This participant has shared reports, but file storage is switched off, so they cannot be deleted. Switch storage back on first")
+        for name in files:                      # the files go first: if one cannot be removed, nothing else is deleted and the record of it is kept
+            shared_file_delete(name)
     deleted = 0
     for d in profile_ref.collection("scans").stream():
         d.reference.delete()
@@ -1239,6 +1289,24 @@ def delete_participant(key: str) -> int:
     profile_ref.delete()
     clear_attempts("patient", key)
     return deleted
+
+
+def remove_shared_files(key: str) -> int:
+    """Delete every device report shared with a participant, and clear the list, keeping their results. Returns how many files were removed.
+    Stops at the first file that cannot be removed, so the list never claims a file is gone when it is not."""
+    profile_ref = db.collection(REPORTS).document(key)
+    removed = 0
+    for d in profile_ref.collection("scans").stream():
+        files = [f for f in ((d.to_dict() or {}).get("shared_files") or []) if f.get("object")]
+        if not files:
+            continue
+        if not FILE_SHARING_ON:
+            raise StorageError("This participant has shared reports, but file storage is switched off, so they cannot be removed. Switch storage back on first")
+        for f in files:
+            shared_file_delete(f["object"])
+            removed += 1
+        d.reference.update({"shared_files": [], "shared_files_removed_at": firestore.SERVER_TIMESTAMP})
+    return removed
 
 
 # --- Report building ---
@@ -1513,6 +1581,37 @@ def _participant_name(key: str) -> str:
         return ((snap.to_dict() or {}).get("name") if snap.exists else "") or key
     except Exception:
         return key
+
+
+def render_portal_files(key: str, scan_date: str, scan: dict):
+    """The 'Your original reports' panel. Only files listed on this participant's own scan are ever offered, and each opening is written to the audit log."""
+    files = [f for f in (scan.get("shared_files") or []) if valid_object_name(f.get("object"))]
+    if not files:
+        return
+    st.subheader("📄 Your original reports")
+    st.caption("These are the full reports printed by your devices. They are private to you. Ask your clinician if you would like them talked through.")
+    if not FILE_SHARING_ON:
+        st.info("Your original reports are not available at the moment. Please contact Chudleigh Health Hub.")
+        return
+    for f in files:
+        fid = str(f.get("file_id") or f["object"][:-4])
+        label, size = f.get("label") or "Report", friendly_size(f.get("size"))
+        held = f"portal_file::{fid}"
+        if held in st.session_state:
+            st.download_button(f"⬇️ Save: {label} ({size})", data=st.session_state[held], file_name=safe_download_name(label, scan_date), mime="application/pdf",
+                               key=f"portal_dl_{fid}")
+        elif st.button(f"📄 Open: {label} ({size})", key=f"portal_open_{fid}"):
+            try:
+                data = shared_file_fetch(f["object"])
+                if hashlib.sha256(data).hexdigest() != f.get("sha256"):
+                    raise StorageError("the file does not match what was stored")
+                st.session_state[held] = data
+                audit("report_file_viewed", key, scan_date=scan_date, file=fid)
+                st.rerun()
+            except FileNotFoundError:
+                st.error("This report is not available right now. Please contact Chudleigh Health Hub.")
+            except Exception:
+                fail("We couldn't open that report right now. Please try again shortly.", "Opening a shared report failed")
 
 
 def _latest_scan(key: str):
@@ -2135,7 +2234,7 @@ REPORT_TEMPLATE = """
 """
 
 
-def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by="", preview=False, exclude=()):
+def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by="", preview=False, exclude=(), files_shared=False):
     """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state.
 
     In dashboard mode the page is built from the results and the measure library. A preview also shows results whose wording is still a draft (marked),
@@ -2144,7 +2243,7 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         lib = dashboard_library()
         tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude, approvals=approval_hashes())
         meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
-        return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview), {k: "" for k in TEXT_KEYS}
+        return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview, files_shared=files_shared), {k: "" for k in TEXT_KEYS}
     tests_html = ""
     for idx, t in enumerate(tests):
         items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
@@ -2487,6 +2586,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     )
 
     st.caption(pdf_privacy_note())
+    if FILE_SHARING_ON:
+        st.caption("If you tick this report for sharing (under 'Device reports to share', before you publish), it is also stored privately and shown only to the participant.")
     pdf_bytes_content = None
     pdf_filename_str = None
 
@@ -2965,6 +3066,25 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                            "can be compared (and has not been left out).")
         st.divider()
 
+    # --- DEVICE REPORTS TO SHARE WITH THE PARTICIPANT ---
+    pdf_tests = [t for t in st.session_state.participant_tests if t.get("pdf_bytes")]
+    shared_tests, files_ok = [], False
+    if pdf_tests:
+        st.markdown("#### 📎 Device reports to share with the participant")
+        if not FILE_SHARING_ON:
+            st.caption("Sharing the original reports with participants is switched off, because no private storage has been set up. See PDF_SHARING.md.")
+        else:
+            st.caption("Tick the reports the participant may open from their page. They are stored privately and shown only to them, after they sign in with their PIN. "
+                       "A report usually shows the participant's name and date of birth, so check that each one is theirs.")
+            for n, t in enumerate(pdf_tests):
+                sig = hashlib.sha256(t["pdf_bytes"]).hexdigest()[:16]
+                if st.checkbox(f"Share: {t['type']} ({t.get('pdf_filename') or 'report'}, {friendly_size(len(t['pdf_bytes']))})",
+                               value=t["type"] not in UNSHARED_BY_DEFAULT, key=f"share::{n}::{sig}"):
+                    shared_tests.append(t)
+            if shared_tests:
+                files_ok = st.checkbox("I have checked that every report ticked above belongs to this participant, and I am happy for them to see it.", key="chk_files_ok")
+        st.divider()
+
     # --- REVIEW, APPROVE & PUBLISH ---
     st.markdown("#### ✅ Review & Approve")
     if st.checkbox("👁️ Preview the report as the participant will see it", key="chk_preview"):
@@ -2972,6 +3092,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             preview_html, _ = build_report(
                 participant_name, age_gender, assessment_date, body_mass_height,
                 st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, preview=True, exclude=excluded,
+                files_shared=bool(shared_tests),
             )
             components.html(preview_html, height=700, scrolling=True)
         else:
@@ -3004,6 +3125,12 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.warning(f"New participants need a {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digit security PIN.")
         elif existing_profile and not confirm_same_person:
             st.warning("An existing record matches this name. Please tick the box confirming it is the same person before publishing.")
+        elif shared_tests and not files_ok:
+            st.warning("Please tick the box confirming that every report you are sharing belongs to this participant.")
+        elif shared_tests and sum(len(t["pdf_bytes"]) for t in shared_tests) > MAX_SHARED_TOTAL_BYTES:
+            st.warning(f"The reports you are sharing are too large together (the limit is {MAX_SHARED_TOTAL_BYTES // 1024 // 1024} MB). Untick some.")
+        elif shared_tests and not all(is_pdf(t["pdf_bytes"]) and len(t["pdf_bytes"]) <= MAX_SHARED_PDF_BYTES for t in shared_tests):
+            st.warning("One of the reports you are sharing is not a valid PDF, or is too large to share. Untick it.")
         elif bad_prices:
             st.warning("Please fix the tier prices before publishing.")
         elif not (approver or "").strip() or not approved:
@@ -3015,6 +3142,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 final_html_output, safe = build_report(
                     participant_name, age_gender, assessment_date, body_mass_height,
                     st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, exclude=excluded,
+                    files_shared=bool(shared_tests),
                 )
                 note_shown = bool(dash_tiles) if REPORT_MODE == "dashboard" else compare_page_shown(comparisons)
 
@@ -3037,6 +3165,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
                     "wording": {t.key: t.hash for t in dash_tiles} if REPORT_MODE == "dashboard" else {},
                     "library_version": dash_lib.version if (REPORT_MODE == "dashboard" and dash_lib) else "",
+                    "shared_files": [],            # filled in below, once the files have been stored
                     "master_html": safe["ta_master"],
                     "plain_english_html": safe["ta_pe"],
                     "html_output": final_html_output,
@@ -3059,12 +3188,50 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         profile_record.update(pin_fields(pin))
 
                     profile_ref = db.collection(REPORTS).document(c_key)
-                    profile_ref.set(profile_record, merge=True)
-                    profile_ref.collection("scans").document(scan_id).set(scan_record)
+                    scan_ref = profile_ref.collection("scans").document(scan_id)
+                    old_files = []
+                    try:
+                        prior = scan_ref.get()
+                        old_files = [f for f in ((prior.to_dict() or {}).get("shared_files") or []) if f.get("object")] if prior.exists else []
+                    except Exception:
+                        log.exception("Could not read the existing scan's shared files")
+                    if old_files and not FILE_SHARING_ON:
+                        raise StorageError("This date already has shared reports, and file storage is switched off, so they cannot be replaced. Switch storage back on first.")
+                    uploaded = []
+                    try:
+                        for t in shared_tests:
+                            data = t["pdf_bytes"]
+                            name = shared_file_upload(data)
+                            uploaded.append({"file_id": name[:-4], "object": name, "label": t["type"], "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                                             "shared_by": approver.strip(), "original_name": t.get("pdf_filename") or ""})
+                        scan_record["shared_files"] = uploaded
+                        profile_ref.set(profile_record, merge=True)
+                        scan_ref.set(scan_record)
+                    except Exception:
+                        for f in uploaded:                       # nothing is left behind if the publish did not complete
+                            try:
+                                shared_file_delete(f["object"])
+                            except Exception:
+                                log.exception("Could not remove a stored file after a failed publish")
+                        raise
                     lookup_history.clear()
+                    kept = {f["object"] for f in uploaded}
+                    replaced = 0
+                    for f in old_files:                          # publishing again for the same date replaces the earlier files
+                        if f["object"] not in kept:
+                            try:
+                                shared_file_delete(f["object"])
+                                replaced += 1
+                            except Exception:
+                                log.exception("Could not remove a replaced file")
+                    if uploaded or replaced:
+                        audit("report_files_shared", c_key, scan_date=scan_id, shared=len(uploaded), replaced=replaced)
                     audit("scan_published", c_key, scan_date=scan_id, approved_by=approver.strip())
                     log.info("Published scan %s", scan_id)
                     st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!")
+            except StorageError as e:
+                log.exception("Publishing stopped by file storage")
+                st.error(f"Nothing was published. The device reports could not be stored: {e}.")
             except Exception:
                 fail("Publishing failed. Nothing was lost locally; please try again.", "Publish to Firestore failed")
 
@@ -3096,6 +3263,22 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     key="dr_download",
                 )
 
+            st.markdown("**Stop sharing this participant's device reports** (their results stay; the stored PDF files are deleted. Use this if a report was shared by mistake.)")
+            confirm_files = st.text_input("Type the participant's full name again to confirm", key="dr_confirm_files", max_chars=120)
+            if st.button("🗂️ Remove all shared device reports", key="dr_files_btn"):
+                if patient_key(confirm_files) != dr_key:
+                    st.warning("The name you typed doesn't match.")
+                else:
+                    try:
+                        n_removed = remove_shared_files(dr_key)
+                        audit("report_files_removed", dr_key, files_removed=n_removed)
+                        lookup_history.clear()
+                        st.success(f"Removed {n_removed} shared report file(s)." if n_removed else "This participant has no shared report files.")
+                    except StorageError as e:
+                        st.error(f"Nothing further was removed. {e}.")
+                    except Exception:
+                        fail("Removing the files failed. Please try again.", "Removing shared files failed")
+
             st.markdown("**Delete this participant's profile and scans** (cannot be undone; payment records are kept for accounting)")
             confirm_text = st.text_input("Type the participant's full name again to confirm", key="dr_confirm", max_chars=120)
             if st.button("🗑️ Permanently delete these records", key="dr_delete_btn"):
@@ -3108,6 +3291,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         lookup_history.clear()
                         st.session_state.pop("dr_export", None)
                         st.success(f"Deleted the profile and {deleted_scans} scan(s).")
+                    except StorageError as e:
+                        st.error(f"Nothing was deleted. {e}.")
                     except Exception:
                         fail("The deletion failed. Please try again.", "Participant deletion failed")
 
@@ -3129,6 +3314,8 @@ elif app_mode == "Secure Patient Mobile Portal":
 
     portal_auth = st.session_state.get("portal_auth")
     if portal_auth and time.time() - portal_auth["at"] > PATIENT_SESSION_SECONDS:
+        for k in [k for k in st.session_state.keys() if str(k).startswith("portal_file::")]:
+            st.session_state.pop(k, None)          # an opened report is not kept once the session has ended
         st.session_state.pop("portal_auth", None)
         portal_auth = None
         st.info("Your session expired. Please sign in again.")
@@ -3257,6 +3444,8 @@ elif app_mode == "Secure Patient Mobile Portal":
 
             st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
             components.html(html_output, height=800, scrolling=True)
+
+            render_portal_files(lookup_key, selected_scan_date, scan_data)
 
 
 # --- Footer on the patient site: privacy notice link ---
