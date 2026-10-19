@@ -1996,12 +1996,16 @@ ASSESSMENTS = {
         "columns": [
             [("Time to Stand, average of reps (s)", "1.7 s", "Time to Stand"), ("Peak Standing Force, best rep (N)", "924 N", "Peak Standing Force")],
             [("Standing Force Asymmetry, average (% and side)", "2.9% L", "Limb Asymmetry"), ("Peak Standing RFD 100 ms, best rep (N/s)", "5660 N/s", "Peak Standing RFD")],
+            [("VALD Hub percentile for peak standing force (0-100)", "35", "VALD Percentile"),
+             ("Body Weight on the Plate (kg)", "76.6", "Body Weight")],
         ],
     },
     "VALD ForceDecks - Multi-Rep Squat": {
         "columns": [
             [("Peak Force, best rep (N)", "1053 N", "Peak Force")],
             [("Concentric Peak Force Asymmetry, average (% and side)", "11% R", "L/R Asymmetry")],
+            [("VALD Hub percentile for peak force (0-100)", "35", "VALD Percentile"),
+             ("Body Weight on the Plate (kg)", "76.6", "Body Weight")],
         ],
     },
     "VALD ForceDecks - Single Leg Stance / Balance": {
@@ -2018,6 +2022,8 @@ ASSESSMENTS = {
             [("Modified RSI, best rep", "0.58", "Modified RSI"), ("Flight Time : Contraction Time, best rep", "0.4", "Flight Time:Contraction Time")],
             [("Concentric Peak Force Asymmetry, average (% and side)", "14% L", "Peak Force Asymmetry"),
              ("Eccentric Braking Impulse Asymmetry, average (% and side)", "1.1% L", "Braking Impulse Asymmetry")],
+            [("VALD Hub percentile for jump height, or peak power per kg (0-100)", "35", "VALD Percentile"),
+             ("Body Weight on the Plate (kg)", "76.6", "Body Weight")],
         ],
     },
     "VALD ForceDecks - Quiet Stand (Balance)": {

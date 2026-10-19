@@ -35,7 +35,14 @@ SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 GREEN, AMBER, RED, GREY = "green", "amber", "red", "info"
 SEVERITY = {GREEN: 0, GREY: 0, AMBER: 1, RED: 2}
 SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i"}      # a tick, a triangle, an exclamation mark, an i: the light is never colour alone
-RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts")
+RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts", "fp_balance")
+# rule 'fp_balance': left-right balance across the VALD force plate tests. Each test's asymmetry (e.g. '11% R': VALD's letter is the
+# side that produced MORE, checked against the left/right force traces on a squat report) gets a light from the row's ranges, and
+# single-leg stance compares the sway on each leg. The tile says which side was weaker, and whether that was the same in every test.
+FP_ASYMMETRY = [("vald_sts", "Limb Asymmetry", "sit-to-stand", "standing up"),
+                ("vald_squat", "L/R Asymmetry", "squat", "pushing up from the squat"),
+                ("vald_cmj", "Peak Force Asymmetry", "jump", "pushing off for the jump"),
+                ("vald_cmj", "Braking Impulse Asymmetry", "jump", "dipping down before the jump")]
 # rule 'zone': a value whose light is the colour the device itself draws it in. 'members' names the box holding that colour (green or orange).
 # rule 'parts': several boxes from the same device, each given a light from the row's ranges; the tile shows the worst. 'members' lists the boxes.
 ZONE_LIGHTS = {"green": "green", "orange": "amber"}
@@ -44,8 +51,13 @@ ZONE_LIGHTS = {"green": "green", "orange": "amber"}
 # marks a limb outside its normal band (the 'Limb Flags' box, e.g. 'left leg low').
 LIMB_PAIRS = [("Arms", "arm", "Right Arm Muscle", "Left Arm Muscle"), ("Legs", "leg", "Right Leg Muscle", "Left Leg Muscle")]
 LIMB_FLAGS_BOX = "Limb Flags"
-VALUE_DEVICES = {"tanita": A_TANITA}
-COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2}      # the devices that have dashboard tiles so far
+A_VALD_CMJ = "VALD ForceDecks - Countermovement Jump (CMJ)"
+A_VALD_SQUAT = "VALD ForceDecks - Multi-Rep Squat"
+A_VALD_STS = "VALD ForceDecks - Sit-to-Stand"
+A_VALD_SLSB = "VALD ForceDecks - Single Leg Stance / Balance"
+VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB}
+DEVICE_NAMES = {"vald_cmj": "Jump (CMJ)", "vald_squat": "Squat", "vald_sts": "Sit-to-stand", "vald_slsb": "Single-leg balance"}
+COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
 TEXT_FIELDS = ("headline", "text", "do")
 REQUIRED_COLUMNS = ["key", "group", "order", "priority", "approved", "title", "what_it_is", "rule", "members", "green_min", "green_max", "amber_min", "amber_max",
                     "facts", "value_from", "green_headline", "green_text", "green_do", "amber_headline", "amber_text", "amber_do", "red_headline", "red_text",
@@ -201,15 +213,19 @@ def _parse_row(raw, line, problems):
             problems.append(f"ERROR: {label}: 'members' must list known results separated by | (problem: {', '.join(bad) or 'none listed'}).")
     if row.rule in ("zone", "parts") and not row.members:
         problems.append(f"ERROR: {label}: a '{row.rule}' row needs 'members': the box name(s), separated by |.")
-    if row.rule == "parts" and row.value_from.split(":")[0] not in VALUE_DEVICES:
+    if row.rule == "parts" and row.value_from.split(":")[0] not in VALUE_DEVICES and not all(m.split(":")[0] in VALUE_DEVICES for m in row.members if ":" in m):
         problems.append(f"ERROR: {label}: 'value_from' must name the device, for example tanita: (the boxes are listed in 'members').")
+    if row.rule == "parts" and any(":" in m and m.split(":")[0] not in VALUE_DEVICES for m in row.members):
+        problems.append(f"ERROR: {label}: a member names an unknown device. Known: {', '.join(VALUE_DEVICES)}.")
+    if row.rule == "parts" and not row.value_from and not all(":" in m for m in row.members):
+        problems.append(f"ERROR: {label}: give 'value_from' (the device), or put the device before each member, like vald_cmj:VALD Percentile.")
     if row.rule in ("range", "info", "zone"):
         dev = row.value_from.split(":")[0] if ":" in row.value_from else ""
         if dev not in VALUE_DEVICES or not row.value_from.split(":", 1)[1].strip():
             problems.append(f"ERROR: {label}: 'value_from' must look like tanita:Visceral Fat (device, then the box name).")
         if "{value}" not in row.facts:
             problems.append(f"ERROR: {label}: 'facts' must include {{value}}, for example 'Your rating was {{value}}.'")
-    if row.rule in ("range", "limbs", "parts") and row.green_min is None and row.green_max is None:
+    if row.rule in ("range", "limbs", "parts", "fp_balance") and row.green_min is None and row.green_max is None:
         problems.append(f"ERROR: {label}: a '{row.rule}' row needs a green range (green_min and/or green_max).")
     for sid in row.sources:
         if sid not in data.SOURCES:
@@ -476,21 +492,90 @@ def zone_reading(row: Row, tests: list):
     return ZONE_LIGHTS.get(zone, GREY), got[0], zone
 
 
-def parts_reading(row: Row, tests: list):
-    """(light, parts) for a 'parts' row: each box that has a number gets its own light from the row's ranges. None if none has a number."""
-    data = _device_data(row.value_from, tests)
-    parts = []
-    for box in row.members:
+def _ordinal(n: float) -> str:
+    n = int(round(n))
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+# For a percentile tile: the force each test is about, so it can also be shown against body weight (N / (kg x 9.81) = times body weight)
+RELATIVE_FORCE = {"vald_squat": ("Peak Force", "your best squat"), "vald_sts": ("Peak Standing Force", "your strongest stand")}
+
+
+def parts_reading(row: Row, tests: list, S: dict | None = None):
+    """(light, parts, facts) for a 'parts' row: each box that has a number gets its own light from the row's ranges. None if none has a number.
+    A member is a box of the row's device ('Right Arm Phase Angle'), or 'device:box' to take it from another test ('vald_squat:VALD Percentile')."""
+    parts, facts = [], []
+    for member in row.members:
+        dev, box = member.split(":", 1) if ":" in member else (row.value_from.split(":")[0], member)
+        data = _device_data(f"{dev}:", tests)
         shown = str(data.get(box, "")).strip()
         number = _num(shown)
         if number is None:
             continue
         light = range_light(number, row)
-        label = re.sub(r"\s+phase angle$", "", box, flags=re.I)
-        parts.append({"label": label, "value_text": shown, "light": light, "words": {GREEN: "healthy", AMBER: "below the healthy mark", RED: "low"}[light]})
+        if box == "VALD Percentile":
+            label, shown = DEVICE_NAMES.get(dev, dev), f"{_ordinal(number)} percentile"
+            words = _words(S or {}, light)
+            force_box, what = RELATIVE_FORCE.get(dev, (None, ""))
+            force, bw = _num(str(data.get(force_box, ""))) if force_box else None, _num(str(data.get("Body Weight", "")))
+            if force and bw:
+                facts.append(f"{label}: {what} was {force:g} N, about {force / (bw * 9.81):.1f} times your body weight.")
+        else:
+            label = re.sub(r"\s+phase angle$", "", box, flags=re.I)
+            words = {GREEN: "healthy", AMBER: "below the healthy mark", RED: "low"}[light]
+        parts.append({"label": label, "value_text": shown, "light": light, "words": words})
     if not parts:
         return None
-    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), parts
+    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), parts, facts
+
+
+def _asym(text: str):
+    """'11% R' -> (11.0, 'R'); '0%' -> (0.0, None); anything else -> None."""
+    m = re.fullmatch(r"\s*([\d.]+)\s*%?\s*([LR])?\s*", str(text or ""), re.I)
+    return (float(m.group(1)), (m.group(2) or "").upper() or None) if m else None
+
+
+def force_plate_balance(row: Row, tests: list):
+    """(light, facts, parts) for the 'fp_balance' tile, or None if no force plate asymmetry was entered."""
+    parts, facts, weaker = [], [], []
+    for dev, box, test, action in FP_ASYMMETRY:
+        got = _asym(_device_data(f"{dev}:", tests).get(box, ""))
+        if not got:
+            continue
+        pct, more = got
+        light = range_light(pct, row)
+        if not more or pct == 0:
+            facts.append(f"{test.capitalize()} ({action}): both sides did the same.")
+            words = "even"
+        else:
+            weak, strong = ("right", "left") if more == "L" else ("left", "right")
+            if pct >= (row.amber_min or 10) / 2:      # only a real difference counts towards 'the weaker side' (half the amber line, 5%)
+                weaker.append(weak)
+            facts.append(f"{test.capitalize()} ({action}): your {weak} side did {pct:g}% less than your {strong} side.")
+            words = f"{weak} {pct:g}% less"
+        parts.append({"label": f"{test.capitalize()}: {action}", "value_text": f"{pct:g}%", "light": light, "words": words})
+    slsb = _device_data("vald_slsb:", tests)
+    left, right = _num(str(slsb.get("Left Sway Velocity", ""))), _num(str(slsb.get("Right Sway Velocity", "")))
+    if left and right:
+        pct = round(abs(left - right) / max(left, right) * 100, 1)
+        light = range_light(pct, row)
+        worse = "left" if left > right else "right"
+        if left == right:
+            facts.append("Standing on one leg: you swayed the same on each leg.")
+        else:
+            facts.append(f"Standing on one leg: you swayed {pct:.0f}% more on your {worse} leg.")
+        parts.append({"label": "Balance on one leg", "value_text": f"L {left:g} · R {right:g} mm/s", "light": light,
+                      "words": "even" if left == right else f"{worse} sways {pct:.0f}% more"})
+    if not parts:
+        return None
+    if len(weaker) >= 2:
+        side = max(("left", "right"), key=weaker.count)
+        n = weaker.count(side)
+        if n == len(weaker):
+            facts.insert(0, f"Your {side} side was the weaker side in all {n} force plate measures.")
+        elif n * 2 > len(weaker):                                   # a clear majority only; a tie says nothing
+            facts.insert(0, f"Your {side} side was the weaker side in {n} of {len(weaker)} force plate measures.")
+    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), facts, parts
 
 
 def _pick(row: Row, light: str, status: str = ""):
@@ -555,12 +640,19 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 tile = Tile(row.key, row.group, row.title, light, shown_text, row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown,
                             row.priority, row.order, hash=row.hash)
         elif row.rule == "parts":
-            got = parts_reading(row, tests)
+            got = parts_reading(row, tests, S)
             if got:
-                light, parts = got
+                light, parts, extra = got
                 head, text, do = _pick(row, light)
-                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [row.facts] if row.facts else [], head, text, do, row.book,
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, ([row.facts] if row.facts else []) + extra, head, text, do, row.book,
                             list(row.sources), shown, row.priority, row.order, "", parts, "", row.hash)
+        elif row.rule == "fp_balance":
+            got = force_plate_balance(row, tests)
+            if got:
+                light, facts, parts = got
+                head, text, do = _pick(row, light)
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown,
+                            row.priority, row.order, "", parts, "", row.hash)
         elif row.rule == "limbs":
             got = limb_balance(row, tests, S)
             if got:

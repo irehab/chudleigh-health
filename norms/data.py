@@ -100,6 +100,31 @@ SOURCES = {
         "population": "Not taken from a study.",
         "note": "These cut-offs are the clinic's own working guide. They are not a published standard.",
     },
+    "vald_hub_norms": {
+        "short": "VALD Hub: percentiles for your age and sex",
+        "citation": ("The percentiles shown in VALD Hub for your ForceDecks results, which compare them with VALD's own reference data for people "
+                     "of the same age and sex. Your clinician copies them into this report."),
+        "url": "",
+        "population": "VALD's own database of ForceDecks tests. Its make-up is not shown in the report.",
+        "note": "Used as shown in VALD Hub. The 25th percentile or above is shown green, the 10th to 24th amber and below the 10th red: the clinic's own choice.",
+    },
+    "vald_asymmetry": {
+        "short": "Left and right sides on the force plates",
+        "citation": ("VALD ForceDecks measures each leg on its own plate. The difference between the sides is given as a percentage of the stronger side. "
+                     "A difference of 10% or more is marked as room to improve, and 20% or more as a place to focus first."),
+        "url": "",
+        "population": "Not taken from a study.",
+        "note": "These cut-offs are the clinic's own working guide. They are not a published standard.",
+    },
+    "asymmetry_review": {
+        "short": "How big a difference between sides matters (Parkinson 2021)",
+        "citation": ("Parkinson AO, Apps CL, Morris JG, Barnett CT, Lewis MGC. The calculation, thresholds and reporting of inter-limb strength asymmetry: "
+                     "a systematic review. Journal of Sports Science and Medicine 2021;20:594-617."),
+        "url": "https://doi.org/10.52082/jssm.2021.594",
+        "population": "A review of 53 studies of strength differences between the left and right sides.",
+        "note": ("Cut-offs of 10 to 15% are widely used, but the review found they are not always backed by evidence. "
+                 "A difference is most useful compared with your own earlier results in the same test."),
+    },
 }
 
 # ---- Resting pulse, NHANES 1999-2008, Tables 2 (men) and 3 (women): 5th percentile, median, 95th percentile (beats per minute)

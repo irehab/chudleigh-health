@@ -271,10 +271,12 @@ def run_checks(res: ReadResult) -> list:
 FIELD_MAP = {
     "CMJ": [("Jump Height", r"Jump Height.*", "best_max"), ("Peak Power/Mass", r"Peak Power / BM", "best_max"),
             ("Modified RSI", r"RSI-?modified|RSI ?mod", "best_max"), ("Flight Time:Contraction Time", r"Flight Time:Contraction Time", "best_max"),
-            ("Peak Force Asymmetry", r"Concentric Peak Force Asymmetry", "average"), ("Braking Impulse Asymmetry", r"Eccentric Braking Impulse Asymmetry", "average")],
-    "SQT": [("Peak Force", r"Peak Force", "best_max"), ("L/R Asymmetry", r"Concentric Peak Force Asymmetry", "average")],
+            ("Peak Force Asymmetry", r"Concentric Peak Force Asymmetry", "average"), ("Braking Impulse Asymmetry", r"Eccentric Braking Impulse Asymmetry", "average"),
+            ("Body Weight", None, "bw")],
+    "SQT": [("Peak Force", r"Peak Force", "best_max"), ("L/R Asymmetry", r"Concentric Peak Force Asymmetry", "average"), ("Body Weight", None, "bw")],
     "STSTS": [("Time to Stand", r"Time to Stand", "average"), ("Peak Standing Force", r"Peak Standing Force", "best_max"),
-              ("Limb Asymmetry", r"Peak Standing Force Asymmetry", "average"), ("Peak Standing RFD", r"Peak Standing RFD.*", "best_max")],
+              ("Limb Asymmetry", r"Peak Standing Force Asymmetry", "average"), ("Peak Standing RFD", r"Peak Standing RFD.*", "best_max"),
+              ("Body Weight", None, "bw")],
     "SLSB": [(f"{side} {box}", rf"{name} \({side}\)", "latest") for side in ("Left", "Right")
              for box, name in (("Total Excursion", "Total Excursion"), ("Sway Velocity", "Mean Velocity"),
                                ("Side-to-Side Sway", "CoP Range - Medial-Lateral"), ("Front-to-Back Sway", "CoP Range - Anterior-Posterior"))],
@@ -300,6 +302,10 @@ def app_fields(res: ReadResult) -> dict:
     latest = max(sessions, key=lambda s: s["date"])["date"].strftime("%d/%m/%Y") if sessions else None
     out = {}
     for box, pattern, how in FIELD_MAP.get(code, []):
+        if how == "bw":           # the latest session's body weight, only if it passed its check
+            bw = max(sessions, key=lambda s: s["date"])["bw"] if sessions else None
+            out[box] = "" if bw is None or bad_bw else f"{bw:g} kg"
+            continue
         m = next((m for m in getattr(res, "measures", []) if re.fullmatch(pattern, m["name"], re.I)), None)
         if not m or (bad_bw and PER_KG.search(f"{m['name']} [{m['unit']}]")):
             out[box] = ""
