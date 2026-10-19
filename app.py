@@ -909,7 +909,7 @@ def try_pdf_reader(pdf_bytes: bytes, assessment_type: str):
     out = {"result": result, "found": None, "mismatch": False, "by": ""}
     if reader is None or result.status not in ("ok", "check"):
         return out
-    if reader.APP_ASSESSMENT != assessment_type:
+    if (result.app_assessment or reader.APP_ASSESSMENT) != assessment_type:   # one reader can cover several tests (VALD Hub)
         out["mismatch"] = True
         return out
     out["found"] = {k: v for k, v in reader.app_fields(result).items() if v}
@@ -924,8 +924,12 @@ def show_reader_result(result, assessment_type: str):
         why = {"unknown_device": "it is not a device the reader knows", "no_text": "it is a picture or scan the reader could not read", "error": "it could not be opened"}.get(result.status, "it was not recognised")
         st.caption(f"The app's own reader could not read this PDF ({why}), so the AI was used instead, or you can enter the values by hand.")
         return
-    if reader.APP_ASSESSMENT != assessment_type:
-        st.warning(f"This PDF looks like a {result.device_label}, but \"{assessment_type}\" is selected. Choose \"{reader.APP_ASSESSMENT}\" above and upload it there, so the right boxes are filled.")
+    belongs_to = result.app_assessment or reader.APP_ASSESSMENT
+    if not belongs_to:
+        st.warning(f"This PDF looks like a {result.device_label}, but the app has no form for that test yet. Enter the values by hand.")
+        return
+    if belongs_to != assessment_type:
+        st.warning(f"This PDF looks like a {result.device_label}, but \"{assessment_type}\" is selected. Choose \"{belongs_to}\" above and upload it there, so the right boxes are filled.")
         return
     errors = [c for c in result.checks if c.severity == "error"]
     failed = [c for c in errors if not c.ok]
@@ -1986,35 +1990,40 @@ ASSESSMENTS = {
             [("Respiration Rate (breaths/min)", "12 breaths/min", "Respiration Rate"), ("Blood Pressure (mmHg)", "118/76 mmHg", "Blood Pressure")],
         ],
     },
+    # VALD ForceDecks: the boxes match the measures in the clinic's VALD Hub reports (pdf_reader/vald_hub.py fills them).
+    # Best rep for strength and power; average for time to stand, left/right asymmetry and balance (agreed 2026-10-19).
     "VALD ForceDecks - Sit-to-Stand": {
         "columns": [
-            [("Peak Concentric Force (N)", "780 N", "Peak Concentric Force"), ("Transition Time (s)", "0.62 s", "Transition Time")],
-            [("Concentric RFD (N/s)", "1450 N/s", "Concentric RFD"), ("Limb Asymmetry (%)", "4.2%", "Limb Asymmetry")],
+            [("Time to Stand, average of reps (s)", "1.7 s", "Time to Stand"), ("Peak Standing Force, best rep (N)", "924 N", "Peak Standing Force")],
+            [("Standing Force Asymmetry, average (% and side)", "2.9% L", "Limb Asymmetry"), ("Peak Standing RFD 100 ms, best rep (N/s)", "5660 N/s", "Peak Standing RFD")],
         ],
     },
     "VALD ForceDecks - Multi-Rep Squat": {
         "columns": [
-            [("Peak Force (N)", "849 N", "Peak Force"), ("Concentric Impulse (Ns)", "412 Ns", "Concentric Impulse")],
-            [("Eccentric Impulse (Ns)", "405 Ns", "Eccentric Impulse"), ("Left/Right Asymmetry (%)", "13.0%", "L/R Asymmetry")],
+            [("Peak Force, best rep (N)", "1053 N", "Peak Force")],
+            [("Concentric Peak Force Asymmetry, average (% and side)", "11% R", "L/R Asymmetry")],
         ],
     },
     "VALD ForceDecks - Single Leg Stance / Balance": {
         "columns": [
-            [("Left Sway Velocity (mm/s)", "14.2 mm/s", "Left Sway Velocity"), ("Right Sway Velocity (mm/s)", "12.8 mm/s", "Right Sway Velocity")],
-            [("Left Ellipse Area (mm²)", "185 mm²", "Left Ellipse Area"), ("Right Ellipse Area (mm²)", "160 mm²", "Right Ellipse Area")],
+            [("Left: Total Excursion (mm)", "517 mm", "Left Total Excursion"), ("Left: Sway Velocity (mm/s)", "34 mm/s", "Left Sway Velocity"),
+             ("Left: Side-to-Side Sway (mm)", "30 mm", "Left Side-to-Side Sway"), ("Left: Front-to-Back Sway (mm)", "50 mm", "Left Front-to-Back Sway")],
+            [("Right: Total Excursion (mm)", "498 mm", "Right Total Excursion"), ("Right: Sway Velocity (mm/s)", "33 mm/s", "Right Sway Velocity"),
+             ("Right: Side-to-Side Sway (mm)", "34 mm", "Right Side-to-Side Sway"), ("Right: Front-to-Back Sway (mm)", "43 mm", "Right Front-to-Back Sway")],
         ],
     },
     "VALD ForceDecks - Countermovement Jump (CMJ)": {
         "columns": [
-            [("Jump Height (cm)", "34.5 cm", "Jump Height"), ("Peak Power / Mass (W/kg)", "48.2 W/kg", "Peak Power/Mass")],
-            [("Modified RSI", "0.58", "Modified RSI"), ("Peak Force Asymmetry (%)", "3.8%", "Peak Force Asymmetry")],
-            [("Eccentric Peak Force (N)", "1420 N", "Eccentric Peak Force"), ("Eccentric RFD (N/s)", "4200 N/s", "Eccentric RFD")],
+            [("Jump Height, best rep (cm)", "34.5 cm", "Jump Height"), ("Peak Power / Body Mass, best rep (W/kg)", "48.2 W/kg", "Peak Power/Mass")],
+            [("Modified RSI, best rep", "0.58", "Modified RSI"), ("Flight Time : Contraction Time, best rep", "0.4", "Flight Time:Contraction Time")],
+            [("Concentric Peak Force Asymmetry, average (% and side)", "14% L", "Peak Force Asymmetry"),
+             ("Eccentric Braking Impulse Asymmetry, average (% and side)", "1.1% L", "Braking Impulse Asymmetry")],
         ],
     },
     "VALD ForceDecks - Quiet Stand (Balance)": {
         "columns": [
-            [("Total Path Length (mm)", "310 mm", "Total Path Length"), ("Mean Velocity (mm/s)", "5.2 mm/s", "Mean Velocity")],
-            [("AP Sway Range (mm)", "24.5 mm", "AP Sway Range"), ("Weight Distribution Asymmetry (%)", "2.1%", "Weight Distribution Asymmetry")],
+            [("Total Path Length, average (mm)", "123 mm", "Total Path Length"), ("Mean Velocity, average (mm/s)", "8 mm/s", "Mean Velocity")],
+            [("Side-to-Side Sway, average (mm)", "7 mm", "Side-to-Side Sway"), ("Front-to-Back Sway, average (mm)", "27 mm", "AP Sway Range")],
         ],
     },
 }

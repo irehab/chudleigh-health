@@ -152,6 +152,7 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
     first = all_words[0]
     code = next((w["text"] for w in first if w["top"] < 40 and w["x0"] > 600 and w["size"] > 15), "")
     res.device_label = f"{LABEL}: {code or 'unknown test'}"
+    res.test_code = code
     res.app_assessment = TESTS.get(code, "")
     if not res.app_assessment:
         res.notes.append(f"Could not read: which ForceDecks test this is ('{code}' is not one the app knows yet)")
@@ -209,10 +210,19 @@ def _close(a: float, b: float, printed: float, label_decimals: int = 3) -> bool:
     return abs(a - b) <= max(tol, abs(printed) * 0.005)
 
 
+BW_PLAUSIBLE = (35.0, 200.0)     # kg: outside this, the body weight on the plate was probably entered or measured wrongly
+
+
 def run_checks(res: ReadResult) -> list:
     checks: list = []
     reps_by_date = {s["date"].strftime("%d/%m/%Y"): s["reps"] for s in getattr(res, "sessions", [])}
-    one_session = len(reps_by_date) == 1
+    # the squat's table counts reps differently from its charts (confirmed by the clinic: the charts show every squat), so it is not compared
+    one_session = len(reps_by_date) == 1 and getattr(res, "test_code", "") != "SQT"
+    for s in getattr(res, "sessions", []):
+        if s["bw"] is not None:
+            lo, hi = BW_PLAUSIBLE
+            checks.append(Check(f"body weight on the plate looks right ({s['date']:%d/%m/%Y})", lo <= s["bw"] <= hi,
+                                f"{s['bw']:g} kg. Results per kg (such as W/kg) are worked out from this weight, so check it in VALD Hub if it is wrong"))
     for m in getattr(res, "measures", []):
         label = m["name"] + (f" ({'left' if m['side'] == 'L' else 'right'})" if m["side"] and "(Left)" not in m["name"] and "(Right)" not in m["name"] else "")
         s, pts = m["summary"], m["points"]
@@ -255,6 +265,53 @@ def run_checks(res: ReadResult) -> list:
     return checks
 
 
+# Which value goes in each of the app's boxes. Agreed with the clinic on 2026-10-19: the best rep for strength and power,
+# the average for time to stand, left/right asymmetry and balance. Each entry: (box, measure name as printed, how).
+#   best_max / best_min: the highest / lowest rep   average: the printed average   latest: the latest session's value (balance by date)
+FIELD_MAP = {
+    "CMJ": [("Jump Height", r"Jump Height.*", "best_max"), ("Peak Power/Mass", r"Peak Power / BM", "best_max"),
+            ("Modified RSI", r"RSI-?modified|RSI ?mod", "best_max"), ("Flight Time:Contraction Time", r"Flight Time:Contraction Time", "best_max"),
+            ("Peak Force Asymmetry", r"Concentric Peak Force Asymmetry", "average"), ("Braking Impulse Asymmetry", r"Eccentric Braking Impulse Asymmetry", "average")],
+    "SQT": [("Peak Force", r"Peak Force", "best_max"), ("L/R Asymmetry", r"Concentric Peak Force Asymmetry", "average")],
+    "STSTS": [("Time to Stand", r"Time to Stand", "average"), ("Peak Standing Force", r"Peak Standing Force", "best_max"),
+              ("Limb Asymmetry", r"Peak Standing Force Asymmetry", "average"), ("Peak Standing RFD", r"Peak Standing RFD.*", "best_max")],
+    "SLSB": [(f"{side} {box}", rf"{name} \({side}\)", "latest") for side in ("Left", "Right")
+             for box, name in (("Total Excursion", "Total Excursion"), ("Sway Velocity", "Mean Velocity"),
+                               ("Side-to-Side Sway", "CoP Range - Medial-Lateral"), ("Front-to-Back Sway", "CoP Range - Anterior-Posterior"))],
+    "QSB": [("Total Path Length", r"Total Excursion", "average"), ("Mean Velocity", r"Mean Velocity", "average"),
+            ("Side-to-Side Sway", r"CoP Range - Medial-Lateral", "average"), ("AP Sway Range", r"CoP Range - Anterior-Posterior", "average")],
+}
+PER_KG = re.compile(r"/\s*(BM|kg)\b|W/kg", re.I)
+
+
+def _show(value: float, unit: str, asymmetry: bool) -> str:
+    if asymmetry:
+        return "0%" if value == 0 else f"{abs(value):g}% {'L' if value < 0 else 'R'}"
+    unit = {"% L,R": "%"}.get(unit, unit)
+    return f"{value:g} {unit}".strip() if unit and unit != "%" else (f"{value:g}%" if unit == "%" else f"{value:g}")
+
+
 def app_fields(res: ReadResult) -> dict:
-    """Provisional: which report values fill which boxes on the app's form. To be agreed with the clinic before it is used."""
-    return {}
+    """The app's boxes for this test, filled from the report. A box whose measure is not in the report stays empty.
+    Per-kg results are left empty when the body weight on the plate failed its check (they would be wrong)."""
+    code = getattr(res, "test_code", "")
+    bad_bw = any(not c.ok and c.name.startswith("body weight") for c in res.checks)
+    sessions = getattr(res, "sessions", [])
+    latest = max(sessions, key=lambda s: s["date"])["date"].strftime("%d/%m/%Y") if sessions else None
+    out = {}
+    for box, pattern, how in FIELD_MAP.get(code, []):
+        m = next((m for m in getattr(res, "measures", []) if re.fullmatch(pattern, m["name"], re.I)), None)
+        if not m or (bad_bw and PER_KG.search(f"{m['name']} [{m['unit']}]")):
+            out[box] = ""
+            continue
+        vals = [p["value"] for p in m["points"]]
+        if how == "latest":
+            value = next((p["value"] for p in m["points"] if p["at"] == latest), None)
+        elif how == "average":
+            value = m["summary"]["average"] if m["summary"] else None
+        elif vals:
+            value = max(vals) if how == "best_max" else min(vals)
+        else:
+            value = None
+        out[box] = "" if value is None else _show(value, m["unit"], m["asymmetry"])
+    return out
