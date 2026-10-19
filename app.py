@@ -1172,7 +1172,7 @@ def reset_measurement_inputs():
         if isinstance(k, str) and k.startswith(("in::", "verified::", "raw::")):
             del st.session_state[k]
     for k in ("autofill_done", "autofill_unverified", "autofill_log", "reader_view", "ai_used", "ai_last", "ai_usage", "ai_last_usage",
-              "cmp_excluded", "cmp_note", "cmp_note_by", "p_age", "p_sex", "p_height"):
+              "cmp_excluded", "cmp_note", "cmp_note_by", "cmp_interpretation", "cmp_links_show", "p_age", "p_sex", "p_height"):
         st.session_state.pop(k, None)
 
 
@@ -2401,6 +2401,13 @@ REPORT_TEMPLATE = """
 """
 
 
+def report_links(tests, tiles, state):
+    """(linked findings, clinician's interpretation) for the participant's page. Only results whose tiles are on the page are linked,
+    and the links are left out if the clinician unticked them."""
+    links = norms.dashboard.linked_findings(tests, {t.key for t in tiles}) if state.get("cmp_links_show", True) else []
+    return links, clean_note(state.get("cmp_interpretation", ""), NOTE_MAX)
+
+
 def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by="", preview=False, exclude=(), files_shared=False):
     """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state.
 
@@ -2410,7 +2417,9 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         lib = dashboard_library()
         tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude, approvals=approval_hashes())
         meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
-        return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview, files_shared=files_shared), {k: "" for k in TEXT_KEYS}
+        links, interpretation = report_links(tests, tiles, state)
+        return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview, files_shared=files_shared,
+                                             links=links, interpretation=interpretation), {k: "" for k in TEXT_KEYS}
     tests_html = ""
     for idx, t in enumerate(tests):
         items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
@@ -3211,6 +3220,26 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 st.text_input("Sign it as", key="cmp_note_by", max_chars=60, placeholder="e.g. John (leave blank for 'Your clinician')")
             if report_note and not dash_tiles:
                 st.warning("Your personal note will not appear in the report, because none of the results have approved wording yet.")
+
+            # --- LINKED FINDINGS: results from different tests that point the same way ---
+            all_links = norms.dashboard.linked_findings(st.session_state.participant_tests)
+            shown_links = norms.dashboard.linked_findings(st.session_state.participant_tests, {t.key for t in dash_tiles})
+            st.markdown("#### 🔗 Linked findings")
+            if all_links:
+                st.caption("Results from different tests that point to the same side or the same thing. They are only put side by side: "
+                           "nothing here says why. Add your interpretation below.")
+                for g in all_links:
+                    in_report = any(g["title"] == s["title"] for s in shown_links)
+                    st.markdown(f"**{g['title']}**" + ("" if in_report else " _(not in the report yet: some of these results are drafts or left out)_"))
+                    for item in g["items"]:
+                        st.markdown(f"- {item}")
+                st.checkbox("Show the linked findings in the participant's report", value=True, key="cmp_links_show")
+            else:
+                st.caption("No results from different tests point the same way for this participant.")
+            st.text_area("Clinical interpretation (optional)", key="cmp_interpretation", max_chars=NOTE_MAX, height=140,
+                         placeholder="e.g. The lower muscle and the weaker push on the left leg fit with the knee problem you told me about. We will...",
+                         help="Shown under the linked findings in the participant's report, in your own words, signed with the name above. "
+                              "Plain text. It is never sent to any AI service.")
         st.divider()
     else:
         # --- COMPARISON WITH REFERENCE DATA ---
@@ -3340,6 +3369,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     # the note is only kept if it was actually shown to the participant
                     "clinician_note": report_note if note_shown else "",
                     "clinician_note_by": report_note_by if (report_note and note_shown) else "",
+                    # the linked findings and interpretation exactly as on the participant's page (dashboard mode only)
+                    **(dict(zip(("linked_findings", "clinical_interpretation"), report_links(st.session_state.participant_tests, dash_tiles, st.session_state)))
+                       if REPORT_MODE == "dashboard" and NORMS_AVAILABLE else {}),
                     "report_mode": REPORT_MODE,
                     "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
                     "wording": {t.key: t.hash for t in dash_tiles} if REPORT_MODE == "dashboard" else {},

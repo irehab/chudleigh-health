@@ -578,6 +578,85 @@ def force_plate_balance(row: Row, tests: list):
     return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), facts, parts
 
 
+# ------------------------------------------------------------------------------------------------------------------------ linked findings
+# Results from different tests that point the same way, shown side by side. Nothing here claims a cause: it only puts them together,
+# and the clinician adds their own interpretation. Each finding belongs to the tile it comes from, so a tile that is not shown
+# (not approved, or left out) adds nothing to the participant's report.
+LINK_MIN_PCT = 5.0          # a left/right difference smaller than this is not counted as one side being lower
+LINK_MIN_DEGREES = 0.5      # phase angle difference between limbs
+
+
+def _side_findings(tests: list) -> list:
+    """[(side, limb, source, tile key, sentence)]: every result that points to one side's arm or leg."""
+    out = []
+    tan = _device_data("tanita:", tests)
+    flags = _limb_flags(tan.get(LIMB_FLAGS_BOX, ""))
+    for limb in ("arm", "leg"):
+        r, l = _num(str(tan.get(f"Right {limb.capitalize()} Muscle", ""))), _num(str(tan.get(f"Left {limb.capitalize()} Muscle", "")))
+        marked = {side for side in ("right", "left") if flags.get((side, limb)) == "low"}
+        if r and l:
+            diff = abs(r - l) / max(r, l) * 100
+            lower = "left" if l < r else ("right" if r < l else None)
+            for side in ({lower} if lower and diff >= LINK_MIN_PCT else set()) | marked:
+                mine, other = (l, r) if side == "left" else (r, l)
+                text = f"Tanita: less muscle in the {side} {limb} ({mine:g} kg against {other:g} kg)"
+                out.append((side, limb, "tanita", "limb_balance", text + (", and the Tanita marks it as lower than normal" if side in marked else "")))
+        else:
+            for side in marked:
+                out.append((side, limb, "tanita", "limb_balance", f"Tanita: the {side} {limb} muscle is marked as lower than normal"))
+        pr, pl = _num(str(tan.get(f"Right {limb.capitalize()} Phase Angle", ""))), _num(str(tan.get(f"Left {limb.capitalize()} Phase Angle", "")))
+        if pr and pl and abs(pr - pl) >= LINK_MIN_DEGREES:
+            side = "left" if pl < pr else "right"
+            mine, other = (pl, pr) if side == "left" else (pr, pl)
+            out.append((side, limb, "tanita_phase", "phase_angle_limbs", f"Tanita: lower phase angle in the {side} {limb} ({mine:g}° against {other:g}°)"))
+    for dev, box, test, action in FP_ASYMMETRY:
+        got = _asym(_device_data(f"{dev}:", tests).get(box, ""))
+        if got and got[1] and got[0] >= LINK_MIN_PCT:
+            side = "right" if got[1] == "L" else "left"
+            out.append((side, "leg", dev, "fp_balance", f"{test.capitalize()} ({action}): the {side} side did {got[0]:g}% less"))
+    slsb = _device_data("vald_slsb:", tests)
+    left, right = _num(str(slsb.get("Left Sway Velocity", ""))), _num(str(slsb.get("Right Sway Velocity", "")))
+    if left and right and left != right:
+        pct = abs(left - right) / max(left, right) * 100
+        if pct >= LINK_MIN_PCT:
+            side = "left" if left > right else "right"
+            out.append((side, "leg", "vald_slsb", "fp_balance", f"Single-leg balance: more sway standing on the {side} leg ({pct:.0f}% more)"))
+    return out
+
+
+def _strength_findings(tests: list) -> list:
+    """[(source, tile key, sentence)]: results that relate to leg strength being on the low side."""
+    out = []
+    tan = _device_data("tanita:", tests)
+    if str(tan.get("Leg Muscle Score Zone", "")).strip().lower() == "orange":
+        score = str(tan.get("Leg Muscle Score", "")).strip()
+        out.append(("tanita", "leg_score", f"Tanita: leg muscle score{' ' + score if score else ''} is below the line for your age"))
+    legs = [(_num(str(tan.get(f"{s} Leg Phase Angle", ""))), s.lower()) for s in ("Right", "Left")]
+    low = [f"{side} {v:g}°" for v, side in legs if v is not None and v < 7]
+    if low:
+        out.append(("tanita_phase", "phase_angle_limbs", "Tanita: leg phase angle below the healthy mark of 7° (" + ", ".join(low) + ")"))
+    for dev in ("vald_cmj", "vald_squat", "vald_sts"):
+        p = _num(str(_device_data(f"{dev}:", tests).get("VALD Percentile", "")))
+        if p is not None and p < 25:
+            out.append((dev, "fp_strength", f"{DEVICE_NAMES[dev]}: {_ordinal(p)} percentile for your age and sex"))
+    return out
+
+
+def linked_findings(tests: list, shown_keys=None) -> list:
+    """Groups of results from at least two different tests that point the same way:
+    [{"title": "Your left leg", "items": [sentence, ...]}]. shown_keys: only use findings from these tiles (None = all, for the clinician)."""
+    keep = (lambda key: True) if shown_keys is None else (lambda key: key in shown_keys)
+    groups = {}
+    for side, limb, source, key, text in _side_findings(tests):
+        if keep(key):
+            groups.setdefault(f"Your {side} {limb}", []).append((source, text))
+    strength = [(source, text) for source, key, text in _strength_findings(tests) if keep(key)]
+    out = [{"title": title, "items": [t for _s, t in items]} for title, items in groups.items() if len({s for s, _t in items}) >= 2]
+    if len({s for s, _t in strength}) >= 2:
+        out.append({"title": "Leg strength", "items": [t for _s, t in strength]})
+    return out
+
+
 def _pick(row: Row, light: str, status: str = ""):
     if light == GREY:
         t = row.text["info"]
@@ -743,6 +822,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Ar
 .sources{margin-top:18px;font-size:13px;color:#334155}.sources h2{font-size:16px;color:var(--primary)}.sources ul{padding-left:20px}.sources li{margin-bottom:8px}
 .footer{text-align:center;padding:18px;background:#f1f5f9;font-size:12px;color:var(--muted);border-top:1px solid var(--border)}
 .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted);margin:8px 0 0}
+.links{background:#f8fafc;border:1px solid var(--border);border-left:5px solid var(--secondary);border-radius:12px;padding:18px 20px;margin-bottom:24px}
+.links h2{margin:0 0 4px;color:var(--primary);font-size:19px}.links .intro{margin:0 0 12px;color:var(--muted);font-size:14px}
+.link-group{background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:10px}
+.link-group h3{margin:0 0 6px;font-size:16px;color:var(--primary)}.link-group ul{margin:0;padding-left:20px}.link-group li{margin:3px 0}
+.interp{margin-top:12px;padding:12px 14px;background:#fff;border:1px dashed var(--secondary);border-radius:10px}
+.interp h3{margin:0 0 6px;color:var(--primary);font-size:16px}.interp p{margin:0 0 8px}.interp .by{font-weight:700;color:var(--primary)}
 """
 
 
@@ -776,6 +861,26 @@ def _note_html(note: str, by: str, S: dict) -> str:
     return f'<div class="note"><h3>{esc(S.get("note_heading", ""))}</h3>{body}<p class="by">{esc("- " + (str(by).strip() or "Your clinician"))}</p></div>'
 
 
+LINKS_HEADING = "Results that point the same way"
+LINKS_INTRO = "Some of your results from different tests point in the same direction. They are shown together so you and your clinician can look at them side by side. On their own they do not explain why."
+INTERPRETATION_HEADING = "Your clinician's interpretation"
+
+
+def _links_html(links: list, interpretation: str, by: str, S: dict) -> str:
+    """The linked findings and the clinician's interpretation of them. Empty if there is neither."""
+    paras = [p.strip() for p in str(interpretation or "").replace("\r\n", "\n").split("\n\n") if p.strip()]
+    if not links and not paras:
+        return ""
+    groups = "".join(f'<div class="link-group"><h3>{esc(g["title"])}</h3><ul>' + "".join(f"<li>{esc(i)}</li>" for i in g["items"]) + "</ul></div>"
+                     for g in links or [])
+    note = ""
+    if paras:
+        body = "".join("<p>" + "<br>".join(esc(line) for line in p.split("\n")) + "</p>" for p in paras)
+        note = f'<div class="interp"><h3>{esc(S.get("interpretation_heading") or INTERPRETATION_HEADING)}</h3>{body}<p class="by">{esc("- " + (str(by).strip() or "Your clinician"))}</p></div>'
+    intro = f'<p class="intro">{esc(S.get("links_intro") or LINKS_INTRO)}</p>' if links else ""
+    return f'<div class="links"><h2>{esc(S.get("links_heading") or LINKS_HEADING)}</h2>{intro}{groups}{note}</div>'
+
+
 def _sources_html(tiles: list, S: dict) -> str:
     used = []
     for t in tiles:
@@ -793,7 +898,7 @@ def _sources_html(tiles: list, S: dict) -> str:
 
 
 def render_report(meta: dict, tiles: list, library: Library, note: str = "", note_by: str = "", hidden: list | None = None, preview: bool = False,
-                  files_shared: bool = False) -> str:
+                  files_shared: bool = False, links: list | None = None, interpretation: str = "", interpretation_by: str = "") -> str:
     """The whole page, as one self-contained HTML document. meta: participant_name, age_gender, assessment_date, body_mass_height."""
     S = library.summary
     summary = summarize(tiles, S)
@@ -830,5 +935,6 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
             f'<div><label>Age / sex</label><span>{esc(meta.get("age_gender", ""))}</span></div>'
             f'<div><label>Assessment date</label><span>{esc(meta.get("assessment_date", ""))}</span></div>'
             f'<div><label>Body mass / height</label><span>{esc(meta.get("body_mass_height", ""))}</span></div></div>'
-            f'{banner}{_note_html(note, note_by, S)}{head}{prio}{tap}{sections}{how}{_sources_html(tiles, S)}</div>'
+            f'{banner}{_note_html(note, note_by, S)}{head}{prio}{_links_html(links, interpretation, interpretation_by or note_by, S)}{tap}{sections}{how}'
+            f'{_sources_html(tiles, S)}</div>'
             f'<div class="footer">{esc(S.get("disclosure", ""))}<br>{version}</div></div></body></html>')
