@@ -50,6 +50,7 @@ class ReadResult:
     used_ocr: bool = False
     has_text_layer: bool = False
     text_lines: list = field(default_factory=list)  # only when asked for; NOT cleaned of names
+    app_assessment: str = ""  # for readers that cover several of the app's assessments (VALD Hub): the one this report belongs to
 
     def to_dict(self) -> dict:
         return {
