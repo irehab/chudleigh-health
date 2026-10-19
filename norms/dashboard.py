@@ -45,7 +45,7 @@ FP_ASYMMETRY = [("vald_sts", "Limb Asymmetry", "sit-to-stand", "standing up"),
                 ("vald_cmj", "Braking Impulse Asymmetry", "jump", "dipping down before the jump")]
 # rule 'zone': a value whose light is the colour the device itself draws it in. 'members' names the box holding that colour (green or orange).
 # rule 'parts': several boxes from the same device, each given a light from the row's ranges; the tile shows the worst. 'members' lists the boxes.
-ZONE_LIGHTS = {"green": "green", "orange": "amber"}
+ZONE_LIGHTS = {"green": "green", "orange": "amber", "normal": "green", "high": "green", "low": "amber"}   # chart colours, or the band the device prints
 # rule 'limbs': left-right muscle balance from the Tanita's segmental analysis. The light for arms and for legs comes from the difference
 # between the two sides (as a % of the bigger side) against the row's green/amber ranges, and is at least amber when the Tanita itself
 # marks a limb outside its normal band (the 'Limb Flags' box, e.g. 'left leg low').
@@ -624,10 +624,16 @@ def _side_findings(tests: list) -> list:
     return out
 
 
-def _strength_findings(tests: list) -> list:
-    """[(source, tile key, sentence)]: results that relate to leg strength being on the low side."""
+def _strength_findings(tests: list, comparisons=None) -> list:
+    """[(source, tile key, sentence)]: results that relate to muscle or strength being on the low side (EWGSOP2 looks at both together)."""
     out = []
     tan = _device_data("tanita:", tests)
+    if str(tan.get("Muscle Mass Band", "")).strip().lower() == "low":
+        out.append(("tanita_muscle", "muscle_mass", f"Tanita: muscle mass{' ' + str(tan.get('Muscle Mass', '')).strip() if tan.get('Muscle Mass') else ''} "
+                                                    "is rated low for your age, sex and height"))
+    asm = next((c for c in comparisons or [] if c.get("key") == "asm_index" and c.get("status") == BELOW), None)
+    if asm:
+        out.append(("tanita_asm", "asm_index", f"Arm and leg muscle: {asm['value_text']}, under the European low-muscle line"))
     if str(tan.get("Leg Muscle Score Zone", "")).strip().lower() == "orange":
         score = str(tan.get("Leg Muscle Score", "")).strip()
         out.append(("tanita", "leg_score", f"Tanita: leg muscle score{' ' + score if score else ''} is below the line for your age"))
@@ -642,7 +648,7 @@ def _strength_findings(tests: list) -> list:
     return out
 
 
-def linked_findings(tests: list, shown_keys=None) -> list:
+def linked_findings(tests: list, shown_keys=None, comparisons=None) -> list:
     """Groups of results from at least two different tests that point the same way:
     [{"title": "Your left leg", "items": [sentence, ...]}]. shown_keys: only use findings from these tiles (None = all, for the clinician)."""
     keep = (lambda key: True) if shown_keys is None else (lambda key: key in shown_keys)
@@ -650,10 +656,10 @@ def linked_findings(tests: list, shown_keys=None) -> list:
     for side, limb, source, key, text in _side_findings(tests):
         if keep(key):
             groups.setdefault(f"Your {side} {limb}", []).append((source, text))
-    strength = [(source, text) for source, key, text in _strength_findings(tests) if keep(key)]
+    strength = [(source, text) for source, key, text in _strength_findings(tests, comparisons) if keep(key)]
     out = [{"title": title, "items": [t for _s, t in items]} for title, items in groups.items() if len({s for s, _t in items}) >= 2]
     if len({s for s, _t in strength}) >= 2:
-        out.append({"title": "Leg strength", "items": [t for _s, t in strength]})
+        out.append({"title": "Muscle and strength", "items": [t for _s, t in strength]})
     return out
 
 
@@ -713,9 +719,11 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 light, shown_text, zone = got
                 head, text, do = _pick(row, light)
                 facts = [row.facts.replace("{value}", shown_text)]
-                if zone in ZONE_LIGHTS:
+                if zone in ("green", "orange"):
                     facts.append(f"On the Tanita's chart it sits in the {zone} area, "
                                  + ("at or above the line expected for your age." if zone == "green" else "below the line expected for your age."))
+                elif zone in ZONE_LIGHTS:
+                    facts.append(f"The Tanita rates this as {zone} for your age, sex and height.")
                 tile = Tile(row.key, row.group, row.title, light, shown_text, row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown,
                             row.priority, row.order, hash=row.hash)
         elif row.rule == "parts":

@@ -100,6 +100,16 @@ SOURCES = {
         "population": "Not taken from a study.",
         "note": "These cut-offs are the clinic's own working guide. They are not a published standard.",
     },
+    "ewgsop2": {
+        "short": "Low muscle: the European sarcopenia guidance (EWGSOP2, 2019)",
+        "citation": ("Cruz-Jentoft AJ, Bahat G, Bauer J, et al. Sarcopenia: revised European consensus on definition and diagnosis. "
+                     "Age and Ageing 2019;48(1):16-31. Table 3: low muscle quantity is arm and leg muscle (appendicular skeletal muscle) under 20 kg "
+                     "for men and 15 kg for women, or under 7.0 kg/m2 for men and 5.5 kg/m2 for women once divided by height squared."),
+        "url": "https://doi.org/10.1093/ageing/afy169",
+        "population": "A consensus of European experts, drawing on studies of older adults. The cut-offs come mainly from DXA scans.",
+        "note": ("A body composition scale estimates muscle in a different way from DXA, and hydration can affect it, so the result is a guide. "
+                 "The guidance looks at muscle strength first, and muscle quantity second."),
+    },
     "vald_hub_norms": {
         "short": "VALD Hub: percentiles for your age and sex",
         "citation": ("The percentiles shown in VALD Hub for your ForceDecks results, which compare them with VALD's own reference data for people "
@@ -180,6 +190,8 @@ FAT = {  # (at BMI 18.5, at BMI 25, at BMI 30)
 
 # ---- BMI, WHO adult groups
 BMI_LIMITS = (18.5, 25.0, 30.0)
+# ---- EWGSOP2 (Cruz-Jentoft 2019) Table 3: low muscle quantity. {sex: (ASM kg below which is low, ASM / height squared kg/m2 below which is low)}
+EWGSOP2_LOW_MUSCLE = {"male": (20.0, 7.0), "female": (15.0, 5.5)}
 
 # ---- Oxygen level (SpO2): lowest value that is usual
 SPO2_ADULT_LOWER = 95   # healthy adults under 65 (typical range 95 to 99%)

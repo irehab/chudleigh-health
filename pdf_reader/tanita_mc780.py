@@ -18,6 +18,7 @@ KG, PCT, NUM, DEG = r"[\d.]+kg", r"[\d.]+%", r"[\d.]+", r"[\d.]+°"
 _SEGMENTS = [("trunk", "Trunk"), ("right arm", "Rightarm"), ("left arm", "Leftarm"), ("right leg", "Rightleg"), ("left leg", "Leftleg")]
 _LIMBS = _SEGMENTS[1:]
 VISCERAL_BANDS = ("Healthy", "High", "Very high")   # the three parts of the visceral fat bar, as printed above it
+MUSCLE_BANDS = ("Low", "Normal", "High")             # the muscle mass bar: Tanita's band for the person's age, sex and height
 
 
 def visceral_band(level: float) -> str:
@@ -206,6 +207,12 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
         v["Visceral fat band (as drawn on the report)"] = Value(text=VISCERAL_BANDS[drawn[1]], number=None, unit="", source="graphic")
     else:
         res.notes.append("Could not read: the visceral fat bar (which band it is drawn in)")
+    mlab = p.label("Musclemass", A)
+    drawn = _bar_reading(bars, 130, 345, mlab["top"] - 2, mlab["top"] + 14) if mlab else None
+    if drawn:
+        v["Muscle mass band (as drawn on the report)"] = Value(text=MUSCLE_BANDS[drawn[1]], number=None, unit="", source="graphic")
+    else:
+        res.notes.append("Could not read: the muscle mass bar (which band it is drawn in)")
     for key, lab in _LIMBS:
         anchor = p.label(lab, (30, 300, 440, 570))
         x0, x1 = (0, 150) if key.startswith("right") else (150, 300)       # muscle half of the page: right limbs on the left, left limbs on the right
@@ -297,5 +304,6 @@ def app_fields(res: ReadResult) -> dict:
             "Right Arm Muscle": d("Muscle, right arm (kg)"), "Left Arm Muscle": d("Muscle, left arm (kg)"),
             "Right Leg Muscle": d("Muscle, right leg (kg)"), "Left Leg Muscle": d("Muscle, left leg (kg)"), "Limb Flags": flags,
             "Leg Muscle Score": d("Leg muscle score"), "Leg Muscle Score Zone": d("Leg muscle score zone (as drawn on the chart)"),
+            "Muscle Mass Band": d("Muscle mass band (as drawn on the report)"),
             "Right Arm Phase Angle": d("Phase angle, right arm (°)"), "Left Arm Phase Angle": d("Phase angle, left arm (°)"),
             "Right Leg Phase Angle": d("Phase angle, right leg (°)"), "Left Leg Phase Angle": d("Phase angle, left leg (°)")}

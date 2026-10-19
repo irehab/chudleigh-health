@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-19.3"
+NORMS_VERSION = "2026-10-19.4"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -45,6 +45,7 @@ PATIENT_TEXT = {
     "bmi": ("BMI", "A rough measure of whether your weight suits your height."),
     "age_level": ("Skin AGE level", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
     "age_bodyage": ("Skin age estimate (BodyAge)", "The age at which an average person has your skin AGE level, according to the AGE Reader."),
+    "asm_index": ("Arm and leg muscle (sarcopenia check)", "The muscle in your arms and legs, compared with your height."),
 }
 
 
@@ -127,6 +128,11 @@ def measures_from_tests(tests: list, height_cm: float | None = None) -> dict:
                 bmi, calculated = round(weight / (height_cm / 100.0) ** 2, 1), True
             if bmi is not None:
                 out["bmi"] = {"value": bmi, "assessment": a, "calculated": calculated}
+            limbs = [_num(d.get(f"{side} {limb} Muscle")) for side in ("Right", "Left") for limb in ("Arm", "Leg")]
+            if all(x is not None and x > 0 for x in limbs):
+                asm = round(sum(limbs), 1)
+                h = height_cm or _extra_num(t, "Height (cm)")           # the height entered by the clinician, or the one printed on the Tanita
+                out["asm_index"] = {"value": round(asm / (h / 100.0) ** 2, 1) if h else asm, "asm": asm, "height_cm": h, "assessment": a, "calculated": True}
         elif a == A_ECG:
             for key, field_name in (("ecg_hr", "Heart Rate"), ("ecg_pr", "PR Interval"), ("ecg_qrs", "QRS Duration")):
                 if _num(d.get(field_name)) is not None:
@@ -399,11 +405,43 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             detail=("If readings stay low, or you feel breathless, speak to your GP." if status == BELOW else ""),
         )
 
+    if key == "asm_index":
+        return _asm_index(m, sex)
+
     if key == "age_level":
         return _age_level(m, age)
     if key == "age_bodyage":
         return _age_bodyage(m, age)
     return _no_ref(key, key, a, v, "", "No reference data is available for this measure.")
+
+
+def _asm_index(m, sex) -> Comparison:
+    """EWGSOP2 low-muscle check: arm and leg muscle (from the Tanita's segments) divided by height squared, or in kg if there is no height."""
+    a, asm, h = m["assessment"], m["asm"], m.get("height_cm")
+    label = "Appendicular muscle (EWGSOP2 low-muscle check)"
+    unit = "kg/m²" if h else "kg"
+    if sex is None:
+        return _no_ref("asm_index", label, a, m["value"], unit, "A sex (male or female) is needed: the cut-offs differ for men and women.", True)
+    cut_kg, cut_idx = data.EWGSOP2_LOW_MUSCLE[sex]
+    cut = cut_idx if h else cut_kg
+    v = m["value"]
+    status = WITHIN if v >= cut else BELOW
+    who = "men" if sex == "male" else "women"
+    if h:
+        sentence = (f"The muscle in your arms and legs adds up to {_fmt(asm)} kg. Divided by your height squared, that is {_fmt(v)} kg/m². "
+                    f"The European guidance marks under {_fmt(cut)} kg/m² as low muscle for {who}. Yours is {'above' if status == WITHIN else 'under'} that line.")
+    else:
+        sentence = (f"The muscle in your arms and legs adds up to {_fmt(asm)} kg. The European guidance marks under {_fmt(cut)} kg as low muscle for {who}. "
+                    f"Yours is {'above' if status == WITHIN else 'under'} that line.")
+    if status == WITHIN:
+        headline, theme, words = "A good result", DOING_WELL, "Above the low-muscle line"
+        meaning = "That is above the line the guidance uses for low muscle, which is good."
+    else:
+        headline, theme, words = "Worth working on", WORK_ON, "Under the low-muscle line"
+        meaning = "That is under the line the guidance uses for low muscle. Your clinician will look at it together with your strength results."
+    return Comparison(key="asm_index", label=label, assessment=a, status=status, source="ewgsop2", value=v, value_text=_unit_text(v, unit), calculated=True,
+                      range_text=f"{_fmt(cut)} {unit} or more", group=who, headline=headline, sentence=sentence, meaning=meaning, theme=theme, status_text=words,
+                      detail="These cut-offs come mainly from DXA scans. A body composition scale estimates muscle differently, and hydration can affect it.")
 
 
 def _label_kind(label: str) -> str:
@@ -482,7 +520,7 @@ def _age_bodyage(m, age) -> Comparison:
                       status_text=words, detail="BodyAge comes from the AGE Reader's own reference group, which the report does not publish.")
 
 
-_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "age_level", "age_bodyage"]
+_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "age_level", "age_bodyage"]
 
 
 def _read_together(results: list):

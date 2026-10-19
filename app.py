@@ -1955,7 +1955,8 @@ ASSESSMENTS = {
              ("Right Leg Phase Angle", "5.0°", "Right Leg Phase Angle"), ("Left Leg Phase Angle", "5.0°", "Left Leg Phase Angle")],
         ],
         "full_width": [("Limbs the Tanita marks outside normal (orange bars under Segmented Analysis Muscle)", "left leg low, or none", "Limb Flags"),
-                       ("Leg muscle score: the area of the Tanita chart the score sits in (green or orange)", "orange", "Leg Muscle Score Zone")],
+                       ("Leg muscle score: the area of the Tanita chart the score sits in (green or orange)", "orange", "Leg Muscle Score Zone"),
+                       ("Muscle mass: the Tanita's band for age, sex and height (Low, Normal or High)", "Normal", "Muscle Mass Band")],
     },
     "Push-Up Assessment (VALD ForceDecks)": {
         "columns": [
@@ -2401,10 +2402,10 @@ REPORT_TEMPLATE = """
 """
 
 
-def report_links(tests, tiles, state):
+def report_links(tests, tiles, state, comparisons=None):
     """(linked findings, clinician's interpretation) for the participant's page. Only results whose tiles are on the page are linked,
     and the links are left out if the clinician unticked them."""
-    links = norms.dashboard.linked_findings(tests, {t.key for t in tiles}) if state.get("cmp_links_show", True) else []
+    links = norms.dashboard.linked_findings(tests, {t.key for t in tiles}, comparisons) if state.get("cmp_links_show", True) else []
     return links, clean_note(state.get("cmp_interpretation", ""), NOTE_MAX)
 
 
@@ -2417,7 +2418,7 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         lib = dashboard_library()
         tiles, hidden = norms.dashboard.build_tiles(tests, comparisons or [], lib, include_drafts=preview, exclude=exclude, approvals=approval_hashes())
         meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
-        links, interpretation = report_links(tests, tiles, state)
+        links, interpretation = report_links(tests, tiles, state, comparisons)
         return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview, files_shared=files_shared,
                                              links=links, interpretation=interpretation), {k: "" for k in TEXT_KEYS}
     tests_html = ""
@@ -3222,8 +3223,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 st.warning("Your personal note will not appear in the report, because none of the results have approved wording yet.")
 
             # --- LINKED FINDINGS: results from different tests that point the same way ---
-            all_links = norms.dashboard.linked_findings(st.session_state.participant_tests)
-            shown_links = norms.dashboard.linked_findings(st.session_state.participant_tests, {t.key for t in dash_tiles})
+            all_links = norms.dashboard.linked_findings(st.session_state.participant_tests, None, comparisons_all)
+            shown_links = norms.dashboard.linked_findings(st.session_state.participant_tests, {t.key for t in dash_tiles}, comparisons_all)
             st.markdown("#### 🔗 Linked findings")
             if all_links:
                 st.caption("Results from different tests that point to the same side or the same thing. They are only put side by side: "
@@ -3370,7 +3371,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     "clinician_note": report_note if note_shown else "",
                     "clinician_note_by": report_note_by if (report_note and note_shown) else "",
                     # the linked findings and interpretation exactly as on the participant's page (dashboard mode only)
-                    **(dict(zip(("linked_findings", "clinical_interpretation"), report_links(st.session_state.participant_tests, dash_tiles, st.session_state)))
+                    **(dict(zip(("linked_findings", "clinical_interpretation"), report_links(st.session_state.participant_tests, dash_tiles, st.session_state, comparisons)))
                        if REPORT_MODE == "dashboard" and NORMS_AVAILABLE else {}),
                     "report_mode": REPORT_MODE,
                     "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
