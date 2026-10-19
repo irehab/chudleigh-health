@@ -16,6 +16,68 @@ APP_ASSESSMENT = "Tanita Body Composition (MC-780MA)"
 
 KG, PCT, NUM, DEG = r"[\d.]+kg", r"[\d.]+%", r"[\d.]+", r"[\d.]+°"
 _SEGMENTS = [("trunk", "Trunk"), ("right arm", "Rightarm"), ("left arm", "Leftarm"), ("right leg", "Rightleg"), ("left leg", "Leftleg")]
+_LIMBS = _SEGMENTS[1:]
+VISCERAL_BANDS = ("Healthy", "High", "Very high")   # the three parts of the visceral fat bar, as printed above it
+
+
+def visceral_band(level: float) -> str:
+    """The band of Tanita's professional visceral fat scale, as drawn on this report: 1 to 9 healthy, 10 to 14 high, 15 and above very high."""
+    return "Healthy" if level < 10 else ("High" if level < 15 else "Very high")
+
+
+# ---- the coloured bars. Each bar has three grey parts (for a limb: below normal, normal, above normal), and a coloured fill
+# drawn over them up to the person's result. Tanita colours the fill green when the result is in its normal band and orange when it is not.
+def _fill_colour(curve):
+    f = curve.get("non_stroking_color")
+    if not isinstance(f, (list, tuple)) or len(f) != 3:
+        return None
+    r, g, b = (float(x) for x in f)
+    if abs(r - g) < 0.06 and abs(g - b) < 0.06:
+        return "grey"
+    if r > g and r > b:
+        return "orange"
+    if g > r and g > b:
+        return "green"
+    return None
+
+
+def _bars(data: bytes) -> list:
+    """Every bar shape on the page (long and thin), with its colour."""
+    import io
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        curves = list(pdf.pages[0].curves)
+    return [{"x0": c["x0"], "x1": c["x1"], "top": c["top"], "colour": _fill_colour(c)}
+            for c in curves if (c["x1"] - c["x0"]) > 15 and (c["bottom"] - c["top"]) < 4]
+
+
+def _bar_reading(bars: list, x0: float, x1: float, top: float, bottom: float):
+    """(colour, part) for the one three-part bar in this box: part 0, 1 or 2 is the part the coloured fill ends in. None if it is not clear."""
+    inside = [b for b in bars if x0 <= b["x0"] <= x1 and top <= b["top"] <= bottom]
+    parts = sorted({(round(b["x0"], 1), round(b["x1"], 1)) for b in inside if b["colour"] == "grey"})
+    fills = [b for b in inside if b["colour"] in ("green", "orange")]
+    colours = {b["colour"] for b in fills}
+    if len(parts) != 3 or len(colours) != 1:
+        return None
+    end = max(b["x1"] for b in fills)
+    part = next((i for i, (_s0, s1) in enumerate(parts) if end <= s1 + 0.5), 2)
+    return colours.pop(), part
+
+
+def limb_verdict(reading) -> str | None:
+    """'normal', 'low' or 'high' from a limb bar's colour and where its fill ends."""
+    if not reading:
+        return None
+    colour, part = reading
+    if colour == "green":
+        return "normal"
+    return {0: "low", 2: "high"}.get(part, "outside normal")
+
+
+def limb_flags_text(verdicts: dict) -> str:
+    """'left leg low' (or 'none'): the limbs the Tanita marks outside its normal band, in the words the dashboard reads."""
+    flagged = [f"{limb} {v}" for limb, v in verdicts.items() if v and v != "normal"]
+    return "; ".join(flagged) or "none"
 
 
 def matches(text_without_spaces: str) -> bool:
@@ -86,6 +148,26 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
     if m:
         v["Clothing allowance (kg)"] = make_value(m.group(1) + "kg")
 
+    # the coloured bars: which visceral fat band the result is drawn in, and the Tanita's verdict on each limb's muscle
+    try:
+        bars = _bars(data) if data else []
+    except Exception:
+        bars = []
+    vlab = p.label("Visceralfat", A)
+    drawn = _bar_reading(bars, 130, 345, vlab["top"] - 2, vlab["top"] + 14) if vlab else None
+    if drawn:
+        v["Visceral fat band (as drawn on the report)"] = Value(text=VISCERAL_BANDS[drawn[1]], number=None, unit="", source="graphic")
+    else:
+        res.notes.append("Could not read: the visceral fat bar (which band it is drawn in)")
+    for key, lab in _LIMBS:
+        anchor = p.label(lab, (30, 300, 440, 570))
+        x0, x1 = (0, 150) if key.startswith("right") else (150, 300)       # muscle half of the page: right limbs on the left, left limbs on the right
+        verdict = limb_verdict(_bar_reading(bars, x0, x1, anchor["top"] + 15, anchor["top"] + 40)) if anchor else None
+        if verdict:
+            v[f"Muscle, {key} (Tanita bar)"] = Value(text=verdict, number=None, unit="", source="graphic")
+        else:
+            res.notes.append(f"Could not read: the muscle bar for the {key}")
+
     res.values = {k: x for k, x in v.items() if x}
 
     # reference text the report itself prints (phase angle bands)
@@ -98,8 +180,8 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
         res.values["ECW/TBW ratio (calculated)"] = Value(text=f"{ecw / water:.3f}", number=round(ecw / water, 3), unit="", source="calculated")
     res.not_printed.append("ECW/TBW ratio (the report prints ECW and ICW, not the ratio; a calculated value is provided and marked as calculated)")
     res.notes.append(
-        "The coloured bars (weight, fat, BMI, muscle mass, body water, visceral fat, metabolic age, phase angle) show which band "
-        "the person is in only as a graphic. This reader cannot tell which band, so it makes no statement about it."
+        "Of the coloured bars, this reader reads the visceral fat bar (which band it is drawn in) and the four limb muscle bars (green = in "
+        "Tanita's normal band, orange = outside it). The other bars (weight, fat, BMI, muscle mass, body water, metabolic age) are not read."
     )
     res.notes.append("Sex is drawn as a symbol on this report, not printed as text, so it is not read. Enter it separately.")
 
@@ -147,6 +229,12 @@ def run_checks(res: ReadResult) -> list:
           lambda: (n("Weight (kg)") == n("Weight, body composition chart (kg)"), f"{n('Weight (kg)')} / {n('Weight, body composition chart (kg)')}"), "")
     check("muscle mass printed twice agrees", ["Muscle mass (kg)", "Muscle mass, body composition chart (kg)"],
           lambda: (n("Muscle mass (kg)") == n("Muscle mass, body composition chart (kg)"), f"{n('Muscle mass (kg)')} / {n('Muscle mass, body composition chart (kg)')}"), "")
+    drawn = res.values.get("Visceral fat band (as drawn on the report)")
+    if drawn and n("Visceral fat level") is not None:
+        expected = visceral_band(n("Visceral fat level"))
+        # a note, not an error: if this ever disagrees, Tanita's bands differ from the ones the dashboard uses (norms/measures.csv)
+        checks.append(Check("visceral fat band drawn on the report matches the app's bands", drawn.text == expected,
+                            f"level {n('Visceral fat level'):g}: drawn in '{drawn.text}', the app's bands say '{expected}'", severity="note"))
     return checks
 
 
@@ -154,5 +242,9 @@ def app_fields(res: ReadResult) -> dict:
     d = lambda k: res.values[k].display if k in res.values else ""
     water = f"{d('Water (kg)')} ({d('Total body water (%)')})" if d("Water (kg)") and d("Total body water (%)") else ""
     ratio = f"{res.values['ECW/TBW ratio (calculated)'].text} (calculated by the app from ECW and body water; not printed on the report)" if "ECW/TBW ratio (calculated)" in res.values else ""
+    verdicts = {key: res.values[f"Muscle, {key} (Tanita bar)"].text for key, _lab in _LIMBS if f"Muscle, {key} (Tanita bar)" in res.values}
+    flags = limb_flags_text(verdicts) if len(verdicts) == len(_LIMBS) else ""      # only when all four bars were read
     return {"Weight": d("Weight (kg)"), "Fat %": d("Fat (%)"), "FFM": d("Fat-free mass (kg)"), "Muscle Mass": d("Muscle mass (kg)"), "TBW": water,
-            "ECW/TBW": ratio, "Visceral Fat": d("Visceral fat level"), "Metabolic Age": d("Metabolic age (years)"), "Phase Angle": d("Phase angle (°)")}
+            "ECW/TBW": ratio, "Visceral Fat": d("Visceral fat level"), "Metabolic Age": d("Metabolic age (years)"), "Phase Angle": d("Phase angle (°)"),
+            "Right Arm Muscle": d("Muscle, right arm (kg)"), "Left Arm Muscle": d("Muscle, left arm (kg)"),
+            "Right Leg Muscle": d("Muscle, right leg (kg)"), "Left Leg Muscle": d("Muscle, left leg (kg)"), "Limb Flags": flags}

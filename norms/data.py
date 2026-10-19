@@ -85,11 +85,19 @@ SOURCES = {
     },
     "tanita_bands": {
         "short": "Tanita MC-780MA: the bands on your report",
-        "citation": ("Printed on the participant's Tanita MC-780MA report: the phase angle marks (7 degrees healthy, 5 'in-risk/ageing', 2 'severely malnourished'). "
-                     "The visceral fat band (1 to 12 healthy, 13 and above excess) is Tanita's own published band."),
+        "citation": ("Printed on the participant's Tanita MC-780MA report: the phase angle marks (7 degrees healthy, 5 'in-risk/ageing', 2 'severely malnourished'), "
+                     "the visceral fat scale (1 to 9 healthy, 10 to 14 high, 15 and above very high), and whether each arm and leg's muscle is within Tanita's normal range."),
         "url": "",
         "population": "The device maker's own reference bands.",
-        "note": "Used as printed or published by Tanita. They are not checked against any other reference data.",
+        "note": "Used as printed by Tanita. They are not checked against any other reference data.",
+    },
+    "clinic_limb_balance": {
+        "short": "Left and right muscle balance: the clinic's own guide",
+        "citation": ("Chudleigh Health Hub compares the muscle in your left and right arms, and your left and right legs, from your Tanita report. "
+                     "A difference of 10% or more is marked as room to improve, and 20% or more as a place to focus first."),
+        "url": "",
+        "population": "Not taken from a study.",
+        "note": "These cut-offs are the clinic's own working guide. They are not a published standard.",
     },
 }
 

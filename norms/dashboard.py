@@ -35,7 +35,12 @@ SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 GREEN, AMBER, RED, GREY = "green", "amber", "red", "info"
 SEVERITY = {GREEN: 0, GREY: 0, AMBER: 1, RED: 2}
 SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i"}      # a tick, a triangle, an exclamation mark, an i: the light is never colour alone
-RULES = ("engine", "range", "info", "composite")
+RULES = ("engine", "range", "info", "composite", "limbs")
+# rule 'limbs': left-right muscle balance from the Tanita's segmental analysis. The light for arms and for legs comes from the difference
+# between the two sides (as a % of the bigger side) against the row's green/amber ranges, and is at least amber when the Tanita itself
+# marks a limb outside its normal band (the 'Limb Flags' box, e.g. 'left leg low').
+LIMB_PAIRS = [("Arms", "arm", "Right Arm Muscle", "Left Arm Muscle"), ("Legs", "leg", "Right Leg Muscle", "Left Leg Muscle")]
+LIMB_FLAGS_BOX = "Limb Flags"
 VALUE_DEVICES = {"tanita": A_TANITA}
 COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2}      # the devices that have dashboard tiles so far
 TEXT_FIELDS = ("headline", "text", "do")
@@ -197,8 +202,8 @@ def _parse_row(raw, line, problems):
             problems.append(f"ERROR: {label}: 'value_from' must look like tanita:Visceral Fat (device, then the box name).")
         if "{value}" not in row.facts:
             problems.append(f"ERROR: {label}: 'facts' must include {{value}}, for example 'Your rating was {{value}}.'")
-    if row.rule == "range" and row.green_min is None and row.green_max is None:
-        problems.append(f"ERROR: {label}: a 'range' row needs a green range (green_min and/or green_max).")
+    if row.rule in ("range", "limbs") and row.green_min is None and row.green_max is None:
+        problems.append(f"ERROR: {label}: a '{row.rule}' row needs a green range (green_min and/or green_max).")
     for sid in row.sources:
         if sid not in data.SOURCES:
             problems.append(f"ERROR: {label}: unknown source '{sid}'. Known sources: {', '.join(sorted(data.SOURCES))}.")
@@ -400,6 +405,51 @@ def read_value(spec: str, tests: list):
     return found
 
 
+def _limb_flags(text: str) -> dict:
+    """'left leg low; right arm high' -> {('left', 'leg'): 'low', ('right', 'arm'): 'high'}. Anything else (such as 'none') is ignored."""
+    return {(side, limb): way for side, limb, way in re.findall(r"\b(right|left)\s+(arm|leg)\s+(low|high)\b", (text or "").lower())}
+
+
+def _kg(shown: str) -> str:
+    s = (shown or "").strip()
+    return s if re.search(r"[a-z]", s, re.I) else f"{s} kg"
+
+
+def limb_balance(row: Row, tests: list, S: dict):
+    """(light, facts, parts) for the left-right muscle balance tile, or None if no arm or leg pair was entered. Uses the last Tanita test."""
+    data = None
+    for t in tests or []:
+        if t.get("type") == A_TANITA:
+            data = t.get("data") or {}
+    if not data:
+        return None
+    flags = _limb_flags(data.get(LIMB_FLAGS_BOX, ""))
+    facts, parts = [], []
+    for name, limb, right_box, left_box in LIMB_PAIRS:
+        r_shown, l_shown = str(data.get(right_box, "")).strip(), str(data.get(left_box, "")).strip()
+        r, l = _num(r_shown), _num(l_shown)
+        if r is None or l is None or max(r, l) <= 0:
+            continue
+        diff = round(abs(r - l) / max(r, l) * 100, 1)
+        light = range_light(diff, row)
+        marked = [(side, flags[(side, limb)]) for side in ("right", "left") if (side, limb) in flags]
+        if marked and light == GREEN:
+            light = AMBER
+        if r == l:
+            facts.append(f"Right {limb} {_kg(r_shown)}, left {limb} {_kg(l_shown)}: the same.")
+        else:
+            facts.append(f"Right {limb} {_kg(r_shown)}, left {limb} {_kg(l_shown)}. Your {'right' if r < l else 'left'} {limb} has {diff:.0f}% less muscle.")
+        for side, way in marked:
+            facts.append(f"The Tanita marks your {side} {limb} muscle as {'lower' if way == 'low' else 'higher'} than its normal range.")
+        words = f"{diff:.0f}% difference" if r != l else "even"
+        if marked:
+            words += "; " + ", ".join(f"{side} {limb} {'low' if way == 'low' else 'high'}" for side, way in marked)
+        parts.append({"label": name, "value_text": f"R {_kg(r_shown)} · L {_kg(l_shown)}", "light": light, "words": words})
+    if not parts:
+        return None
+    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), facts, parts
+
+
 def _pick(row: Row, light: str, status: str = ""):
     if light == GREY:
         t = row.text["info"]
@@ -450,6 +500,13 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                          for m, lt in zip(members, lights)]
                 src = [m["source"] for m in members if m.get("source")]
                 tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [], head, text, do, row.book, src + row.sources, shown, row.priority, row.order, "", parts, "", row.hash)
+        elif row.rule == "limbs":
+            got = limb_balance(row, tests, S)
+            if got:
+                light, facts, parts = got
+                head, text, do = _pick(row, light)
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown, row.priority, row.order,
+                            "", parts, "", row.hash)
         else:
             got = read_value(row.value_from, tests) if row.value_from else None
             if got:

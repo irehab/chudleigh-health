@@ -1944,7 +1944,10 @@ ASSESSMENTS = {
             [("Weight (kg)", "78.0", "Weight"), ("Fat Percentage (%)", "18.5", "Fat %"), ("Fat-Free Mass (kg)", "63.5", "FFM")],
             [("Muscle Mass (kg)", "60.2", "Muscle Mass"), ("Total Body Water (kg / %)", "48.2 kg (61.8%)", "TBW"), ("ECW / TBW Ratio", "0.378", "ECW/TBW")],
             [("Visceral Fat Rating", "6", "Visceral Fat"), ("Metabolic Age", "42", "Metabolic Age"), ("Phase Angle", "6.8°", "Phase Angle")],
+            [("Right Arm Muscle (kg)", "3.0", "Right Arm Muscle"), ("Left Arm Muscle (kg)", "3.2", "Left Arm Muscle"),
+             ("Right Leg Muscle (kg)", "9.4", "Right Leg Muscle"), ("Left Leg Muscle (kg)", "8.6", "Left Leg Muscle")],
         ],
+        "full_width": [("Limbs the Tanita marks outside normal (orange bars under Segmented Analysis Muscle)", "left leg low, or none", "Limb Flags")],
     },
     "Push-Up Assessment (VALD ForceDecks)": {
         "columns": [
