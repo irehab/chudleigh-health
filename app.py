@@ -11,6 +11,7 @@ import secrets
 import hashlib
 import logging
 import datetime
+import threading
 from decimal import Decimal
 
 import nh3
@@ -45,6 +46,7 @@ from helpers import (
     fmt_price,
     friendly_date,
     hash_pin,
+    new_patient_id,
     parse_price,
     patient_key,
     plan_text_to_html,
@@ -1231,6 +1233,7 @@ def lookup_history(key: str):
         d = snap.to_dict() or {}
         legacy_pin = d.get("pin")
         profile = {
+            "name": d.get("name") or "",
             "pin_weak": bool(d.get("pin_weak")) or (legacy_pin is not None and len(str(legacy_pin)) < MIN_NEW_PIN_LENGTH),
             **{f"price_{t}": d.get(f"price_{t}") for t in TIERS},
         }
@@ -1245,6 +1248,75 @@ def lookup_history(key: str):
         p = docs[0].to_dict() or {}
         previous = {k: p.get(k) for k in ("assessment_date", "tests_count", "tests", "master_html", "age_gender", "body_mass_height")}
     return profile, previous
+
+
+# --- Participants who share a name ---
+# Older records use the name itself as their ID. New records get a random ID (new_patient_id), so two people with the same
+# name are kept apart: clinicians choose which person they mean, and at sign-in the PIN decides.
+def profiles_named(name_key: str) -> list:
+    """Every participant record with this name, as Firestore snapshots (these include PIN data, so never cache them)."""
+    found = {s.id: s for s in db.collection(REPORTS).where(filter=FieldFilter("name_lower", "==", name_key)).limit(25).stream()}
+    legacy = db.collection(REPORTS).document(name_key).get()
+    if legacy.exists:
+        found.setdefault(legacy.id, legacy)
+    return sorted(found.values(), key=lambda s: s.id)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def participant_ids(name_key: str) -> list:
+    """The record IDs of everyone with this name. Cached for a minute; each publish or deletion clears the cache."""
+    return [s.id for s in profiles_named(name_key)]
+
+
+def clear_participant_caches():
+    lookup_history.clear()
+    participant_ids.clear()
+
+
+def pin_in_use(pin: str, name_key: str, exclude_id: str = None) -> bool:
+    """True if another participant with this name already signs in with this PIN, which would make sign-in ambiguous."""
+    return any(verify_pin(pin, s.to_dict()) for s in profiles_named(name_key) if s.id != exclude_id)
+
+
+def describe_participant(record_id: str, fallback_name: str = "") -> str:
+    """How a record is shown when choosing between people with the same name: age and sex, and the last scan."""
+    profile, previous = lookup_history(record_id)
+    name = (profile or {}).get("name") or fallback_name
+    if not previous:
+        return f"{name} · no scans yet"
+    return f"{name} · {previous.get('age_gender') or 'age/sex not recorded'} · last scan {previous.get('assessment_date')}"
+
+
+NEW_PARTICIPANT = "__new__"
+
+
+def choose_participant(name_key: str, widget_key: str, allow_new: bool, label: str):
+    """Work out which record a typed name means. Returns (record_id, decided).
+
+    record_id is None for a new participant (allow_new) or when nobody has the name. decided is False while the clinician
+    still has to choose. With one match and allow_new off, that record is used without asking.
+    """
+    ids = participant_ids(name_key)
+    if not ids:
+        return None, True
+    if len(ids) == 1 and not allow_new:
+        return ids[0], True
+    options = list(ids) + ([NEW_PARTICIPANT] if allow_new else [])
+    preset = st.session_state.get(f"preset::{widget_key}")  # see remember_participant()
+    choice = st.radio(
+        label, options, index=options.index(preset) if preset in options else None,
+        key=f"{widget_key}::{st.session_state.get(f'round::{widget_key}', 0)}",
+        format_func=lambda o: "➕ A different person with this name: create a new record" if o == NEW_PARTICIPANT else describe_participant(o, name_key),
+    )
+    if choice is None:
+        return None, False
+    return (None if choice == NEW_PARTICIPANT else choice), True
+
+
+def remember_participant(widget_key: str, record_id: str):
+    """After publishing, show that record as the one chosen, so publishing again cannot create a second new record by mistake."""
+    st.session_state[f"preset::{widget_key}"] = record_id
+    st.session_state[f"round::{widget_key}"] = st.session_state.get(f"round::{widget_key}", 0) + 1  # a fresh widget picks up the preset
 
 
 # --- Data-rights tools (export / delete) ---
@@ -1274,6 +1346,8 @@ def export_participant(key: str) -> str:
 def delete_participant(key: str) -> int:
     """Permanently delete a participant's profile, scans and plan requests (their answers and plans). Payment records are kept for accounting."""
     profile_ref = db.collection(REPORTS).document(key)
+    profile_snap = profile_ref.get()
+    name_key = ((profile_snap.to_dict() or {}).get("name_lower") if profile_snap.exists else None) or key  # sign-in lockouts are kept by name
     files = [f.get("object") for d in profile_ref.collection("scans").stream() for f in ((d.to_dict() or {}).get("shared_files") or []) if f.get("object")]
     if files:
         if not FILE_SHARING_ON:
@@ -1287,7 +1361,7 @@ def delete_participant(key: str) -> int:
     for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream():
         d.reference.delete()
     profile_ref.delete()
-    clear_attempts("patient", key)
+    clear_attempts("patient", name_key)
     return deleted
 
 
@@ -1470,6 +1544,65 @@ def handle_stripe_return(session_id: str):
     if created:
         audit("plan_requested", key, tier=tier, source="return_page")
     st.success(f"🎉 Payment verified. Your {tier}-day bespoke plan has been requested. Sign in below to answer a short questionnaire and see when to expect it.")
+
+
+PAYMENT_CHECK_DAYS = 45            # how far back the missed-payment check looks
+PAYMENT_CHECK_EVERY_SECONDS = 600  # the site-wide check runs at most this often (per server instance)
+
+
+def reconcile_paid_checkouts(only_key: str = None) -> int:
+    """Create any plan request that a completed payment should have created but did not, for example because the participant
+    closed the tab before returning from Stripe. Safe to repeat: the checkout session ID is the request ID, as on the return page.
+    With only_key, only that participant's payments are looked at. Returns how many requests were created."""
+    if not stripe.api_key or not db:
+        return 0
+    cutoff = time.time() - PAYMENT_CHECK_DAYS * 86400
+    created = 0
+    try:
+        for cs in stripe.checkout.Session.list(limit=100).auto_paging_iter():   # newest first
+            when = stripe_field(cs, "created") or 0
+            if when < cutoff:
+                break
+            md = stripe_field(cs, "metadata")
+            key, tier = stripe_field(md, "patient_key"), stripe_field(md, "tier")
+            if (stripe_field(cs, "payment_status") != "paid" or stripe_field(md, "kind") != "bespoke_plan"
+                    or tier not in TIERS or not key or patient_key(key) != key or (only_key and key != only_key)):
+                continue
+            session_id = stripe_field(cs, "id")
+            if not _CHECKOUT_ID_RE.fullmatch(session_id or "") or db.collection(PLAN_REQUESTS).document(session_id).get().exists:
+                continue
+            if not db.collection(REPORTS).document(key).get().exists:
+                continue                                    # the participant's records have been deleted
+            amount, currency = stripe_field(cs, "amount_total"), stripe_field(cs, "currency")
+            paid_on = datetime.datetime.fromtimestamp(when, datetime.timezone.utc).date()
+            if create_plan_request(session_id, new_plan_request(key, tier, "payment_check", amount_total=amount, currency=currency, today=paid_on)):
+                db.collection("payments").document(session_id).set({
+                    "patient_key": key, "tier": tier, "kind": "bespoke_plan", "amount_total": amount, "currency": currency,
+                    "processed_at": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                audit("plan_requested", key, tier=tier, source="payment_check")
+                log.info("Missed payment found and recorded: %s", session_id[-12:])
+                created += 1
+    except Exception:
+        log.exception("Missed-payment check failed")
+    return created
+
+
+@st.cache_resource
+def _payment_check_state():
+    return {"at": 0.0, "lock": threading.Lock()}
+
+
+def periodic_payment_check():
+    """Run the site-wide missed-payment check at most every PAYMENT_CHECK_EVERY_SECONDS, on whichever page view comes next."""
+    state = _payment_check_state()
+    if time.time() - state["at"] < PAYMENT_CHECK_EVERY_SECONDS or not state["lock"].acquire(blocking=False):
+        return
+    try:
+        state["at"] = time.time()
+        reconcile_paid_checkouts()
+    finally:
+        state["lock"].release()
 
 
 def plan_notice(r: dict) -> str:
@@ -1732,15 +1865,25 @@ def _render_plan_request(r: dict, approver: str):
 def _render_manual_plan_request():
     with st.expander("➕ Add a plan request manually (paid by bank transfer, or included in a package)"):
         name = st.text_input("Participant full name (exactly as recorded)", key="mp_name", max_chars=120)
+        name_key = patient_key(name)
+        key, decided = None, True
+        if name_key and db:
+            try:
+                key, decided = choose_participant(name_key, f"mp_who::{name_key}", allow_new=False,
+                                                  label="More than one participant has this name. Which one is this request for?")
+            except Exception:
+                decided = False
+                fail("Couldn't look up that name.", "Participant lookup failed")
         tier = st.selectbox("Plan", list(TIERS), format_func=lambda t: TIER_INFO[t]["title"], key="mp_tier")
         if st.button("Add request", key="mp_add"):
-            key = patient_key(name)
-            if not key:
+            if not name_key:
                 st.warning("Enter the participant's full name.")
+            elif not decided:
+                st.warning("Choose which participant this request is for.")
             else:
                 added = False
                 try:
-                    if not db.collection(REPORTS).document(key).get().exists:
+                    if not key or not db.collection(REPORTS).document(key).get().exists:
                         st.warning("No participant with that name is on record. Publish their report first.")
                     else:
                         create_plan_request(f"manual-{secrets.token_hex(8)}", new_plan_request(key, tier, "manual"))
@@ -1760,6 +1903,8 @@ def render_plan_requests(approver: str):
     if not db:
         st.info("Database connection unavailable.")
         return
+    if stripe.api_key:
+        periodic_payment_check()  # pick up any payment that never came back through the return page
     try:
         open_reqs, delivered = open_plan_requests(), recent_delivered_plans()
     except Exception:
@@ -2538,10 +2683,24 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     existing_profile = False
     existing_info = None
     previous_scan = None
-    confirm_same_person = False
+    record_id = None            # the record this report will be published to; None = a new participant
+    identity_chosen = True      # False while the clinician still has to say which person this is
+    lookup_failed = False
+    same_name_count = 0
+    who_key = f"who::{c_key}"
     if c_key and db:
         try:
-            existing_info, previous_scan = lookup_history(c_key)
+            same_name_count = len(participant_ids(c_key))
+            if same_name_count:
+                st.warning(
+                    ("A participant with this name is already on record." if same_name_count == 1
+                     else f"{same_name_count} participants with this name are already on record.")
+                    + " Choose the same person (check the age, sex and last scan), or create a new record if this is someone else. "
+                    "Whoever signs in with the record's PIN will see the report."
+                )
+            record_id, identity_chosen = choose_participant(c_key, who_key, allow_new=True, label="Which participant is this?")
+            if record_id:
+                existing_info, previous_scan = lookup_history(record_id)
             existing_profile = existing_info is not None
             if previous_scan:
                 st.markdown(
@@ -2553,25 +2712,19 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     unsafe_allow_html=True
                 )
             if existing_profile:
-                prev_details = ""
                 if previous_scan:
-                    prev_details = (
-                        f" The previous scan recorded: age/gender \"{previous_scan.get('age_gender') or 'not specified'}\", "
+                    st.caption(
+                        f"Publishing adds a scan to this record. Its previous scan recorded: age/gender \"{previous_scan.get('age_gender') or 'not specified'}\", "
                         f"body metrics \"{previous_scan.get('body_mass_height') or 'not specified'}\"."
                     )
-                st.warning(
-                    "An existing record matches this name. Publishing will add a scan to that record, and whoever signs in with "
-                    "that name and PIN will see it. Records are matched by name only." + prev_details
-                )
-                confirm_same_person = st.checkbox(
-                    "I have checked that this is the same person as the existing record",
-                    key=f"confirm_same::{c_key}",
-                )
                 if existing_info.get("pin_weak"):
                     st.warning("This participant still has a short legacy PIN. Enter a new 6-8 digit PIN above to replace it.")
+            elif same_name_count and identity_chosen:
+                st.info("A new record will be created for this person. Give them a PIN that differs from the other participant(s) with this name.")
         except Exception:
+            lookup_failed = True
             log.exception("History lookup failed")
-            st.warning("Could not check for previous scans.")
+            st.warning("Could not check for existing records with this name, so publishing is paused until the check works. Please try again.")
 
     st.divider()
 
@@ -3121,10 +3274,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.warning("Some drafts still contain CHECK notes or stray pieces of them. Resolve each one and delete its whole line before publishing.")
         elif pin and not re.fullmatch(rf"[0-9]{{{MIN_NEW_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin):
             st.warning(f"The PIN must be {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits.")
+        elif lookup_failed or not db:
+            st.error("Couldn't check for existing records with this name, so nothing was published. Please try again.")
+        elif not identity_chosen:
+            st.warning("A participant with this name is already on record. Choose which participant this is (under their name) before publishing.")
         elif not pin and not existing_profile:
             st.warning(f"New participants need a {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digit security PIN.")
-        elif existing_profile and not confirm_same_person:
-            st.warning("An existing record matches this name. Please tick the box confirming it is the same person before publishing.")
+        elif pin and same_name_count and pin_in_use(pin, c_key, exclude_id=record_id):
+            st.warning("Another participant with this name already uses that PIN. Choose a different PIN so each of them can sign in.")
         elif shared_tests and not files_ok:
             st.warning("Please tick the box confirming that every report you are sharing belongs to this participant.")
         elif shared_tests and sum(len(t["pdf_bytes"]) for t in shared_tests) > MAX_SHARED_TOTAL_BYTES:
@@ -3186,8 +3343,12 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     }
                     if pin:
                         profile_record.update(pin_fields(pin))
+                    is_new_record = record_id is None
+                    target_id = record_id or new_patient_id()
+                    if is_new_record:
+                        profile_record["created_at"] = firestore.SERVER_TIMESTAMP
 
-                    profile_ref = db.collection(REPORTS).document(c_key)
+                    profile_ref = db.collection(REPORTS).document(target_id)
                     scan_ref = profile_ref.collection("scans").document(scan_id)
                     old_files = []
                     try:
@@ -3214,7 +3375,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             except Exception:
                                 log.exception("Could not remove a stored file after a failed publish")
                         raise
-                    lookup_history.clear()
+                    clear_participant_caches()
+                    remember_participant(who_key, target_id)
                     kept = {f["object"] for f in uploaded}
                     replaced = 0
                     for f in old_files:                          # publishing again for the same date replaces the earlier files
@@ -3225,10 +3387,11 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             except Exception:
                                 log.exception("Could not remove a replaced file")
                     if uploaded or replaced:
-                        audit("report_files_shared", c_key, scan_date=scan_id, shared=len(uploaded), replaced=replaced)
-                    audit("scan_published", c_key, scan_date=scan_id, approved_by=approver.strip())
-                    log.info("Published scan %s", scan_id)
-                    st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!")
+                        audit("report_files_shared", target_id, scan_date=scan_id, shared=len(uploaded), replaced=replaced)
+                    audit("scan_published", target_id, scan_date=scan_id, approved_by=approver.strip(), new_record=is_new_record)
+                    log.info("Published scan %s (new record: %s)", scan_id, is_new_record)
+                    st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!"
+                               + (" A new participant record was created." if is_new_record else ""))
             except StorageError as e:
                 log.exception("Publishing stopped by file storage")
                 st.error(f"Nothing was published. The device reports could not be stored: {e}.")
@@ -3243,7 +3406,16 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     with st.expander("🛡️ Data rights: export or delete a participant's records"):
         st.caption("Use this to answer a participant's data access or erasure request. Every export and deletion is written to the audit log.")
         dr_name = st.text_input("Participant full name (exactly as recorded)", key="dr_name", max_chars=120)
-        dr_key = patient_key(dr_name)
+        dr_name_key = patient_key(dr_name)
+        dr_key, dr_decided = None, False
+        if dr_name_key and db:
+            try:
+                dr_key, dr_decided = choose_participant(dr_name_key, f"dr_who::{dr_name_key}", allow_new=False,
+                                                        label="More than one participant has this name. Which one is this request about?")
+            except Exception:
+                fail("Couldn't look up that name.", "Participant lookup failed")
+            if dr_decided and not dr_key:
+                st.caption("No participant with that name is on record.")
         if dr_key and db:
             if st.button("📦 Prepare export", key="dr_export_btn"):
                 try:
@@ -3266,13 +3438,13 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.markdown("**Stop sharing this participant's device reports** (their results stay; the stored PDF files are deleted. Use this if a report was shared by mistake.)")
             confirm_files = st.text_input("Type the participant's full name again to confirm", key="dr_confirm_files", max_chars=120)
             if st.button("🗂️ Remove all shared device reports", key="dr_files_btn"):
-                if patient_key(confirm_files) != dr_key:
+                if patient_key(confirm_files) != dr_name_key:
                     st.warning("The name you typed doesn't match.")
                 else:
                     try:
                         n_removed = remove_shared_files(dr_key)
                         audit("report_files_removed", dr_key, files_removed=n_removed)
-                        lookup_history.clear()
+                        clear_participant_caches()
                         st.success(f"Removed {n_removed} shared report file(s)." if n_removed else "This participant has no shared report files.")
                     except StorageError as e:
                         st.error(f"Nothing further was removed. {e}.")
@@ -3282,13 +3454,13 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             st.markdown("**Delete this participant's profile and scans** (cannot be undone; payment records are kept for accounting)")
             confirm_text = st.text_input("Type the participant's full name again to confirm", key="dr_confirm", max_chars=120)
             if st.button("🗑️ Permanently delete these records", key="dr_delete_btn"):
-                if patient_key(confirm_text) != dr_key:
+                if patient_key(confirm_text) != dr_name_key:
                     st.warning("The name you typed doesn't match.")
                 else:
                     try:
                         deleted_scans = delete_participant(dr_key)
                         audit("participant_deleted", dr_key, scans_deleted=deleted_scans)
-                        lookup_history.clear()
+                        clear_participant_caches()
                         st.session_state.pop("dr_export", None)
                         st.success(f"Deleted the profile and {deleted_scans} scan(s).")
                     except StorageError as e:
@@ -3311,6 +3483,9 @@ elif app_mode == "Secure Patient Mobile Portal":
             fail("We couldn't verify your payment right now. Please contact Chudleigh Health Hub.", "Stripe return handling failed")
         st.query_params.clear()
         st.query_params["portal"] = "true"
+
+    if db and stripe.api_key:
+        periodic_payment_check()  # site-wide: payments whose participant never came back from Stripe
 
     portal_auth = st.session_state.get("portal_auth")
     if portal_auth and time.time() - portal_auth["at"] > PATIENT_SESSION_SECONDS:
@@ -3347,15 +3522,17 @@ elif app_mode == "Secure Patient Mobile Portal":
                 st.error(generic_error)
             else:
                 try:
-                    doc_ref = db.collection(REPORTS).document(lookup_key)
-                    snap = doc_ref.get()
-                    record = snap.to_dict() if snap.exists else None
-                    if verify_pin(pin, record):
+                    # Several participants can share a name; the PIN decides which record this is.
+                    candidates = profiles_named(lookup_key)
+                    if not candidates:
+                        verify_pin(pin, None)  # same timing as a wrong PIN, so unknown names can't be detected
+                    matched = next((c for c in candidates if verify_pin(pin, c.to_dict())), None)
+                    if matched:
                         clear_attempts("patient", limiter_id)
-                        audit("patient_login", lookup_key)
-                        if not record.get("pin_hash"):
-                            doc_ref.update(pin_fields(pin))  # migrate legacy plaintext PIN
-                        st.session_state.portal_auth = {"key": lookup_key, "at": time.time()}
+                        audit("patient_login", matched.id)
+                        if not (matched.to_dict() or {}).get("pin_hash"):
+                            matched.reference.update(pin_fields(pin))  # migrate legacy plaintext PIN
+                        st.session_state.portal_auth = {"key": matched.id, "at": time.time()}
                         signed_in = True
                     else:
                         record_failed_attempt("patient", limiter_id)
@@ -3372,6 +3549,9 @@ elif app_mode == "Secure Patient Mobile Portal":
     else:
         lookup_key = portal_auth["key"]
         st.session_state.portal_auth["at"] = time.time()  # sliding idle timeout
+        if not portal_auth.get("payments_checked"):
+            reconcile_paid_checkouts(only_key=lookup_key)  # so a plan they paid for shows straight away, even if they closed the tab
+            st.session_state.portal_auth["payments_checked"] = True
 
         if st.sidebar.button("🚪 Sign out", use_container_width=True):
             for k in [k for k in st.session_state.keys() if k.startswith(("portal_", "checkout_url_"))]:

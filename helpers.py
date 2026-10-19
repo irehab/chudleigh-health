@@ -38,6 +38,12 @@ def patient_key(name: str):
     return key
 
 
+def new_patient_id() -> str:
+    """Record ID for a new participant: random, so two people with the same name get separate records, and nothing about
+    the person is in it. Lower-case letters, digits and '-' only, so patient_key(id) == id and older checks still accept it."""
+    return "p-" + secrets.token_hex(10)
+
+
 def short_ref(key: str) -> str:
     """Stable, non-reversible reference for audit logs, so logs never contain patient names."""
     return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:16]
