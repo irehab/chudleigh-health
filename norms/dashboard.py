@@ -35,7 +35,10 @@ SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 GREEN, AMBER, RED, GREY = "green", "amber", "red", "info"
 SEVERITY = {GREEN: 0, GREY: 0, AMBER: 1, RED: 2}
 SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i"}      # a tick, a triangle, an exclamation mark, an i: the light is never colour alone
-RULES = ("engine", "range", "info", "composite", "limbs")
+RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts")
+# rule 'zone': a value whose light is the colour the device itself draws it in. 'members' names the box holding that colour (green or orange).
+# rule 'parts': several boxes from the same device, each given a light from the row's ranges; the tile shows the worst. 'members' lists the boxes.
+ZONE_LIGHTS = {"green": "green", "orange": "amber"}
 # rule 'limbs': left-right muscle balance from the Tanita's segmental analysis. The light for arms and for legs comes from the difference
 # between the two sides (as a % of the bigger side) against the row's green/amber ranges, and is at least amber when the Tanita itself
 # marks a limb outside its normal band (the 'Limb Flags' box, e.g. 'left leg low').
@@ -196,13 +199,17 @@ def _parse_row(raw, line, problems):
         bad = [m for m in row.members if m not in PATIENT_TEXT]
         if not row.members or bad:
             problems.append(f"ERROR: {label}: 'members' must list known results separated by | (problem: {', '.join(bad) or 'none listed'}).")
-    if row.rule in ("range", "info"):
+    if row.rule in ("zone", "parts") and not row.members:
+        problems.append(f"ERROR: {label}: a '{row.rule}' row needs 'members': the box name(s), separated by |.")
+    if row.rule == "parts" and row.value_from.split(":")[0] not in VALUE_DEVICES:
+        problems.append(f"ERROR: {label}: 'value_from' must name the device, for example tanita: (the boxes are listed in 'members').")
+    if row.rule in ("range", "info", "zone"):
         dev = row.value_from.split(":")[0] if ":" in row.value_from else ""
         if dev not in VALUE_DEVICES or not row.value_from.split(":", 1)[1].strip():
             problems.append(f"ERROR: {label}: 'value_from' must look like tanita:Visceral Fat (device, then the box name).")
         if "{value}" not in row.facts:
             problems.append(f"ERROR: {label}: 'facts' must include {{value}}, for example 'Your rating was {{value}}.'")
-    if row.rule in ("range", "limbs") and row.green_min is None and row.green_max is None:
+    if row.rule in ("range", "limbs", "parts") and row.green_min is None and row.green_max is None:
         problems.append(f"ERROR: {label}: a '{row.rule}' row needs a green range (green_min and/or green_max).")
     for sid in row.sources:
         if sid not in data.SOURCES:
@@ -450,6 +457,42 @@ def limb_balance(row: Row, tests: list, S: dict):
     return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), facts, parts
 
 
+def _device_data(spec: str, tests: list) -> dict:
+    """The boxes of the last test from the device named in 'tanita:...' (empty if none)."""
+    assessment = VALUE_DEVICES.get(spec.split(":", 1)[0].strip())
+    found = {}
+    for t in tests or []:
+        if assessment and t.get("type") == assessment:
+            found = t.get("data") or {}
+    return found
+
+
+def zone_reading(row: Row, tests: list):
+    """(light, value_text, zone) for a 'zone' row, or None if the value was not entered. Grey if the colour was not entered."""
+    got = read_value(row.value_from, tests)
+    if not got:
+        return None
+    zone = str(_device_data(row.value_from, tests).get(row.members[0], "")).strip().lower()
+    return ZONE_LIGHTS.get(zone, GREY), got[0], zone
+
+
+def parts_reading(row: Row, tests: list):
+    """(light, parts) for a 'parts' row: each box that has a number gets its own light from the row's ranges. None if none has a number."""
+    data = _device_data(row.value_from, tests)
+    parts = []
+    for box in row.members:
+        shown = str(data.get(box, "")).strip()
+        number = _num(shown)
+        if number is None:
+            continue
+        light = range_light(number, row)
+        label = re.sub(r"\s+phase angle$", "", box, flags=re.I)
+        parts.append({"label": label, "value_text": shown, "light": light, "words": {GREEN: "healthy", AMBER: "below the healthy mark", RED: "low"}[light]})
+    if not parts:
+        return None
+    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), parts
+
+
 def _pick(row: Row, light: str, status: str = ""):
     if light == GREY:
         t = row.text["info"]
@@ -500,6 +543,24 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                          for m, lt in zip(members, lights)]
                 src = [m["source"] for m in members if m.get("source")]
                 tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [], head, text, do, row.book, src + row.sources, shown, row.priority, row.order, "", parts, "", row.hash)
+        elif row.rule == "zone":
+            got = zone_reading(row, tests)
+            if got:
+                light, shown_text, zone = got
+                head, text, do = _pick(row, light)
+                facts = [row.facts.replace("{value}", shown_text)]
+                if zone in ZONE_LIGHTS:
+                    facts.append(f"On the Tanita's chart it sits in the {zone} area, "
+                                 + ("at or above the line expected for your age." if zone == "green" else "below the line expected for your age."))
+                tile = Tile(row.key, row.group, row.title, light, shown_text, row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown,
+                            row.priority, row.order, hash=row.hash)
+        elif row.rule == "parts":
+            got = parts_reading(row, tests)
+            if got:
+                light, parts = got
+                head, text, do = _pick(row, light)
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, [row.facts] if row.facts else [], head, text, do, row.book,
+                            list(row.sources), shown, row.priority, row.order, "", parts, "", row.hash)
         elif row.rule == "limbs":
             got = limb_balance(row, tests, S)
             if got:

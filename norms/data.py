@@ -86,7 +86,8 @@ SOURCES = {
     "tanita_bands": {
         "short": "Tanita MC-780MA: the bands on your report",
         "citation": ("Printed on the participant's Tanita MC-780MA report: the phase angle marks (7 degrees healthy, 5 'in-risk/ageing', 2 'severely malnourished'), "
-                     "the visceral fat scale (1 to 9 healthy, 10 to 14 high, 15 and above very high), and whether each arm and leg's muscle is within Tanita's normal range."),
+                     "the visceral fat scale (1 to 9 healthy, 10 to 14 high, 15 and above very high), whether each arm and leg's muscle is within Tanita's normal range, "
+                     "and the leg muscle score chart (the line expected for each age)."),
         "url": "",
         "population": "The device maker's own reference bands.",
         "note": "Used as printed by Tanita. They are not checked against any other reference data.",

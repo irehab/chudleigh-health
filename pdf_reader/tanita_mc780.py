@@ -74,6 +74,43 @@ def limb_verdict(reading) -> str | None:
     return {0: "low", 2: "high"}.get(part, "outside normal")
 
 
+def _pixel_colour(rgb) -> str | None:
+    r, g, b = (x / 255 for x in rgb[:3])
+    if g > r + 0.08 and g > b:
+        return "green"
+    if r > g + 0.08 and r > b + 0.15 and r > 0.6:
+        return "orange"
+    return None
+
+
+def leg_score_zone(data: bytes, circle_word: dict) -> str | None:
+    """'green' or 'orange': the colour of the leg muscle score chart around the score's black circle. On the Tanita chart the area above
+    the line expected for the person's age is green and the area below it is orange. The chart is a picture, so the page is rendered and
+    the colour is sampled on both sides of the circle. None unless at least 70% of the samples agree."""
+    import io
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        page = pdf.pages[0]
+        cx, cy = (circle_word["x0"] + circle_word["x1"]) / 2, circle_word["top"] + 4
+        dots = [c for c in page.curves if abs((c["x0"] + c["x1"]) / 2 - cx) < 10 and abs((c["top"] + c["bottom"]) / 2 - cy) < 10 and 8 < c["x1"] - c["x0"] < 20]
+        if not dots:
+            return None
+        dot = dots[0]
+        scale = 3
+        img = page.to_image(resolution=72 * scale).original.convert("RGB")
+    mid_y = (dot["top"] + dot["bottom"]) / 2
+    votes = []
+    for dy in (-4, 0, 4):
+        for x in [dot["x0"] - k for k in (3, 5, 7, 9)] + [dot["x1"] + k for k in (3, 5, 7, 9)]:
+            colour = _pixel_colour(img.getpixel((int(x * scale), int((mid_y + dy) * scale))))
+            if colour:
+                votes.append(colour)
+    if len(votes) < 8:
+        return None
+    best = max(("green", "orange"), key=votes.count)
+    return best if votes.count(best) >= 0.7 * len(votes) else None
+
+
 def limb_flags_text(verdicts: dict) -> str:
     """'left leg low' (or 'none'): the limbs the Tanita marks outside its normal band, in the words the dashboard reads."""
     flagged = [f"{limb} {v}" for limb, v in verdicts.items() if v and v != "normal"]
@@ -123,6 +160,16 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
     # leg muscle score: the number inside the black circle on the chart
     circle = [w for w in p.in_region((380, 440, 300, 405)) if re.fullmatch(r"\d{2,3}", w["text"])]
     put("Leg muscle score", circle[0]["text"] if circle else None)
+    zone = None
+    if circle and data:
+        try:
+            zone = leg_score_zone(data, circle[0])
+        except Exception:
+            zone = None
+    if zone:
+        v["Leg muscle score zone (as drawn on the chart)"] = Value(text=zone, number=None, unit="", source="graphic")
+    else:
+        res.notes.append("Could not read: the leg muscle score chart (whether the score sits in the green or the orange area)")
 
     # segmental analysis: muscle on the left half, fat (kg and %) on the right half
     for side, x0, x1 in [("Muscle", 30, 300), ("Fat", 300, 595)]:
@@ -180,8 +227,9 @@ def read(pages: list, data: bytes | None = None) -> ReadResult:
         res.values["ECW/TBW ratio (calculated)"] = Value(text=f"{ecw / water:.3f}", number=round(ecw / water, 3), unit="", source="calculated")
     res.not_printed.append("ECW/TBW ratio (the report prints ECW and ICW, not the ratio; a calculated value is provided and marked as calculated)")
     res.notes.append(
-        "Of the coloured bars, this reader reads the visceral fat bar (which band it is drawn in) and the four limb muscle bars (green = in "
-        "Tanita's normal band, orange = outside it). The other bars (weight, fat, BMI, muscle mass, body water, metabolic age) are not read."
+        "Of the coloured graphics, this reader reads the visceral fat bar (which band it is drawn in), the four limb muscle bars (green = in "
+        "Tanita's normal band, orange = outside it) and the leg muscle score chart (green or orange area around the score). The other bars "
+        "(weight, fat, BMI, muscle mass, body water, metabolic age) are not read."
     )
     res.notes.append("Sex is drawn as a symbol on this report, not printed as text, so it is not read. Enter it separately.")
 
@@ -247,4 +295,7 @@ def app_fields(res: ReadResult) -> dict:
     return {"Weight": d("Weight (kg)"), "Fat %": d("Fat (%)"), "FFM": d("Fat-free mass (kg)"), "Muscle Mass": d("Muscle mass (kg)"), "TBW": water,
             "ECW/TBW": ratio, "Visceral Fat": d("Visceral fat level"), "Metabolic Age": d("Metabolic age (years)"), "Phase Angle": d("Phase angle (°)"),
             "Right Arm Muscle": d("Muscle, right arm (kg)"), "Left Arm Muscle": d("Muscle, left arm (kg)"),
-            "Right Leg Muscle": d("Muscle, right leg (kg)"), "Left Leg Muscle": d("Muscle, left leg (kg)"), "Limb Flags": flags}
+            "Right Leg Muscle": d("Muscle, right leg (kg)"), "Left Leg Muscle": d("Muscle, left leg (kg)"), "Limb Flags": flags,
+            "Leg Muscle Score": d("Leg muscle score"), "Leg Muscle Score Zone": d("Leg muscle score zone (as drawn on the chart)"),
+            "Right Arm Phase Angle": d("Phase angle, right arm (°)"), "Left Arm Phase Angle": d("Phase angle, left arm (°)"),
+            "Right Leg Phase Angle": d("Phase angle, right leg (°)"), "Left Leg Phase Angle": d("Phase angle, left leg (°)")}
