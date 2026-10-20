@@ -74,7 +74,7 @@ def bar_html(c) -> str:
             f'<div style="width:{a:.1f}%;background:#bae6fd;"></div>'
             f'<div style="width:{b - a:.1f}%;background:#86efac;"></div>'
             f'<div style="width:{100 - b:.1f}%;background:#fcd34d;"></div></div>'
-            f'<div style="position:absolute;top:-4px;left:{p:.1f}%;width:5px;height:22px;margin-left:-2px;background:#0f382b;border-radius:3px;border:1px solid #ffffff;"></div></div>'
+            f'<div style="position:absolute;top:-4px;left:{p:.1f}%;width:5px;height:22px;margin-left:-2px;background:#2F3130;border-radius:3px;border:1px solid #ffffff;"></div></div>'
             '<div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-top:8px;">'
             f'<span>Lower</span><span>Expected range: {esc(c["range_text"])}</span><span>Higher</span></div></div>')
 
@@ -83,7 +83,7 @@ def _card(c) -> str:
     colour = _HEAD.get(c.get("theme", ""), "#334155")
     parts = [
         '<div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin-bottom:14px;background:#ffffff;">',
-        f'<div style="margin-bottom:4px;"><b style="color:#0f382b;font-size:16px;">{esc(_label(c))}</b> &nbsp;{_chip(c["status"], c.get("status_text"))}</div>',
+        f'<div style="margin-bottom:4px;"><b style="color:#2F3130;font-size:16px;">{esc(_label(c))}</b> &nbsp;{_chip(c["status"], c.get("status_text"))}</div>',
     ]
     if c.get("measures"):
         parts.append(f'<p style="margin:2px 0 8px;color:#64748b;font-size:13px;line-height:1.5;">{esc(c["measures"])}</p>')
@@ -107,11 +107,11 @@ def render_glance_html(comparisons: list, note: str = "", note_by: str = "") -> 
         return ""
     parts = []
     if str(note or "").strip():
-        parts.append('<div style="margin:0 0 22px;padding:18px 20px;border-radius:12px;background:#ffffff;border:1px solid #e2e8f0;border-left:5px solid #0f382b;">'
-                     '<h3 style="color:#0f382b;margin:0 0 10px;">A note from your clinician</h3>'
+        parts.append('<div style="margin:0 0 22px;padding:18px 20px;border-radius:12px;background:#ffffff;border:1px solid #e2e8f0;border-left:5px solid #2F3130;">'
+                     '<h3 style="color:#2F3130;margin:0 0 10px;">A note from your clinician</h3>'
                      f'{note_to_html(note)}'
-                     f'<p style="margin:12px 0 0;color:#0f382b;font-weight:700;">{esc("- " + (str(note_by).strip() or "Your clinician"))}</p></div>')
-    parts.append(f'<p style="font-size:19px;line-height:1.5;color:#0f382b;font-weight:700;margin:0 0 20px;">{esc(verdict)}</p>')
+                     f'<p style="margin:12px 0 0;color:#2F3130;font-weight:700;">{esc("- " + (str(note_by).strip() or "Your clinician"))}</p></div>')
+    parts.append(f'<p style="font-size:19px;line-height:1.5;color:#2F3130;font-weight:700;margin:0 0 20px;">{esc(verdict)}</p>')
     groups = glance_groups(comps)
     for g in groups:
         colour = _HEAD.get(g["theme"], "#334155")
@@ -125,7 +125,7 @@ def render_glance_html(comparisons: list, note: str = "", note_by: str = "") -> 
     if not any(g["theme"] in (WORK_ON, DISCUSS) for g in groups):
         parts.append(f'<p style="color:#1e293b;font-size:16px;line-height:1.6;"><b>{esc(ALL_GOOD)}</b></p>')
     parts.append(f'<p style="color:#475569;font-size:14px;line-height:1.6;">{esc(CLOSING)}</p>')
-    parts.append('<p style="color:#0f382b;font-size:15px;"><b>Want to know what each result means?</b> Open <b>Your results in detail</b> above.</p>')
+    parts.append('<p style="color:#2F3130;font-size:15px;"><b>Want to know what each result means?</b> Open <b>Your results in detail</b> above.</p>')
     return "".join(parts)
 
 
@@ -139,7 +139,7 @@ def render_section_html(comparisons: list, age=None, sex=None, note: str = "", n
         return ""
     compared = [c for c in comps if c["status"] != NO_REFERENCE]
     skipped = [c for c in comps if c["status"] == NO_REFERENCE]
-    h3 = '<h3 style="color:#0f382b;margin-top:26px;">'
+    h3 = '<h3 style="color:#2F3130;margin-top:26px;">'
     parts = [f'<p style="font-size:16px;color:#1e293b;line-height:1.6;">{esc(" ".join(INTRO))}</p>']
     if compared:
         parts.append(f'{h3}Your results</h3>' + "".join(_card(c) for c in compared))
@@ -157,7 +157,7 @@ def render_section_html(comparisons: list, age=None, sex=None, note: str = "", n
         src = []
         for sid in used:
             s = data.SOURCES[sid]
-            link = f' <a href="{esc(s["url"])}" target="_blank" rel="noopener noreferrer" style="color:#0f382b;">{esc(s["url"])}</a>' if s["url"] else ""
+            link = f' <a href="{esc(s["url"])}" target="_blank" rel="noopener noreferrer" style="color:#2F3130;">{esc(s["url"])}</a>' if s["url"] else ""
             src.append(f'<li style="margin-bottom:8px;color:#334155;font-size:13px;"><b>{esc(s["short"])}.</b> {esc(s["citation"])}{link}<br>'
                        f'<span style="color:#64748b;">Who was studied: {esc(s["population"])} {esc(s["note"])}</span></li>')
         parts.append(f'{h3}Where these ranges come from</h3><ul style="padding-left:20px;line-height:1.5;">{"".join(src)}</ul>')

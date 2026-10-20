@@ -32,6 +32,7 @@ USER appuser
 
 EXPOSE 8080
 
+# Theme: the Health Autonomy at Chudleigh Health Hub colours (teal buttons and links, soft off-white backgrounds, charcoal text)
 CMD ["streamlit", "run", "app.py", \
      "--server.port=8080", \
      "--server.address=0.0.0.0", \
@@ -40,4 +41,9 @@ CMD ["streamlit", "run", "app.py", \
      "--server.enableXsrfProtection=true", \
      "--browser.gatherUsageStats=false", \
      "--client.showErrorDetails=none", \
-     "--client.toolbarMode=viewer"]
+     "--client.toolbarMode=viewer", \
+     "--theme.base=light", \
+     "--theme.primaryColor=#3D7F88", \
+     "--theme.backgroundColor=#FBFBFA", \
+     "--theme.secondaryBackgroundColor=#F4F4F2", \
+     "--theme.textColor=#3F4140"]

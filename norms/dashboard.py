@@ -835,21 +835,31 @@ def summarize(tiles: list, S: dict) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ the page
+# Health Autonomy at Chudleigh Health Hub brand (chudleighhealth.com): charcoal and teal, Lato text, Cormorant Garamond headings, the handwritten
+# 'Health autonomy' wordmark. Without the internet (a saved report opened offline) the page falls back to ordinary fonts. The light colours are unchanged.
+FONTS_URL = ("https://fonts.googleapis.com/css2?family=Herr+Von+Muellerhoff&family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500"
+             "&family=Lato:wght@400;700&display=swap")
 CSS = """
-:root{--primary:#0f382b;--secondary:#2b6a52;--bg:#f8fafc;--card:#ffffff;--text:#1e293b;--muted:#64748b;--border:#e2e8f0;
+:root{--primary:#2F3130;--secondary:#3D7F88;--charcoal:#4D4F4E;--teal-light:#8CC6CC;--teal-pale:#A9D7DB;--mint:#E4F1F2;--sand:#F4F4F2;
+--bg:#FBFBFA;--card:#ffffff;--text:#3F4140;--muted:#5E615F;--border:#E2E4E3;
 --green:#15803d;--amber:#b45309;--red:#b91c1c;--grey:#475569;--green-bg:#f0fdf4;--amber-bg:#fffbeb;--red-bg:#fef2f2;--grey-bg:#f1f5f9;}
 *{box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;margin:0;padding:16px;}
+body{font-family:'Lato',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;margin:0;padding:16px;}
 .report{max-width:950px;margin:0 auto;background:var(--card);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.05);overflow:hidden;border:1px solid var(--border);}
-.header{background:var(--primary);color:#fff;padding:26px;text-align:center}
-.header h1{margin:0 0 4px;font-size:24px;color:#fff}.header p{margin:0;color:#94a3b8;font-size:13px;text-transform:uppercase;letter-spacing:1px}
+.header{background:radial-gradient(700px 300px at 85% -20%,var(--secondary) 0%,transparent 60%),var(--charcoal);color:#fff;padding:22px 26px 20px;text-align:center}
+.ha-logo{font-family:'Herr Von Muellerhoff','Brush Script MT',cursive;font-weight:400;line-height:1.1;white-space:nowrap;font-size:50px;color:var(--teal-light)}
+.ha-H{display:inline-block;transform:scaleX(.75);transform-origin:right bottom;margin-right:-.08em}.ha-a{font-size:1.4em;line-height:0;margin-right:-.03em}
+.ha-sub{font-family:'Cormorant Garamond',Georgia,serif;font-size:12px;letter-spacing:.24em;text-transform:uppercase;color:#D9DEDD;margin-top:2px}
+.ha-sub em{text-transform:none;letter-spacing:.02em;font-size:14px;color:var(--teal-pale)}
+.header p{margin:10px 0 0;color:#C9CFCE;font-size:13px;letter-spacing:.5px}
+h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600}
 .content{padding:24px}
-.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;background:#f1f5f9;padding:16px;border-radius:8px;margin-bottom:22px}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;background:var(--sand);padding:16px;border-radius:8px;margin-bottom:22px}
 .meta label{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:600}.meta span{font-size:15px;font-weight:700;color:var(--primary)}
 .draft-banner{background:#fee2e2;border:2px solid var(--red);color:#7f1d1d;border-radius:8px;padding:12px 14px;margin-bottom:18px;font-weight:600}
-.note{margin:0 0 20px;padding:16px 18px;border-radius:12px;background:#fff;border:1px solid var(--border);border-left:5px solid var(--primary)}
+.note{margin:0 0 20px;padding:16px 18px;border-radius:12px;background:#fff;border:1px solid var(--border);border-left:5px solid var(--secondary)}
 .note h3{margin:0 0 8px;color:var(--primary)}.note p{margin:0 0 9px}.note .by{font-weight:700;color:var(--primary);margin-top:10px}
-.summary{background:linear-gradient(to bottom right,#f0fdf4,#ecfdf5);border:2px solid #10b981;border-radius:12px;padding:20px;margin-bottom:20px}
+.summary{background:linear-gradient(to bottom right,var(--mint),#F7FBFB);border:2px solid var(--secondary);border-radius:12px;padding:20px;margin-bottom:20px}
 .summary h2{margin:0 0 10px;color:var(--primary);font-size:20px}.summary .headline{font-size:19px;font-weight:700;color:var(--primary);margin:0 0 12px;line-height:1.45}
 .pills{display:flex;flex-wrap:wrap;gap:8px}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-weight:700;font-size:14px;color:#fff}
 .pill.green{background:var(--green)}.pill.amber{background:var(--amber)}.pill.red{background:var(--red)}.pill.info{background:var(--grey)}
@@ -857,7 +867,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Ar
 .priorities h2{margin:0 0 4px;color:var(--primary);font-size:19px}.priorities .intro{margin:0 0 10px;color:var(--muted);font-size:14px}
 .priorities ol{margin:0;padding-left:0;list-style:none}.priorities li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border)}
 .priorities li b{color:var(--primary)}
-.group h2{color:var(--primary);font-size:19px;margin:26px 0 10px;border-bottom:3px solid var(--primary);padding-bottom:4px}
+.group h2{color:var(--primary);font-size:22px;margin:26px 0 10px;border-bottom:3px solid var(--secondary);padding-bottom:4px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start}
 .tile{border:1px solid var(--border);border-left:6px solid var(--grey);border-radius:10px;background:#fff;overflow:hidden}
 .tile.green{border-left-color:var(--green)}.tile.amber{border-left-color:var(--amber)}.tile.red{border-left-color:var(--red)}
@@ -876,7 +886,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Ar
 .book{color:var(--muted);font-size:13px}.draft-badge{display:inline-block;background:var(--red);color:#fff;font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;margin-top:8px}
 .how{margin-top:28px;padding:16px 18px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;font-size:14px;color:#334155}.how h2{margin:0 0 8px;font-size:17px;color:var(--primary)}.how p{margin:0 0 8px}
 .sources{margin-top:18px;font-size:13px;color:#334155}.sources h2{font-size:16px;color:var(--primary)}.sources ul{padding-left:20px}.sources li{margin-bottom:8px}
-.footer{text-align:center;padding:18px;background:#f1f5f9;font-size:12px;color:var(--muted);border-top:1px solid var(--border)}
+.footer{text-align:center;padding:18px;background:var(--sand);font-size:12px;color:var(--muted);border-top:1px solid var(--border)}
 .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted);margin:8px 0 0}
 .links{background:#f8fafc;border:1px solid var(--border);border-left:5px solid var(--secondary);border-radius:12px;padding:18px 20px;margin-bottom:24px}
 .links h2{margin:0 0 4px;color:var(--primary);font-size:19px}.links .intro{margin:0 0 12px;color:var(--muted);font-size:14px}
@@ -972,7 +982,7 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
             items = "".join(f'<li>{_dot(p["light"], True)}<span><b>{esc(p["title"])}</b>: {esc(p["do"])}</span></li>' for p in summary["priorities"])
             prio = f'<div class="priorities"><h2>{esc(S["priorities_heading"])}</h2><p class="intro">{esc(S["priorities_intro"])}</p><ol>{items}</ol></div>'
         else:
-            prio = f'<div class="priorities"><p style="margin:0;font-weight:700;color:#0f382b">{esc(S["no_priorities"])}</p></div>'
+            prio = f'<div class="priorities"><p style="margin:0;font-weight:700;color:var(--primary)">{esc(S["no_priorities"])}</p></div>'
     else:
         prio = ""
     groups: dict = {}
@@ -985,8 +995,10 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
     how = (f'<div class="how"><h2>{esc(S["how_to_read_heading"])}</h2>' + "".join(f'<p>{esc(S[k])}</p>' for k in ("how_to_read_1", "how_to_read_2", "how_to_read_3")) + "</div>") if tiles else ""
     version = f'Reference data version {esc(NORMS_VERSION)} &middot; Wording version {esc(library.version)}'
     return (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
-            f'<title>Chudleigh Health Hub - {esc(S.get("page_title", "Your results"))}</title><style>{CSS}</style></head><body><div class="report">'
-            f'<div class="header"><h1>Chudleigh Health Hub</h1><p>Health Autonomy &bull; Your longevity results</p></div><div class="content">'
+            f'<title>Health Autonomy at Chudleigh Health Hub - {esc(S.get("page_title", "Your results"))}</title>'
+            f'<link rel="stylesheet" href="{FONTS_URL}"><style>{CSS}</style></head><body><div class="report">'
+            f'<div class="header"><div class="ha-logo"><span class="ha-H">H</span>ealth <span class="ha-a">a</span>utonomy</div>'
+            f'<div class="ha-sub"><em>at</em> Chudleigh Health Hub</div><p>Your longevity results</p></div><div class="content">'
             f'<div class="meta"><div><label>Participant</label><span>{esc(meta.get("participant_name", ""))}</span></div>'
             f'<div><label>Age / sex</label><span>{esc(meta.get("age_gender", ""))}</span></div>'
             f'<div><label>Assessment date</label><span>{esc(meta.get("assessment_date", ""))}</span></div>'

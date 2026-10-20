@@ -222,85 +222,67 @@ LEGACY_PLAN_NOTE = (
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Chudleigh Health Hub - Longevity Portal",
+    page_title="Health Autonomy at Chudleigh Health Hub",
     page_icon="🩺",
     layout="wide",
 )
 
-# --- BRAND STYLING ---
+# --- BRAND STYLING: Health Autonomy at Chudleigh Health Hub (colours and fonts from chudleighhealth.com) ---
+BRAND_FONTS = ("https://fonts.googleapis.com/css2?family=Herr+Von+Muellerhoff&family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500"
+               "&family=Lato:wght@400;700&display=swap")
 st.markdown(
-    """
+    f"""
     <style>
-    :root {
-        --primary: #0f382b;
-        --secondary: #2b6a52;
-        --success: #10b981;
-    }
-    .main-header {
-        background-color: var(--primary);
-        color: white;
-        padding: 24px;
-        border-radius: 12px;
-        text-align: center;
-        margin-bottom: 25px;
-    }
-    .main-header h1 {
-        margin: 0;
-        font-size: 28px;
-        color: white;
-    }
-    .main-header p {
-        margin: 6px 0 0 0;
-        color: #94a3b8;
-        font-size: 13px;
-        text-transform: uppercase;
-        letter-spacing: 1.5px;
-    }
-    .test-card {
-        background-color: #f8fafc;
-        border-left: 4px solid var(--primary);
-        padding: 12px 16px;
-        margin-bottom: 12px;
-        border-radius: 6px;
-        color: #1e293b;
-    }
-    .portal-box {
-        background-color: #f0fdf4;
-        border: 1px solid #bbf7d0;
-        padding: 24px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-        color: #14532d;
-    }
-    .portal-box h3 { margin-top: 0; color: #0f382b !important; }
-    .portal-box p, .portal-box b { color: #14532d !important; }
-    .module-box {
-        background-color: #f8fafc;
-        border: 1px solid #cbd5e1;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-        color: #1e293b;
-    }
-    .module-box h3, .module-box p, .module-box b { color: #1e293b !important; }
-    .history-box {
-        background-color: #eff6ff;
-        border: 1px solid #bfdbfe;
-        padding: 16px;
-        border-radius: 8px;
-        margin-bottom: 20px;
-        color: #1e3a8a;
-    }
-    .history-box b { color: #1e3a8a !important; }
-    .check-banner, .check-note { background-color: #fef2f2; border: 2px solid #dc2626; border-left: 10px solid #dc2626;
-        border-radius: 8px; margin: 10px 0 16px 0; font-size: 1.15rem; font-weight: 700; line-height: 1.5; color: #7f1d1d; }
-    .check-banner { padding: 14px 18px; }
-    .check-note { padding: 10px 14px; border-radius: 6px; }
-    .check-banner, .check-banner *, .check-note, .check-note * { color: #7f1d1d !important; }
-    .check-note span { font-size: 0.85rem; font-weight: 400; }
-    footer { visibility: hidden; }
-    .site-footer { text-align: center; font-size: 12px; margin-top: 32px; opacity: 0.8; }
-    .site-footer a { color: inherit !important; text-decoration: underline; }
+    @import url('{BRAND_FONTS}');
+    :root {{
+        --ha-charcoal: #4D4F4E; --ha-strong: #2F3130; --ha-text: #3F4140; --ha-muted: #5E615F;
+        --ha-teal: #3D7F88; --ha-teal-dark: #336E76; --ha-teal-light: #8CC6CC; --ha-teal-pale: #A9D7DB;
+        --ha-mint: #E4F1F2; --ha-sand: #F4F4F2; --ha-bg: #FBFBFA; --ha-border: #E2E4E3; --ha-orange: #C4620F;
+    }}
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"], .stMarkdown, button, input, textarea, select {{
+        font-family: 'Lato', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+    }}
+    h1, h2, h3, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {{
+        font-family: 'Cormorant Garamond', Georgia, serif !important; font-weight: 600 !important; color: var(--ha-strong);
+    }}
+    .ha-logo {{ font-family: 'Herr Von Muellerhoff', 'Brush Script MT', cursive; font-weight: 400; line-height: 1.1; white-space: nowrap; }}
+    .ha-H {{ display: inline-block; transform: scaleX(.75); transform-origin: right bottom; margin-right: -.08em; }}
+    .ha-a {{ font-size: 1.4em; line-height: 0; margin-right: -.03em; }}
+    .main-header {{
+        background: radial-gradient(900px 380px at 85% -20%, var(--ha-teal) 0%, transparent 60%), var(--ha-charcoal);
+        color: white; padding: 22px 24px 20px; border-radius: 14px; text-align: center; margin-bottom: 25px;
+    }}
+    .main-header .ha-logo {{ font-size: 54px; color: var(--ha-teal-light); }}
+    .main-header .ha-sub {{ font-family: 'Cormorant Garamond', Georgia, serif; font-size: 13px; letter-spacing: .24em; text-transform: uppercase;
+        color: #D9DEDD; margin-top: 2px; }}
+    .main-header .ha-sub em {{ text-transform: none; letter-spacing: .02em; font-size: 15px; color: var(--ha-teal-pale); }}
+    .main-header p {{ margin: 10px 0 0 0; color: #C9CFCE; font-size: 13px; letter-spacing: .5px; }}
+    .test-card {{
+        background-color: var(--ha-sand); border-left: 4px solid var(--ha-teal); padding: 12px 16px; margin-bottom: 12px; border-radius: 6px; color: var(--ha-text);
+    }}
+    .portal-box {{
+        background-color: var(--ha-mint); border: 1px solid var(--ha-teal-pale); padding: 24px; border-radius: 12px; margin-bottom: 20px; color: var(--ha-strong);
+    }}
+    .portal-box h3 {{ margin-top: 0; color: var(--ha-strong) !important; }}
+    .portal-box p, .portal-box b {{ color: var(--ha-text) !important; }}
+    .module-box {{
+        background-color: var(--ha-sand); border: 1px solid var(--ha-border); padding: 20px; border-radius: 12px; margin-bottom: 20px; color: var(--ha-text);
+    }}
+    .module-box h3, .module-box p, .module-box b {{ color: var(--ha-text) !important; }}
+    .history-box {{
+        background-color: var(--ha-mint); border: 1px solid var(--ha-teal-pale); border-left: 5px solid var(--ha-teal); padding: 16px; border-radius: 8px;
+        margin-bottom: 20px; color: var(--ha-strong);
+    }}
+    .history-box b {{ color: var(--ha-strong) !important; }}
+    .check-banner, .check-note {{ background-color: #fef2f2; border: 2px solid #dc2626; border-left: 10px solid #dc2626;
+        border-radius: 8px; margin: 10px 0 16px 0; font-size: 1.15rem; font-weight: 700; line-height: 1.5; color: #7f1d1d; }}
+    .check-banner {{ padding: 14px 18px; }}
+    .check-note {{ padding: 10px 14px; border-radius: 6px; }}
+    .check-banner, .check-banner *, .check-note, .check-note * {{ color: #7f1d1d !important; }}
+    .check-note span {{ font-size: 0.85rem; font-weight: 400; }}
+    footer {{ visibility: hidden; }}
+    .site-footer {{ text-align: center; font-size: 12px; margin-top: 32px; opacity: 0.8; }}
+    .site-footer a {{ color: inherit !important; text-decoration: underline; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -310,8 +292,9 @@ st.markdown(
 st.markdown(
     """
     <div class="main-header">
-        <h1>Chudleigh Health Hub</h1>
-        <p>Health Autonomy &amp; Expert Clinical Longevity Portal (Longitudinal Edition)</p>
+        <div class="ha-logo"><span class="ha-H">H</span>ealth <span class="ha-a">a</span>utonomy</div>
+        <div class="ha-sub"><em>at</em> Chudleigh Health Hub</div>
+        <p>Your longevity results, plans and reports</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -2344,9 +2327,9 @@ REPORT_TEMPLATE = """
     <title>Chudleigh Health Hub - Expert Clinical Longevity Report</title>
     <style>
         :root {{
-            --primary-color: #0f382b;
-            --secondary-color: #2b6a52;
-            --success-color: #10b981;
+            --primary-color: #2F3130;
+            --secondary-color: #3D7F88;
+            --success-color: #3D7F88;
             --bg-color: #f8fafc;
             --card-bg: #ffffff;
             --text-main: #1e293b;
@@ -2367,7 +2350,7 @@ REPORT_TEMPLATE = """
         .view-btn {{ background: transparent; border: none; padding: 12px 20px; font-size: 15px; font-weight: 700; color: var(--text-muted); border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }}
         .view-btn.active {{ background: var(--primary-color); color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
 
-        .results-card {{ background: linear-gradient(to bottom right, #f0fdf4, #ecfdf5); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
+        .results-card {{ background: linear-gradient(to bottom right, #E4F1F2, #F4F4F2); border: 2px solid var(--success-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
         .results-card h2 {{ margin-top: 0; color: var(--secondary-color); font-size: 20px; }}
         .plain-english-card {{ background: linear-gradient(to bottom right, #f8fafc, #f1f5f9); border: 2px solid var(--secondary-color); border-radius: 10px; padding: 25px; margin-bottom: 30px; }}
         .plain-english-card h2 {{ margin-top: 0; color: var(--primary-color); font-size: 20px; }}
@@ -2406,7 +2389,7 @@ REPORT_TEMPLATE = """
 
             {view_cards}
 
-            <h2 style="color: #0f382b; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
+            <h2 style="color: #2F3130; font-size: 20px; margin-bottom: 15px;">Completed Diagnostic Assessments ({tests_count})</h2>
             {tests_html}
 
             <div style="margin-top: 30px; padding: 16px 18px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; line-height: 1.6; color: #475569;">
@@ -2446,13 +2429,13 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         pdf_note_box = ""
         if t.get("pdf_filename"):
             pdf_note_box = (
-                '<div style="margin-top: 15px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 15px; border-radius: 8px;">'
-                f'<p style="font-size: 13px; color: #166534; margin: 0;"><b>Official Diagnostic Report Attached:</b> {esc(t["pdf_filename"])} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
+                '<div style="margin-top: 15px; background: #E4F1F2; border: 1px solid #A9D7DB; padding: 15px; border-radius: 8px;">'
+                f'<p style="font-size: 13px; color: #336E76; margin: 0;"><b>Official Diagnostic Report Attached:</b> {esc(t["pdf_filename"])} (Reviewed and synthesized by Chudleigh Health Hub clinicians)</p>'
                 '</div>'
             )
         tests_html += (
-            '<div style="background: #f8fafc; border-left: 4px solid #0f382b; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
-            f'<h3 style="margin-top: 0; color: #0f382b; font-size: 19px;">Test #{idx + 1}: {esc(t["type"])}</h3>'
+            '<div style="background: #f8fafc; border-left: 4px solid #2F3130; padding: 20px; margin-bottom: 25px; border-radius: 8px; border: 1px solid #e2e8f0;">'
+            f'<h3 style="margin-top: 0; color: #2F3130; font-size: 19px;">Test #{idx + 1}: {esc(t["type"])}</h3>'
             f'<ul style="margin-bottom: 15px; color: #334155; padding-left: 20px;">{list_content}</ul>'
             f'{pdf_note_box}'
             '</div>'
@@ -2464,13 +2447,13 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
     detail_html = norms.render_section_html(comparisons) if compare_page_shown(comparisons) else ""
     clinical_inner = (
         '<h2>🎯 Master Executive Clinical Review &amp; Longitudinal Progress</h2><div class="interpretation-text">'
-        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>'
+        '<h3 style="color: #2F3130; border-bottom: 2px solid #A9D7DB; padding-bottom: 5px;">Executive Summary &amp; Progress Delta</h3>'
         f'{safe["ta_master"] or "<p>Master summary pending.</p>"}'
-        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>'
+        '<h3 style="color: #2F3130; border-bottom: 2px solid #A9D7DB; padding-bottom: 5px; margin-top: 30px;">🫀 Cardiorespiratory &amp; Autonomic Analysis</h3>'
         f'{safe["ta_mod1"] or "<p>Cardiorespiratory module pending.</p>"}'
-        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>'
+        '<h3 style="color: #2F3130; border-bottom: 2px solid #A9D7DB; padding-bottom: 5px; margin-top: 30px;">⚖️ Body Composition &amp; Metabolic Age Analysis</h3>'
         f'{safe["ta_mod2"] or "<p>Metabolic module pending.</p>"}'
-        '<h3 style="color: #0f382b; border-bottom: 2px solid #bbf7d0; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>'
+        '<h3 style="color: #2F3130; border-bottom: 2px solid #A9D7DB; padding-bottom: 5px; margin-top: 30px;">🏋️ Biomechanical &amp; Neuromuscular Analysis</h3>'
         f'{safe["ta_mod3"] or "<p>Biomechanical module pending.</p>"}'
         '</div>'
     )
