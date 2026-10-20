@@ -1964,12 +1964,25 @@ ASSESSMENTS = {
             [("Left/Right Symmetry (%)", "96.5%", "L/R Symmetry"), ("Peak Power Output (W)", "680 W", "Peak Power")],
         ],
     },
+    # Spirometry: the boxes match the 'Spirometry Results' report (pdf_reader/spirometry.py fills them). The z-scores and % predicted are the
+    # spirometer's own, from its reference equations; the grades are its test quality grades (ATS/ERS: A to C good enough to interpret).
     "Spirometry (Pulmonary Function)": {
         "columns": [
-            [("FVC (L / % Pred)", "4.85 L (104%)", "FVC"), ("FEV1 (L / % Pred)", "3.92 L (102%)", "FEV1")],
-            [("FEV1 / FVC Ratio (%)", "80.8%", "FEV1/FVC Ratio"), ("PEF (L/m / % Pred)", "9.4 L/s (98%)", "PEF")],
-            [("FEF 25-75% (L/s)", "4.21 L/s", "FEF 25-75"), ("FEF 75% (L/s)", "1.85 L/s", "FEF 75")],
+            [("FVC (L)", "4.14 L", "FVC"), ("FVC % predicted", "82.1", "FVC % Predicted"), ("FVC z-score", "-1.36", "FVC z-score")],
+            [("FEV1 (L)", "3.57 L", "FEV1"), ("FEV1 % predicted", "89.7", "FEV1 % Predicted"), ("FEV1 z-score", "-0.79", "FEV1 z-score")],
+            [("FEV1 / FVC (%)", "86.2%", "FEV1/FVC Ratio"), ("FEV1/FVC z-score", "1.21", "FEV1/FVC z-score"), ("PEF (L/min)", "506 L/min", "PEF")],
+            [("FEF 25-75% (L/s)", "3.82 L/s", "FEF 25-75"), ("FEF 75% (L/s)", "1.73 L/s", "FEF 75"),
+             ("FEV1 quality grade (A to F, or U)", "A", "FEV1 Grade"), ("FVC quality grade (A to F, or U)", "A", "FVC Grade")],
         ],
+    },
+    # Grip strength with a hand dynamometer, scored against UK norms for age and sex (Dodds 2014) and the EWGSOP2 low-strength line.
+    "Grip Strength (Dynamometer)": {
+        "columns": [
+            [("Right hand, best try (kg)", "38", "Right Grip"), ("Left hand, best try (kg)", "35", "Left Grip")],
+            [("Dominant hand (Right or Left)", "Right", "Dominant Hand")],
+        ],
+        "guide": ("**Grip strength.** Seated, with the elbow bent at a right angle. Three tries with each hand, and enter the best for each. "
+                  "The report uses the best of both hands, as the UK reference data does (Dodds 2014)."),
     },
     "AGE Reader (Advanced Glycation End-Products)": {
         "columns": [

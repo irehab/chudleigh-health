@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-20.1"
+NORMS_VERSION = "2026-10-20.2"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -32,6 +32,7 @@ A_TANITA = "Tanita Body Composition (MC-780MA)"
 A_ECG = "12-Lead ECG (Electrocardiogram)"
 A_AGE = "AGE Reader (Advanced Glycation End-Products)"
 A_PAR = "Physical Activity Rating (PA-R)"
+A_GRIP = "Grip Strength (Dynamometer)"
 
 # What a participant reads as the name of each result, and one plain line on what it measures.
 PATIENT_TEXT = {
@@ -47,6 +48,7 @@ PATIENT_TEXT = {
     "age_level": ("Skin AGE level", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
     "age_bodyage": ("Skin age estimate (BodyAge)", "The age at which an average person has your skin AGE level, according to the AGE Reader."),
     "asm_index": ("Arm and leg muscle (sarcopenia check)", "The muscle in your arms and legs, compared with your height."),
+    "grip": ("Grip strength", "How hard you can squeeze: a simple sign of your overall muscle strength."),
     "vo2max_est": ("Fitness (estimated VO2 max)", "How much oxygen your body can use at full effort, estimated from your activity, age, sex and body fat."),
     "longevity_age": ("Longevity age (estimate)", "The average of the age estimates from your Tanita and your AGE Reader."),
 }
@@ -163,6 +165,16 @@ def measures_from_tests(tests: list, height_cm: float | None = None) -> dict:
             body = _extra_num(t, "BodyAge (years)")
             if body is not None:
                 out["age_bodyage"] = {"value": body, "assessment": a, "age_used": age_used, "diff": _extra_num(t, "BodyAge difference from age (years)")}
+    # grip strength: the best of both hands (as in the UK reference data)
+    for t in tests or []:
+        if t.get("type") == A_GRIP:
+            d = t.get("data") or {}
+            r, l = _num(d.get("Right Grip")), _num(d.get("Left Grip"))
+            hands = {h: x for h, x in (("right", r), ("left", l)) if x is not None and 0 < x < 120}
+            if hands:
+                hand = max(hands, key=hands.get)
+                out["grip"] = {"value": hands[hand], "hand": hand, "right": r, "left": l, "assessment": A_GRIP,
+                               "dominant": str(d.get("Dominant Hand") or "").strip().lower()}
     # the fitness estimate needs the physical activity rating (0-7), and body fat from the Tanita (or else BMI)
     par = None
     for t in tests or []:
@@ -436,6 +448,8 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         return _asm_index(m, sex)
     if key == "vo2max_est":
         return _vo2max(m, age, sex)
+    if key == "grip":
+        return _grip(m, age, sex)
     if key == "longevity_age":
         return _longevity_age(m, age)
 
@@ -542,6 +556,56 @@ def _vo2max(m, age, sex) -> Comparison:
                       detail="An estimate, not a measurement. For most people it is within about 5 ml/kg/min of a measured test.")
 
 
+def _grip_centiles(sex, age):
+    """The Dodds 2014 centile values for this exact age: straight-line steps between the published ages (20 to 90, every 5 years)."""
+    table = data.DODDS_GRIP[sex]
+    ages = sorted(table)
+    age = max(ages[0], min(ages[-1], age))
+    lo = max(a for a in ages if a <= age)
+    hi = min(a for a in ages if a >= age)
+    if lo == hi:
+        return table[lo]
+    f = (age - lo) / (hi - lo)
+    return tuple(a + (b - a) * f for a, b in zip(table[lo], table[hi]))
+
+
+def _grip(m, age, sex) -> Comparison:
+    """Best grip of both hands against the UK centiles for age and sex (Dodds 2014), and the EWGSOP2 low-strength line."""
+    a, v, hand = m["assessment"], m["value"], m["hand"]
+    label = "Grip strength (best of both hands)"
+    why = _missing(age, sex)
+    if why:
+        return _no_ref("grip", label, a, v, "kg", why)
+    if age < 20:
+        return _no_ref("grip", label, a, v, "kg", "The adult reference data starts at age 20.")
+    cents = _grip_centiles(sex, age)
+    pts = list(zip(data.DODDS_CENTILES, cents))
+    if v < pts[0][1]:
+        pct, where = 5.0, "below the 10th centile"
+    elif v > pts[-1][1]:
+        pct, where = 95.0, "above the 90th centile"
+    else:
+        pct = next(p0 + (p1 - p0) * (v - v0) / (v1 - v0) for (p0, v0), (p1, v1) in zip(pts, pts[1:]) if v0 <= v <= v1 and v1 > v0) if any(
+            v0 <= v <= v1 and v1 > v0 for (p0, v0), (p1, v1) in zip(pts, pts[1:])) else 50.0
+        where = f"around the {_nth(pct)} centile"
+    who = "men" if sex == "male" else "women"
+    cut = data.EWGSOP2_LOW_GRIP[sex]
+    sentence = (f"Your best grip was {_fmt(v)} kg, with your {hand} hand. For {who} of your age in the UK, the middle value is about {cents[2]:.0f} kg, "
+                f"and 9 in 10 grip more than {cents[0]:.0f} kg. Yours is {where}.")
+    if v < cut:
+        status, theme, headline, words = BELOW, DISCUSS, "A good place to focus first", "Under the low-strength line"
+        meaning = f"That is under the line the European guidance uses for low grip strength, {_fmt(cut)} kg for {who}. Your clinician will look at it with your muscle results."
+    elif pct < 25:
+        status, theme, headline, words = BELOW, WORK_ON, "Worth working on", "Lower than most people your age"
+        meaning = "That is lower than most people of your age and sex. Grip strength responds well to strength training at any age."
+    else:
+        status, theme, headline, words = WITHIN, DOING_WELL, "A good result", "In the usual range or better"
+        meaning = "That is in the usual range or better for your age and sex. Grip is a simple sign of your overall muscle strength."
+    return Comparison(key="grip", label=label, assessment=a, status=status, source="dodds_2014", value=v, value_text=f"{_fmt(v)} kg", range_text=f"10th centile: {cents[0]:.0f} kg",
+                      group=who, headline=headline, sentence=sentence, meaning=meaning, theme=theme, status_text=words, also_sources=["ewgsop2"] if v < cut else [],
+                      detail="Grip depends on the dynamometer and on doing the test the same way each time, so compare results from the same clinic.")
+
+
 def _longevity_age(m, age) -> Comparison:
     """The average of the Tanita's metabolic age and the AGE Reader's BodyAge, against the person's actual age."""
     a, v, met, body = m["assessment"], m["value"], m["metabolic"], m["bodyage"]
@@ -639,7 +703,7 @@ def _age_bodyage(m, age) -> Comparison:
                       status_text=words, detail="BodyAge comes from the AGE Reader's own reference group, which the report does not publish.")
 
 
-_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "age_level", "age_bodyage",
+_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "grip", "age_level", "age_bodyage",
           "vo2max_est", "longevity_age"]
 
 

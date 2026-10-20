@@ -110,6 +110,32 @@ SOURCES = {
         "note": ("A body composition scale estimates muscle in a different way from DXA, and hydration can affect it, so the result is a guide. "
                  "The guidance looks at muscle strength first, and muscle quantity second."),
     },
+    "dodds_2014": {
+        "short": "Grip strength for your age and sex (UK, Dodds 2014)",
+        "citation": ("Dodds RM, Syddall HE, Cooper R, et al. Grip strength across the life course: normative data from twelve British studies. "
+                     "PLoS One 2014;9(12):e113637. Table 2."),
+        "url": "https://doi.org/10.1371/journal.pone.0113637",
+        "population": "About 50,000 people in Great Britain aged 4 to 90, from 12 studies. Most were measured seated, and the best try was used.",
+        "note": ("The line for low grip (27 kg for men, 16 kg for women) is 2.5 standard deviations below young adult peak strength. "
+                 "The European sarcopenia guidance uses the same line."),
+    },
+    "spiro_printed": {
+        "short": "Breathing test: the predicted values printed by your spirometer",
+        "citation": ("The predicted value, lower limit of normal and z-score for each result are worked out by your spirometer's software from your age, "
+                     "sex, height and ethnic origin, and printed on your report."),
+        "url": "",
+        "population": "The reference group set in the spirometer's software.",
+        "note": "A z-score of -1.645 or above is within the expected range: about 95 in 100 healthy people of your age, sex and height are above that line.",
+    },
+    "ers_ats_2022": {
+        "short": "How breathing test results are judged (ERS/ATS 2022)",
+        "citation": ("Stanojevic S, Kaminsky DA, Miller MR, et al. ERS/ATS technical standard on interpretive strategies for routine lung function tests. "
+                     "European Respiratory Journal 2022;60(1):2101499."),
+        "url": "https://doi.org/10.1183/13993003.01499-2021",
+        "population": "An international standard from the European Respiratory Society and the American Thoracic Society.",
+        "note": ("Results are judged by z-scores. -1.645 or above is within the expected range. Between -1.65 and -2.5 is mildly below it, "
+                 "-2.5 to -4 moderately, and under -4 severely."),
+    },
     "friend_2015": {
         "short": "Fitness for your age and sex (FRIEND registry 2015)",
         "citation": ("Kaminsky LA, Arena R, Myers J. Reference standards for cardiorespiratory fitness measured with cardiopulmonary exercise testing: "
@@ -217,6 +243,18 @@ FAT = {  # (at BMI 18.5, at BMI 25, at BMI 30)
 BMI_LIMITS = (18.5, 25.0, 30.0)
 # ---- EWGSOP2 (Cruz-Jentoft 2019) Table 3: low muscle quantity. {sex: (ASM kg below which is low, ASM / height squared kg/m2 below which is low)}
 EWGSOP2_LOW_MUSCLE = {"male": (20.0, 7.0), "female": (15.0, 5.5)}
+# EWGSOP2 Table 3: low muscle strength, grip under 27 kg for men and 16 kg for women (Dodds 2014: 2.5 SD below the young adult peak)
+EWGSOP2_LOW_GRIP = {"male": 27.0, "female": 16.0}
+# ---- Grip strength, UK: Dodds et al. PLoS One 2014;9(12):e113637, Table 2 (kg). {age: (10th, 25th, 50th, 75th, 90th centile)} at each exact age.
+DODDS_CENTILES = (10, 25, 50, 75, 90)
+DODDS_GRIP = {
+    "male": {20: (30, 35, 40, 46, 52), 25: (36, 41, 48, 55, 61), 30: (38, 44, 51, 58, 64), 35: (39, 45, 51, 58, 64), 40: (38, 44, 50, 57, 63),
+             45: (36, 42, 49, 56, 61), 50: (35, 41, 48, 54, 60), 55: (34, 40, 47, 53, 59), 60: (33, 39, 45, 51, 56), 65: (31, 37, 43, 48, 53),
+             70: (29, 34, 39, 44, 49), 75: (26, 31, 35, 41, 45), 80: (23, 27, 32, 37, 42), 85: (19, 24, 29, 33, 38), 90: (16, 20, 25, 29, 33)},
+    "female": {20: (21, 24, 28, 32, 36), 25: (23, 26, 30, 35, 38), 30: (24, 27, 31, 35, 39), 35: (23, 27, 31, 35, 39), 40: (23, 27, 31, 35, 39),
+               45: (22, 26, 30, 34, 38), 50: (21, 25, 29, 33, 37), 55: (19, 23, 28, 32, 35), 60: (18, 22, 27, 31, 34), 65: (17, 21, 25, 29, 33),
+               70: (16, 20, 24, 27, 31), 75: (14, 18, 21, 25, 28), 80: (13, 16, 19, 23, 26), 85: (11, 14, 17, 20, 23), 90: (9, 11, 14, 17, 20)},
+}
 
 # ---- VO2max reference: FRIEND registry 2015 (Kaminsky et al., Mayo Clin Proc 2015;90(11):1515-23), Table 3, treadmill, directly measured,
 # 7783 maximal tests of US adults aged 20-79 without cardiovascular disease. Percentiles 5, 10, 25, 50, 75, 90, 95 (mL O2/kg/min).

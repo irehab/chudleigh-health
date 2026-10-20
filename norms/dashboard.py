@@ -23,7 +23,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from . import data
-from .engine import (A_AGE, A_ECG, A_PAR, A_SPO2, A_TANITA, ABOVE, BELOW, DISCUSS, DOING_WELL, INFO, NO_REFERENCE, NORMS_VERSION, PATIENT_TEXT, WATCH, WELL_ABOVE, WORK_ON, _num, for_patient)
+from .engine import (A_AGE, A_ECG, A_GRIP, A_PAR, A_SPO2, A_TANITA, ABOVE, BELOW, DISCUSS, DOING_WELL, INFO, NO_REFERENCE, NORMS_VERSION, PATIENT_TEXT, WATCH, WELL_ABOVE, WORK_ON, _num, for_patient)
 from .render import bar_html
 
 esc = lambda s: html.escape("" if s is None else str(s), quote=True)
@@ -35,7 +35,13 @@ SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 GREEN, AMBER, RED, GREY = "green", "amber", "red", "info"
 SEVERITY = {GREEN: 0, GREY: 0, AMBER: 1, RED: 2}
 SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i"}      # a tick, a triangle, an exclamation mark, an i: the light is never colour alone
-RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts", "fp_balance")
+RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts", "fp_balance", "spiro")
+# rule 'spiro': the spirometer's own z-scores for FVC, FEV1 and FEV1/FVC, each given a light from the row's ranges (ERS/ATS 2022: -1.645 or above
+# is within the expected range). A caution is added when the test quality grades are below C.
+SPIRO_PARTS = [("FVC", "FVC z-score", "FVC % Predicted", "Total air you blew out (FVC)"),
+               ("FEV1", "FEV1 z-score", "FEV1 % Predicted", "Air out in the first second (FEV1)"),
+               ("FEV1/FVC Ratio", "FEV1/FVC z-score", "", "Share blown out in the first second (FEV1/FVC)")]
+SPIRO_GOOD_GRADES = ("A", "B", "C")
 # rule 'fp_balance': left-right balance across the VALD force plate tests. Each test's asymmetry (e.g. '11% R': VALD's letter is the
 # side that produced MORE, checked against the left/right force traces on a squat report) gets a light from the row's ranges, and
 # single-leg stance compares the sway on each leg. The tile says which side was weaker, and whether that was the same in every test.
@@ -55,9 +61,10 @@ A_VALD_CMJ = "VALD ForceDecks - Countermovement Jump (CMJ)"
 A_VALD_SQUAT = "VALD ForceDecks - Multi-Rep Squat"
 A_VALD_STS = "VALD ForceDecks - Sit-to-Stand"
 A_VALD_SLSB = "VALD ForceDecks - Single Leg Stance / Balance"
-VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB}
+A_SPIRO = "Spirometry (Pulmonary Function)"
+VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB, "spiro": A_SPIRO, "grip": A_GRIP}
 DEVICE_NAMES = {"vald_cmj": "Jump (CMJ)", "vald_squat": "Squat", "vald_sts": "Sit-to-stand", "vald_slsb": "Single-leg balance"}
-COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_PAR, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
+COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_PAR, A_GRIP, A_SPIRO, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
 TEXT_FIELDS = ("headline", "text", "do")
 REQUIRED_COLUMNS = ["key", "group", "order", "priority", "approved", "title", "what_it_is", "rule", "members", "green_min", "green_max", "amber_min", "amber_max",
                     "facts", "value_from", "green_headline", "green_text", "green_do", "amber_headline", "amber_text", "amber_do", "red_headline", "red_text",
@@ -225,7 +232,7 @@ def _parse_row(raw, line, problems):
             problems.append(f"ERROR: {label}: 'value_from' must look like tanita:Visceral Fat (device, then the box name).")
         if "{value}" not in row.facts:
             problems.append(f"ERROR: {label}: 'facts' must include {{value}}, for example 'Your rating was {{value}}.'")
-    if row.rule in ("range", "limbs", "parts", "fp_balance") and row.green_min is None and row.green_max is None:
+    if row.rule in ("range", "limbs", "parts", "fp_balance", "spiro") and row.green_min is None and row.green_max is None:
         problems.append(f"ERROR: {label}: a '{row.rule}' row needs a green range (green_min and/or green_max).")
     for sid in row.sources:
         if sid not in data.SOURCES:
@@ -535,6 +542,30 @@ def _asym(text: str):
     return (float(m.group(1)), (m.group(2) or "").upper() or None) if m else None
 
 
+def spirometry_reading(row: Row, tests: list):
+    """(light, facts, parts) for the 'spiro' tile, or None if no z-score was entered."""
+    d = _device_data("spiro:", tests)
+    words = {GREEN: "within the expected range", AMBER: "a little below the expected range", RED: "below the expected range"}
+    parts, facts = [], []
+    for box, zbox, pbox, label in SPIRO_PARTS:
+        z = _num(str(d.get(zbox, "")))
+        if z is None:
+            continue
+        light = range_light(z, row)
+        shown, pct = str(d.get(box, "")).strip(), _num(str(d.get(pbox, ""))) if pbox else None
+        value = shown + (f", {pct:g}% of predicted" if pct is not None else "")
+        facts.append(f"{label}: {value}. That is {words[light]} for your age, sex and height.")
+        parts.append({"label": label, "value_text": value, "light": light, "words": f"{words[light]} (z {z:g})"})
+    if not parts:
+        return None
+    grades = {k: str(d.get(f"{k} Grade", "")).strip().upper() for k in ("FEV1", "FVC")}
+    poor = {k: g for k, g in grades.items() if g and g not in SPIRO_GOOD_GRADES}
+    if poor:
+        facts.append("The test was not as complete as it could be (quality grades: " + ", ".join(f"{k} {g}" for k, g in poor.items())
+                     + "). These numbers may read lower than your true values, so your clinician may repeat the test.")
+    return max((p["light"] for p in parts), key=lambda x: SEVERITY[x]), facts, parts
+
+
 def force_plate_balance(row: Row, tests: list):
     """(light, facts, parts) for the 'fp_balance' tile, or None if no force plate asymmetry was entered."""
     parts, facts, weaker = [], [], []
@@ -584,6 +615,7 @@ def force_plate_balance(row: Row, tests: list):
 # (not approved, or left out) adds nothing to the participant's report.
 LINK_MIN_PCT = 5.0          # a left/right difference smaller than this is not counted as one side being lower
 LINK_MIN_DEGREES = 0.5      # phase angle difference between limbs
+GRIP_LINK_PCT = 20.0        # hands commonly differ by about 10% (the dominant hand is stronger), so only a bigger gap is linked
 
 
 def _side_findings(tests: list) -> list:
@@ -614,6 +646,12 @@ def _side_findings(tests: list) -> list:
         if got and got[1] and got[0] >= LINK_MIN_PCT:
             side = "right" if got[1] == "L" else "left"
             out.append((side, "leg", dev, "fp_balance", f"{test.capitalize()} ({action}): the {side} side did {got[0]:g}% less"))
+    grip = _device_data("grip:", tests) if "grip" in VALUE_DEVICES else {}
+    gr, gl = _num(str(grip.get("Right Grip", ""))), _num(str(grip.get("Left Grip", "")))
+    if gr and gl and abs(gr - gl) / max(gr, gl) * 100 >= GRIP_LINK_PCT:
+        side = "left" if gl < gr else "right"
+        mine, other = (gl, gr) if side == "left" else (gr, gl)
+        out.append((side, "arm", "grip", "grip", f"Grip strength: the {side} hand is weaker ({mine:g} kg against {other:g} kg)"))
     slsb = _device_data("vald_slsb:", tests)
     left, right = _num(str(slsb.get("Left Sway Velocity", ""))), _num(str(slsb.get("Right Sway Velocity", "")))
     if left and right and left != right:
@@ -631,6 +669,9 @@ def _strength_findings(tests: list, comparisons=None) -> list:
     if str(tan.get("Muscle Mass Band", "")).strip().lower() == "low":
         out.append(("tanita_muscle", "muscle_mass", f"Tanita: muscle mass{' ' + str(tan.get('Muscle Mass', '')).strip() if tan.get('Muscle Mass') else ''} "
                                                     "is rated low for your age, sex and height"))
+    grip = next((c for c in comparisons or [] if c.get("key") == "grip" and c.get("status") == BELOW), None)
+    if grip:
+        out.append(("grip", "grip", f"Grip strength: {grip['value_text']}, {grip['status_text'].lower()}"))
     asm = next((c for c in comparisons or [] if c.get("key") == "asm_index" and c.get("status") == BELOW), None)
     if asm:
         out.append(("tanita_asm", "asm_index", f"Arm and leg muscle: {asm['value_text']}, under the European low-muscle line"))
@@ -733,6 +774,13 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
                 head, text, do = _pick(row, light)
                 tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, ([row.facts] if row.facts else []) + extra, head, text, do, row.book,
                             list(row.sources), shown, row.priority, row.order, "", parts, "", row.hash)
+        elif row.rule == "spiro":
+            got = spirometry_reading(row, tests)
+            if got:
+                light, facts, parts = got
+                head, text, do = _pick(row, light)
+                tile = Tile(row.key, row.group, row.title, light, "", row.what_it_is, facts, head, text, do, row.book, list(row.sources), shown,
+                            row.priority, row.order, "", parts, "", row.hash)
         elif row.rule == "fp_balance":
             got = force_plate_balance(row, tests)
             if got:
