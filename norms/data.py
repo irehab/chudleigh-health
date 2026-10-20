@@ -110,6 +110,31 @@ SOURCES = {
         "note": ("A body composition scale estimates muscle in a different way from DXA, and hydration can affect it, so the result is a guide. "
                  "The guidance looks at muscle strength first, and muscle quantity second."),
     },
+    "friend_2015": {
+        "short": "Fitness for your age and sex (FRIEND registry 2015)",
+        "citation": ("Kaminsky LA, Arena R, Myers J. Reference standards for cardiorespiratory fitness measured with cardiopulmonary exercise testing: "
+                     "data from the Fitness Registry and the Importance of Exercise National Database. Mayo Clinic Proceedings 2015;90(11):1515-1523. Table 3."),
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC4919021/",
+        "population": "7,783 maximal treadmill tests of US adults aged 20 to 79 without heart disease, with oxygen use measured directly.",
+        "note": "Your number is an estimate, while these people were measured on a treadmill, so where you sit is a guide. People aged 80 and over are compared with the 70 to 79 group.",
+    },
+    "jackson_1990": {
+        "short": "Estimating fitness without an exercise test (Jackson 1990)",
+        "citation": ("Jackson AS, Blair SN, Mahar MT, Wier LT, Ross RM, Stuteville JE. Prediction of functional aerobic capacity without exercise testing. "
+                     "Medicine and Science in Sports and Exercise 1990;22(6):863-870. It uses your activity rating (0 to 7), age, sex and body fat (or BMI)."),
+        "url": "https://pubmed.ncbi.nlm.nih.gov/2287267/",
+        "population": "2,009 adults, mostly men (about 1 in 10 were women). The estimates were within about 5 ml/kg/min of the measured values for most people.",
+        "note": ("An estimate, not a measurement. Body fat in the original study was measured with skinfolds, and a body composition scale can differ. "
+                 "A treadmill or bike test with breathing measurement gives the real number."),
+    },
+    "clinic_longevity_age": {
+        "short": "Longevity age: an average of your device age estimates",
+        "citation": ("Chudleigh Health Hub takes the average of the age estimates your devices give, the Tanita's metabolic age and the AGE Reader's BodyAge, "
+                     "and compares it with your actual age."),
+        "url": "",
+        "population": "Not taken from a study. Each device uses its own reference group.",
+        "note": "A simple summary to follow over time. It is not a validated measure of biological ageing.",
+    },
     "vald_hub_norms": {
         "short": "VALD Hub: percentiles for your age and sex",
         "citation": ("The percentiles shown in VALD Hub for your ForceDecks results, which compare them with VALD's own reference data for people "
@@ -192,6 +217,22 @@ FAT = {  # (at BMI 18.5, at BMI 25, at BMI 30)
 BMI_LIMITS = (18.5, 25.0, 30.0)
 # ---- EWGSOP2 (Cruz-Jentoft 2019) Table 3: low muscle quantity. {sex: (ASM kg below which is low, ASM / height squared kg/m2 below which is low)}
 EWGSOP2_LOW_MUSCLE = {"male": (20.0, 7.0), "female": (15.0, 5.5)}
+
+# ---- VO2max reference: FRIEND registry 2015 (Kaminsky et al., Mayo Clin Proc 2015;90(11):1515-23), Table 3, treadmill, directly measured,
+# 7783 maximal tests of US adults aged 20-79 without cardiovascular disease. Percentiles 5, 10, 25, 50, 75, 90, 95 (mL O2/kg/min).
+FRIEND_PERCENTILES = (5, 10, 25, 50, 75, 90, 95)
+FRIEND_TREADMILL = {
+    "male": {(20, 29): (29.0, 32.1, 40.1, 48.0, 55.2, 61.8, 66.3), (30, 39): (27.2, 30.2, 35.9, 42.4, 49.2, 56.5, 59.8),
+             (40, 49): (24.2, 26.8, 31.9, 37.8, 45.0, 52.1, 55.6), (50, 59): (20.9, 22.8, 27.1, 32.6, 39.7, 45.6, 50.7),
+             (60, 69): (17.4, 19.8, 23.7, 28.2, 34.5, 40.3, 43.0), (70, 79): (16.3, 17.1, 20.4, 24.4, 30.4, 36.6, 39.7)},
+    "female": {(20, 29): (21.7, 23.9, 30.5, 37.6, 44.7, 51.3, 56.0), (30, 39): (19.0, 20.9, 25.3, 30.2, 36.1, 41.4, 45.8),
+               (40, 49): (17.0, 18.8, 22.1, 26.7, 32.4, 38.4, 41.7), (50, 59): (16.0, 17.3, 19.9, 23.4, 27.6, 32.0, 35.9),
+               (60, 69): (13.4, 14.6, 17.2, 20.0, 23.8, 27.0, 29.4), (70, 79): (13.1, 13.6, 15.6, 18.3, 20.8, 23.1, 24.1)},
+}
+# ---- VO2max estimated without exercise (Jackson et al. 1990, Med Sci Sports Exerc 22:863-870), from the physical activity rating (PA-R, 0-7),
+# age, sex (1 men, 0 women) and percent body fat, or BMI when there is no body fat. (constant, PA-R, age, body fat or BMI, sex)
+JACKSON_FAT = (50.513, 1.589, -0.289, -0.522, 5.863)
+JACKSON_BMI = (56.363, 1.921, -0.381, -0.754, 10.987)
 
 # ---- Oxygen level (SpO2): lowest value that is usual
 SPO2_ADULT_LOWER = 95   # healthy adults under 65 (typical range 95 to 99%)

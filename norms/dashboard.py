@@ -23,7 +23,7 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from . import data
-from .engine import (A_AGE, A_ECG, A_SPO2, A_TANITA, ABOVE, BELOW, DISCUSS, DOING_WELL, INFO, NO_REFERENCE, NORMS_VERSION, PATIENT_TEXT, WATCH, WELL_ABOVE, WORK_ON, _num, for_patient)
+from .engine import (A_AGE, A_ECG, A_PAR, A_SPO2, A_TANITA, ABOVE, BELOW, DISCUSS, DOING_WELL, INFO, NO_REFERENCE, NORMS_VERSION, PATIENT_TEXT, WATCH, WELL_ABOVE, WORK_ON, _num, for_patient)
 from .render import bar_html
 
 esc = lambda s: html.escape("" if s is None else str(s), quote=True)
@@ -57,7 +57,7 @@ A_VALD_STS = "VALD ForceDecks - Sit-to-Stand"
 A_VALD_SLSB = "VALD ForceDecks - Single Leg Stance / Balance"
 VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB}
 DEVICE_NAMES = {"vald_cmj": "Jump (CMJ)", "vald_squat": "Squat", "vald_sts": "Sit-to-stand", "vald_slsb": "Single-leg balance"}
-COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
+COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_PAR, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
 TEXT_FIELDS = ("headline", "text", "do")
 REQUIRED_COLUMNS = ["key", "group", "order", "priority", "approved", "title", "what_it_is", "rule", "members", "green_min", "green_max", "amber_min", "amber_max",
                     "facts", "value_from", "green_headline", "green_text", "green_do", "amber_headline", "amber_text", "amber_do", "red_headline", "red_text",

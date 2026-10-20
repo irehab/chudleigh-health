@@ -1991,6 +1991,11 @@ ASSESSMENTS = {
             [("Respiration Rate (breaths/min)", "12 breaths/min", "Respiration Rate"), ("Blood Pressure (mmHg)", "118/76 mmHg", "Blood Pressure")],
         ],
     },
+    # Used with the Tanita's body fat (or BMI) to estimate fitness (VO2 max) without an exercise test: Jackson et al. 1990.
+    "Physical Activity Rating (PA-R)": {
+        "columns": [[("Activity rating, 0 to 7 (see the scale below)", "4", "PA-R")]],
+        "guide": "**Physical Activity Rating (PA-R), Jackson et al. 1990.** Ask about the last month, and give one score:\n\n**Does not take part regularly in planned exercise or sport**  \n0 = avoids walking or exercise (always takes the lift, drives whenever possible)  \n1 = walks for pleasure, uses stairs, and sometimes exercises enough to get out of breath or sweat\n\n**Regular modest activity** (golf, horse riding, gym classes, table tennis, bowling, weight training, gardening)  \n2 = 10 to 60 minutes a week  \n3 = over 1 hour a week\n\n**Regular heavy exercise** (running, swimming, cycling, rowing, skipping, or vigorous sport such as tennis)  \n4 = under 30 minutes a week (or running under 1 mile a week)  \n5 = 30 to 60 minutes a week (1 to 5 miles)  \n6 = 1 to 3 hours a week (5 to 10 miles)  \n7 = over 3 hours a week (over 10 miles)",
+    },
     # VALD ForceDecks: the boxes match the measures in the clinic's VALD Hub reports (pdf_reader/vald_hub.py fills them).
     # Best rep for strength and power; average for time to stand, left/right asymmetry and balance (agreed 2026-10-19).
     "VALD ForceDecks - Sit-to-Stand": {
@@ -2860,6 +2865,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 test_payload_data[payload_key] = st.text_input(label, value="", placeholder=f"e.g. {example}", key=f"in::{assessment_type}::{label}", max_chars=200)
     for label, example, payload_key in spec.get("full_width", []):
         test_payload_data[payload_key] = st.text_input(label, value="", placeholder=f"e.g. {example}", key=f"in::{assessment_type}::{label}", max_chars=200)
+    if spec.get("guide"):
+        st.markdown(spec["guide"])
 
     values_checked = True
     if needs_verification:

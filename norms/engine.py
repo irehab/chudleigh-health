@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-19.4"
+NORMS_VERSION = "2026-10-20.1"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -31,6 +31,7 @@ A_SPO2 = "SpO2 / Pulse Oximetry (ViHealth)"
 A_TANITA = "Tanita Body Composition (MC-780MA)"
 A_ECG = "12-Lead ECG (Electrocardiogram)"
 A_AGE = "AGE Reader (Advanced Glycation End-Products)"
+A_PAR = "Physical Activity Rating (PA-R)"
 
 # What a participant reads as the name of each result, and one plain line on what it measures.
 PATIENT_TEXT = {
@@ -46,6 +47,8 @@ PATIENT_TEXT = {
     "age_level": ("Skin AGE level", "A skin scan that estimates the build-up of substances called AGEs, which build up naturally as we age."),
     "age_bodyage": ("Skin age estimate (BodyAge)", "The age at which an average person has your skin AGE level, according to the AGE Reader."),
     "asm_index": ("Arm and leg muscle (sarcopenia check)", "The muscle in your arms and legs, compared with your height."),
+    "vo2max_est": ("Fitness (estimated VO2 max)", "How much oxygen your body can use at full effort, estimated from your activity, age, sex and body fat."),
+    "longevity_age": ("Longevity age (estimate)", "The average of the age estimates from your Tanita and your AGE Reader."),
 }
 
 
@@ -160,6 +163,30 @@ def measures_from_tests(tests: list, height_cm: float | None = None) -> dict:
             body = _extra_num(t, "BodyAge (years)")
             if body is not None:
                 out["age_bodyage"] = {"value": body, "assessment": a, "age_used": age_used, "diff": _extra_num(t, "BodyAge difference from age (years)")}
+    # the fitness estimate needs the physical activity rating (0-7), and body fat from the Tanita (or else BMI)
+    par = None
+    for t in tests or []:
+        if t.get("type") == A_PAR:
+            v = _num((t.get("data") or {}).get("PA-R"))
+            par = v if v is not None and 0 <= v <= 7 else par
+    if par is not None and ("fat_pct" in out or "bmi" in out):
+        out["vo2max_est"] = {"value": par, "par": par, "fat": (out.get("fat_pct") or {}).get("value"), "bmi": (out.get("bmi") or {}).get("value"),
+                             "assessment": A_PAR, "calculated": True}
+    # the device age estimates, for an overall longevity age: the Tanita's metabolic age and the AGE Reader's BodyAge
+    metabolic = bodyage = None
+    for t in tests or []:
+        d = t.get("data") or {}
+        if t.get("type") == A_TANITA and _num(d.get("Metabolic Age")) is not None:
+            metabolic = _num(d.get("Metabolic Age"))
+        if t.get("type") == A_AGE:
+            b = _extra_num(t, "BodyAge (years)")
+            if b is None:
+                b = _num(d.get("BodyAge"))
+            if b is not None:
+                bodyage = b
+    if metabolic is not None and bodyage is not None:
+        out["longevity_age"] = {"value": round((metabolic + bodyage) / 2, 1), "metabolic": metabolic, "bodyage": bodyage,
+                                "assessment": "Tanita and AGE Reader", "calculated": True}
     return out
 
 
@@ -407,6 +434,10 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
 
     if key == "asm_index":
         return _asm_index(m, sex)
+    if key == "vo2max_est":
+        return _vo2max(m, age, sex)
+    if key == "longevity_age":
+        return _longevity_age(m, age)
 
     if key == "age_level":
         return _age_level(m, age)
@@ -442,6 +473,94 @@ def _asm_index(m, sex) -> Comparison:
     return Comparison(key="asm_index", label=label, assessment=a, status=status, source="ewgsop2", value=v, value_text=_unit_text(v, unit), calculated=True,
                       range_text=f"{_fmt(cut)} {unit} or more", group=who, headline=headline, sentence=sentence, meaning=meaning, theme=theme, status_text=words,
                       detail="These cut-offs come mainly from DXA scans. A body composition scale estimates muscle differently, and hydration can affect it.")
+
+
+def _percentile(v, values) -> float:
+    """Where v sits among the table's percentiles (5 ... 95), by straight-line steps between them. Below the 5th or above the 95th is capped."""
+    pts = list(zip(data.FRIEND_PERCENTILES, values))
+    if v <= pts[0][1]:
+        return 4.0
+    if v >= pts[-1][1]:
+        return 96.0
+    for (p0, v0), (p1, v1) in zip(pts, pts[1:]):
+        if v0 <= v <= v1:
+            return p0 + (p1 - p0) * (v - v0) / (v1 - v0)
+    return 50.0
+
+
+def _nth(x) -> str:
+    n = int(round(x))
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+# FRIEND's own category names (Kaminsky 2022): very low under the 5th percentile, low 5th-25th, then fair, good, excellent, superior over the 95th
+_FITNESS_BANDS = [(5, "very low"), (25, "low"), (50, "fair"), (75, "good"), (95, "excellent"), (101, "superior")]
+
+
+def _vo2max(m, age, sex) -> Comparison:
+    """VO2 max estimated without exercise (Jackson 1990: activity rating, age, sex and body fat, or BMI), placed on the FRIEND 2015 treadmill percentiles."""
+    a, par, fat, bmi = m["assessment"], m["par"], m.get("fat"), m.get("bmi")
+    label, unit = "VO2 max, estimated without exercise (Jackson 1990)", "ml/kg/min"
+    why = _missing(age, sex)
+    if why:
+        return _no_ref("vo2max_est", label, a, par, "", why, True)
+    if age < 20:
+        return _no_ref("vo2max_est", label, a, par, "", "The reference data covers ages 20 and over.", True)
+    g = 1 if sex == "male" else 0
+    if fat is not None:
+        c0, c_par, c_age, c_body, c_sex = data.JACKSON_FAT
+        v, used = c0 + c_par * par + c_age * age + c_body * fat + c_sex * g, f"your activity rating of {_fmt(par)}, your age, sex and body fat"
+    else:
+        c0, c_par, c_age, c_body, c_sex = data.JACKSON_BMI
+        v, used = c0 + c_par * par + c_age * age + c_body * bmi + c_sex * g, f"your activity rating of {_fmt(par)}, your age, sex and BMI"
+    v = round(v, 1)
+    if v <= 0:
+        return _no_ref("vo2max_est", label, a, par, "", "The estimate came out below zero, so it is not shown.", True)
+    band_age = min(age, 79)
+    lo_age, hi_age = next(k for k in data.FRIEND_TREADMILL[sex] if k[0] <= band_age <= k[1])
+    values = data.FRIEND_TREADMILL[sex][(lo_age, hi_age)]
+    pct = _percentile(v, values)
+    word = next(w for cut, w in _FITNESS_BANDS if pct < cut)
+    who = f"{'men' if sex == 'male' else 'women'} aged {lo_age} to {hi_age}"
+    where = "below the 5th percentile" if pct < 5 else ("above the 95th percentile" if pct > 95 else f"around the {_nth(pct)} percentile")
+    sentence = (f"From {used}, your VO2 max is estimated at about {_fmt(round(v))} ml/kg/min. "
+                f"Among {who} tested on a treadmill, that is {where}: {word}.")
+    if pct >= 25:
+        status, theme = WITHIN, DOING_WELL
+        headline = "A good result" if pct >= 50 else "In the usual range"
+        meaning = ("Fitness is one of the strongest signs of long-term health, so this is a real strength. Keep it up."
+                   if pct >= 50 else "That is in the usual range for your age and sex. Raising it is one of the best things you can do for long-term health.")
+    elif pct >= 5:
+        status, theme, headline = BELOW, WORK_ON, "Worth working on"
+        meaning = "That is lower than most people of your age and sex. Fitness responds well to regular aerobic exercise at any age."
+    else:
+        status, theme, headline = BELOW, DISCUSS, "A good place to focus first"
+        meaning = "That is lower than almost everyone of your age and sex. Your clinician will talk through a safe way to build it up."
+    return Comparison(key="vo2max_est", label=label, assessment=a, status=status, source="friend_2015", value=v, value_text=f"about {_fmt(round(v))} {unit}",
+                      calculated=True, range_text=f"25th percentile for {who}: {_fmt(values[2])} {unit}", group=who, headline=headline, sentence=sentence,
+                      meaning=meaning, theme=theme, status_text=f"{word.capitalize()} for your age (estimate)", also_sources=["jackson_1990"],
+                      detail="An estimate, not a measurement. For most people it is within about 5 ml/kg/min of a measured test.")
+
+
+def _longevity_age(m, age) -> Comparison:
+    """The average of the Tanita's metabolic age and the AGE Reader's BodyAge, against the person's actual age."""
+    a, v, met, body = m["assessment"], m["value"], m["metabolic"], m["bodyage"]
+    label = "Longevity age: average of metabolic age (Tanita) and BodyAge (AGE Reader)"
+    if age is None:
+        return _no_ref("longevity_age", label, a, v, "years", "An age is needed to compare with.", True)
+    diff = round(abs(v - age), 1)
+    way = "younger" if v < age else "older" if v > age else "same"
+    sentence = (f"Your Tanita metabolic age is {_fmt(met)} and your AGE Reader BodyAge is {_fmt(body)}. Their average is {_fmt(v)}. "
+                + ("That is the same as your actual age." if way == "same" else f"That is {_fmt(diff)} years {way} than your actual age of {_fmt(age)}."))
+    if way in ("younger", "same"):
+        status, theme, headline = WITHIN, DOING_WELL, "A good result"
+        words = "Younger than your age" if way == "younger" else "The same as your age"
+    else:
+        status, theme, headline, words = ABOVE, WATCH, "Room to improve", "Older than your age"
+    meaning = "This is a simple average of two device estimates. It is not a medical measure of ageing, but it is a useful number to follow over time."
+    return Comparison(key="longevity_age", label=label, assessment=a, status=status, source="clinic_longevity_age", value=v, value_text=f"{_fmt(v)} years",
+                      calculated=True, range_text=f"your age: {_fmt(age)}", group="your device estimates", headline=headline, sentence=sentence, meaning=meaning,
+                      theme=theme, status_text=words, also_sources=["tanita_bands", "age_scanner_printed"])
 
 
 def _label_kind(label: str) -> str:
@@ -520,7 +639,8 @@ def _age_bodyage(m, age) -> Comparison:
                       status_text=words, detail="BodyAge comes from the AGE Reader's own reference group, which the report does not publish.")
 
 
-_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "age_level", "age_bodyage"]
+_ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "age_level", "age_bodyage",
+          "vo2max_est", "longevity_age"]
 
 
 def _read_together(results: list):
