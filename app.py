@@ -199,6 +199,14 @@ TIER_INFO = {
     },
 }
 PLAN_REQUESTS = "plan_requests"
+APP_STATE = "app_state"                   # small housekeeping records, such as when the record clean-up last ran
+# How long records are kept. A participant's profile, scans, plan requests and shared report files are deleted RETENTION_YEARS after their
+# last contact with the clinic (latest scan, publish, plan or payment). Payment records go RETENTION_YEARS after the payment, and the
+# sign-in and activity logs after LOG_RETENTION_DAYS. 0 switches that part off. The clean-up runs at most once a day, from the clinician dashboard.
+RETENTION_YEARS = max(0, int(_env_float("RETENTION_YEARS", 8)))
+LOG_RETENTION_DAYS = max(0, int(_env_float("LOG_RETENTION_DAYS", 365)))
+RETENTION_CHECK_EVERY_SECONDS = 24 * 60 * 60
+RETENTION_BATCH = 200                     # the most records of each kind removed in one run, so a page view never waits long
 WORDING_OVERRIDES = "wording_overrides"   # one document per dashboard result that has been edited in the app: only the words that differ from the file
 WORDING_HISTORY = "wording_history"       # every edit and revert: who, when, and the wording before and after
 WORDING_APPROVALS = "wording_approvals"   # one document per dashboard result: the fingerprint of the wording a clinician approved, who, and when
@@ -1368,6 +1376,132 @@ def remove_shared_files(key: str) -> int:
             removed += 1
         d.reference.update({"shared_files": [], "shared_files_removed_at": firestore.SERVER_TIMESTAMP})
     return removed
+
+
+# --- Record keeping: automatic clean-up of old records (see RETENTION_YEARS) ---
+def _as_utc(value):
+    """A stored date or time (Firestore time, epoch seconds or a "YYYY-MM-DD" text) as a UTC datetime, or None if it can't be read."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, datetime.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+    if isinstance(value, datetime.date):
+        return datetime.datetime(value.year, value.month, value.day, tzinfo=datetime.timezone.utc)
+    if isinstance(value, (int, float)) and value > 0:
+        return datetime.datetime.fromtimestamp(value, datetime.timezone.utc)
+    if isinstance(value, str):
+        try:
+            return _as_utc(datetime.date.fromisoformat(value.strip()[:10]))
+        except ValueError:
+            return None
+    return None
+
+
+def years_before(now, years: int):
+    return now - datetime.timedelta(days=round(365.25 * years))
+
+
+def last_contact_if_before(key: str, profile: dict, cutoff):
+    """The participant's last contact with the clinic, if every dated record of theirs is older than cutoff; otherwise None.
+
+    None also when nothing about them is dated, so a record is never deleted on a guess. The profile's own dates are checked first,
+    because every publish updates them, so active participants cost no further reads."""
+    def recent(values):
+        return any(t and t >= cutoff for t in map(_as_utc, values))
+
+    seen = [profile.get("created_at"), profile.get("updated_at")]
+    if recent(seen):
+        return None
+    for d in db.collection(REPORTS).document(key).collection("scans").select(["assessment_date", "approved_at"]).stream():
+        s = d.to_dict() or {}
+        seen += [s.get("assessment_date"), s.get("approved_at")]
+    for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream():
+        r = d.to_dict() or {}
+        seen += [r.get("created_at"), r.get("questionnaire_at"), r.get("delivered_at")]
+    for d in db.collection("payments").where(filter=FieldFilter("patient_key", "==", key)).stream():
+        seen.append((d.to_dict() or {}).get("processed_at"))
+    if recent(seen):
+        return None
+    known = [t for t in map(_as_utc, seen) if t]
+    return max(known) if known else None
+
+
+def apply_retention(now=None) -> dict:
+    """Delete the records that are past their keeping period. Returns how many of each kind were removed."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    removed = {"participants": 0, "payments": 0, "log_entries": 0, "sign_in_records": 0}
+    if RETENTION_YEARS:
+        cutoff = years_before(now, RETENTION_YEARS)
+        for snap in db.collection(REPORTS).stream():
+            if removed["participants"] >= RETENTION_BATCH:
+                break
+            try:
+                last = last_contact_if_before(snap.id, snap.to_dict() or {}, cutoff)
+                if last:
+                    scans = delete_participant(snap.id)
+                    audit("retention_deleted", snap.id, scans_deleted=scans, last_contact=last.date().isoformat())
+                    removed["participants"] += 1
+            except Exception:
+                log.exception("Record clean-up: one participant could not be checked or deleted")
+        for d in db.collection("payments").where(filter=FieldFilter("processed_at", "<", cutoff)).limit(RETENTION_BATCH).stream():
+            d.reference.delete()
+            removed["payments"] += 1
+    if LOG_RETENTION_DAYS:
+        log_cutoff = now - datetime.timedelta(days=LOG_RETENTION_DAYS)
+        for d in db.collection("audit_log").where(filter=FieldFilter("at", "<", log_cutoff)).limit(RETENTION_BATCH).stream():
+            d.reference.delete()
+            removed["log_entries"] += 1
+        for d in db.collection("auth_attempts").stream():
+            a = d.to_dict() or {}
+            newest = max((t for t in (_as_utc(a.get("window_start")), _as_utc(a.get("locked_until"))) if t), default=None)
+            if newest is None or newest < log_cutoff:          # these only count recent wrong guesses, so an undated one is of no use
+                d.reference.delete()
+                removed["sign_in_records"] += 1
+    return removed
+
+
+@st.cache_resource
+def _retention_state():
+    return {"at": 0.0, "lock": threading.Lock()}
+
+
+def periodic_retention_check():
+    """Run the record clean-up at most once a day across all app instances, on whichever clinician page view comes next."""
+    if not (RETENTION_YEARS or LOG_RETENTION_DAYS):
+        return
+    state = _retention_state()
+    if time.time() - state["at"] < RETENTION_CHECK_EVERY_SECONDS or not state["lock"].acquire(blocking=False):
+        return
+    try:
+        state["at"] = time.time()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        marker = db.collection(APP_STATE).document("retention")
+        snap = marker.get()
+        last_run = _as_utc((snap.to_dict() or {}).get("last_run")) if snap.exists else None
+        if last_run and (now - last_run).total_seconds() < RETENTION_CHECK_EVERY_SECONDS:
+            return
+        marker.set({"last_run": now}, merge=True)      # first, so another instance starting now skips this run
+        removed = apply_retention(now)
+        marker.set({"last_result": removed}, merge=True)
+        if any(removed.values()):
+            audit("retention_run", **removed)
+            log.info("Record clean-up removed %s", removed)
+    except Exception:
+        log.exception("Record clean-up failed")
+    finally:
+        state["lock"].release()
+
+
+def retention_summary() -> str:
+    parts = []
+    if RETENTION_YEARS:
+        parts.append(f"participant records are kept for {RETENTION_YEARS} years after their last contact with the clinic, and payment records "
+                     f"for {RETENTION_YEARS} years")
+    if LOG_RETENTION_DAYS:
+        parts.append(f"sign-in and activity logs for {LOG_RETENTION_DAYS} days")
+    if not parts:
+        return "Automatic deletion of old records is switched off."
+    return "Record keeping: " + "; ".join(parts) + ". Older records are deleted automatically once a day."
 
 
 # --- Report building ---
@@ -3456,6 +3590,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             except Exception:
                 fail("Publishing failed. Nothing was lost locally; please try again.", "Publish to Firestore failed")
 
+    if db:
+        periodic_retention_check()  # delete records past their keeping period (at most once a day)
+
     # --- BESPOKE PLAN REQUESTS ---
     render_plan_requests(approver)
 
@@ -3463,6 +3600,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     st.divider()
     with st.expander("🛡️ Data rights: export or delete a participant's records"):
         st.caption("Use this to answer a participant's data access or erasure request. Every export and deletion is written to the audit log.")
+        st.caption(retention_summary())
         dr_name = st.text_input("Participant full name (exactly as recorded)", key="dr_name", max_chars=120)
         dr_name_key = patient_key(dr_name)
         dr_key, dr_decided = None, False
