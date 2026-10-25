@@ -1006,3 +1006,43 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
             f'{banner}{_note_html(note, note_by, S)}{head}{prio}{_links_html(links, interpretation, interpretation_by or note_by, S)}{tap}{sections}{how}'
             f'{_sources_html(tiles, S)}</div>'
             f'<div class="footer">{esc(S.get("disclosure", ""))}<br>{version}</div></div></body></html>')
+
+
+# ------------------------------------------------------------------------------------------------------------------------ before a first assessment
+PLACEHOLDER_CSS = """
+.tile.empty{border-left-style:dashed;background:#fafafa}.tile.empty .title{color:var(--muted)}.tile.empty .val{color:#9ca3af;letter-spacing:2px}
+.tile.empty summary{cursor:default}.tile.empty summary::after{content:none}
+.invite{background:linear-gradient(to bottom right,var(--mint),#F7FBFB);border:2px solid var(--secondary);border-radius:12px;padding:20px;margin-bottom:20px;text-align:center}
+.invite h2{margin:0 0 8px;color:var(--primary);font-size:22px}.invite p{margin:0 0 14px}
+.cta{display:inline-block;background:var(--secondary);color:#fff !important;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:999px;font-size:16px}
+.cta:hover{background:#336E76}
+"""
+PLACEHOLDER_HEADING = "Your Longevity picture"
+PLACEHOLDER_INTRO = ("These are the results a Longevity Baseline measures. They are empty because you haven't had one yet. "
+                     "It is a health and fitness baseline, not a medical diagnosis: it shows where you stand today, so you can track how you change.")
+PLACEHOLDER_GROUP_LINE = "Measured at your Longevity Baseline."
+
+
+def render_placeholder(library: Library, booking_url: str, button_label: str, approvals: dict | None = None) -> str:
+    """The results page as it would look before a first assessment: every approved result as a greyed-out card showing '– –', and a button to book.
+    Only titles and 'what it is' lines are shown, never any result wording. If no result is approved yet, the groups are shown instead."""
+    rows = sorted((r for r in library.rows if approval_status(r, approvals) in ("file", "approved")), key=lambda r: (r.order, r.key))
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(r.group, []).append((r.title, r.what_it_is))
+    if not groups:
+        for r in sorted(library.rows, key=lambda r: (r.order, r.key)):
+            groups.setdefault(r.group, [(r.group, PLACEHOLDER_GROUP_LINE)])
+
+    def tile(title, what):
+        return (f'<details class="tile empty"><summary>{_dot(GREY)}<span class="main"><span class="title">{esc(title)}</span>'
+                f'<span class="what">{esc(what)}</span></span><span class="side"><span class="val">&ndash; &ndash;</span>'
+                f'<span class="chip info">Not measured yet</span></span></summary></details>')
+
+    sections = "".join(f'<div class="group"><h2>{esc(g)}</h2><div class="grid">{"".join(tile(*x) for x in items)}</div></div>' for g, items in groups.items())
+    button = f'<a class="cta" href="{esc(booking_url)}" target="_blank" rel="noopener noreferrer">{esc(button_label)}</a>' if booking_url else ""
+    invite = f'<div class="invite"><h2>{esc(PLACEHOLDER_HEADING)}</h2><p>{esc(PLACEHOLDER_INTRO)}</p>{button}</div>'
+    return (f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
+            f'<title>Health Autonomy at Chudleigh Health Hub - {esc(PLACEHOLDER_HEADING)}</title>'
+            f'<link rel="stylesheet" href="{FONTS_URL}"><style>{CSS}{PLACEHOLDER_CSS}</style></head><body><div class="report"><div class="content">'
+            f'{invite}{sections}<div style="text-align:center;margin-top:22px">{button}</div></div></div></body></html>')

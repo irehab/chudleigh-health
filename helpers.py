@@ -4,14 +4,12 @@ Nothing in here imports Streamlit, Firestore, Stripe or Gemini, so it can be uni
 on its own (see tests/test_helpers.py).
 """
 import hashlib
-import hmac
 import html
 import datetime
 import re
 import secrets
 from decimal import Decimal, InvalidOperation
-
-PIN_HASH_ITERATIONS = 310_000
+from urllib.parse import urlsplit
 
 
 # --- HTML / text helpers ---
@@ -64,27 +62,6 @@ def fmt_price(d) -> str:
     if d is None:
         return "—"
     return str(int(d)) if d == d.to_integral_value() else f"{d:.2f}"
-
-
-# --- PIN hashing (PBKDF2-SHA256, per-user salt) ---
-def hash_pin(pin: str, salt: bytes = None, iterations: int = PIN_HASH_ITERATIONS):
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, iterations)
-    return salt.hex(), digest.hex()
-
-
-def verify_pin(pin: str, record) -> bool:
-    if not record:
-        hash_pin(pin)  # equalise timing so unknown names can't be detected
-        return False
-    if record.get("pin_hash") and record.get("pin_salt"):
-        _, digest = hash_pin(pin, bytes.fromhex(record["pin_salt"]), int(record.get("pin_iterations", PIN_HASH_ITERATIONS)))
-        return hmac.compare_digest(digest, record["pin_hash"])
-    legacy = record.get("pin")
-    if legacy is not None:
-        hash_pin(pin)
-        return hmac.compare_digest(str(legacy).strip().encode(), pin.encode())
-    return False
 
 
 # --- Data minimisation for the AI ---
@@ -227,6 +204,48 @@ def clean_note(text, limit: int = NOTE_MAX, single_line: bool = False) -> str:
     else:
         t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()[:limit].strip()
+
+
+# --- Portal records for every patient: contact details and the exercise programme link ---
+SERVICES = ("Osteopathy", "Physiotherapy", "Longevity")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+
+
+def clean_email(text):
+    """A tidied, lower-case email address, '' when nothing was typed, or None when it doesn't look like an email."""
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    return t.lower() if len(t) <= 254 and _EMAIL_RE.fullmatch(t) else None
+
+
+def clean_uk_mobile(text):
+    """A UK mobile number as +447xxxxxxxxx, '' when nothing was typed, or None when it isn't a UK mobile number."""
+    t = re.sub(r"[\s().-]", "", str(text or ""))
+    if not t:
+        return ""
+    if t.startswith("+44"):
+        t = "0" + t[3:].lstrip("0")
+    elif t.startswith("0044"):
+        t = "0" + t[4:].lstrip("0")
+    return "+44" + t[1:] if re.fullmatch(r"07\d{9}", t) else None
+
+
+def clean_exercise_link(url, allowed_hosts):
+    """The link to a patient's exercise programme, '' when nothing was typed, or None when it is not a secure (https) link on one
+    of allowed_hosts (or a sub-domain of one). Only links to the exercise service are accepted, so a mistyped link can't be saved."""
+    t = str(url or "").strip()
+    if not t:
+        return ""
+    try:
+        parts = urlsplit(t)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return None
+    if parts.scheme != "https" or parts.username or parts.password or len(t) > 2000 or _CONTROL_CHARS.search(t) or " " in t:
+        return None
+    ok = any(host == h or host.endswith("." + h) for h in (a.strip().lower() for a in allowed_hosts) if h)
+    return t if ok else None
 
 
 # --- Device reports (PDFs) kept in a private Google Cloud Storage bucket ---

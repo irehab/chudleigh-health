@@ -36,16 +36,18 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 from helpers import (
     NOTE_MAX,
-    PIN_HASH_ITERATIONS,
     QUESTIONNAIRE_FIELDS,
+    SERVICES,
     add_working_days,
+    clean_email,
+    clean_exercise_link,
     clean_note,
+    clean_uk_mobile,
     clean_questionnaire,
     client_ip_from_xff,
     esc,
     fmt_price,
     friendly_date,
-    hash_pin,
     new_patient_id,
     parse_price,
     patient_key,
@@ -54,8 +56,8 @@ from helpers import (
     redact_for_ai,
     short_ref,
     strip_code_fences,
-    verify_pin,
 )
+import mailer  # noqa: E402  (emails to patients: sign-in links)
 from helpers import (  # noqa: E402  (report files kept in private storage)
     MAX_SHARED_PDF_BYTES,
     MAX_SHARED_TOTAL_BYTES,
@@ -120,6 +122,11 @@ AI_PRICES_USD = {
 GEMINI_STANDARD_PRICING_FROM = datetime.date(2027, 1, 1)  # Google's introductory Gemini 3.8 Flash price ends 31 Dec 2026
 AI_USD_TO_GBP = _env_float("AI_USD_TO_GBP", 0.75)
 PRIVACY_NOTICE_URL = os.environ.get("PRIVACY_NOTICE_URL", "").strip()  # optional; must start with https://
+# The portal for every patient (osteopathy and physio as well as Longevity): an exercise programme link, and an invitation to book a Longevity Baseline.
+EXERCISE_LINK_HOSTS = [h.strip().lower() for h in os.environ.get("EXERCISE_LINK_HOSTS", "valdperformance.com,vald.com,valdhealth.com").split(",") if h.strip()]
+LONGEVITY_BOOKING_URL = os.environ.get(
+    "LONGEVITY_BOOKING_URL", "https://book.squareup.com/appointments/z4iykwnki8iox0/location/LNR036HT1VD7Y/services").strip()
+LONGEVITY_BASELINE_PRICE = os.environ.get("LONGEVITY_BASELINE_PRICE", "£150").strip()
 # Test mode: lets a clinician switch AI service in the sidebar to compare them. Dummy participants only.
 AI_COMPARE_MODE = os.environ.get("AI_COMPARE_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 # What the participant's report is. "dashboard" (the default): a traffic-light page whose words come from norms/measures.csv and norms/summary.csv, with no AI
@@ -161,13 +168,9 @@ IAP_ISSUER = "https://cloud.google.com/iap"
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 # --- SECURITY SETTINGS ---
-MIN_NEW_PIN_LENGTH = 6          # new / reset PINs
-LEGACY_MIN_PIN_LENGTH = 4       # existing 4-digit PINs can still sign in
-MAX_PIN_LENGTH = 8
 MAX_LOGIN_ATTEMPTS = 5
 MAX_CLINICIAN_ATTEMPTS_PER_IP = 5
 MAX_CLINICIAN_ATTEMPTS_GLOBAL = 25      # ceiling across all addresses (guards against rotating IPs)
-MAX_PATIENT_ATTEMPTS_PER_IP = 25        # stops one address spraying many names
 LOCKOUT_SECONDS = 15 * 60
 PATIENT_SESSION_SECONDS = 30 * 60
 CLINICIAN_SESSION_SECONDS = 60 * 60
@@ -200,6 +203,13 @@ TIER_INFO = {
 }
 PLAN_REQUESTS = "plan_requests"
 APP_STATE = "app_state"                   # small housekeeping records, such as when the record clean-up last ran
+CLINIC_PHONE = "07902 065739"
+SIGNIN_CODES = "signin_codes"             # one-time email sign-in codes: only a salted fingerprint of each code is stored, never the code
+SIGNIN_CODE_SECONDS = 15 * 60
+MAX_CODE_TRIES = 5                        # wrong guesses allowed for one code
+MAX_CODE_REQUESTS_PER_EMAIL = 5           # per 15 minutes, so nobody can flood a patient's inbox
+MAX_CODE_REQUESTS_PER_IP = 20
+MAX_BAD_CODES_PER_IP = 10
 # How long records are kept. A participant's profile, scans, plan requests and shared report files are deleted RETENTION_YEARS after their
 # last contact with the clinic (latest scan, publish, plan or payment). Payment records go RETENTION_YEARS after the payment, and the
 # sign-in and activity logs after LOG_RETENTION_DAYS. 0 switches that part off. The clean-up runs at most once a day, from the clinician dashboard.
@@ -302,7 +312,7 @@ st.markdown(
     <div class="main-header">
         <div class="ha-logo"><span class="ha-H">H</span>ealth <span class="ha-a">a</span>utonomy</div>
         <div class="ha-sub"><em>at</em> Chudleigh Health Hub</div>
-        <p>Your longevity results, plans and reports</p>
+        <p>Your exercises, results and reports</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -393,16 +403,8 @@ def strip_pdf_payloads(tests):
     return [{k: v for k, v in t.items() if k not in ("pdf_b64", "pdf_bytes")} for t in (tests or [])]
 
 
-# --- PIN storage (hashing itself lives in helpers.py) ---
-def pin_fields(pin: str) -> dict:
-    salt, digest = hash_pin(pin)
-    return {
-        "pin_hash": digest,
-        "pin_salt": salt,
-        "pin_iterations": PIN_HASH_ITERATIONS,
-        "pin_weak": len(pin) < MIN_NEW_PIN_LENGTH,  # flags short legacy PINs so a clinician can reset them
-        "pin": firestore.DELETE_FIELD,  # remove any legacy plaintext PIN
-    }
+# --- PINs are no longer used: patients sign in with a code sent to their email. Saving a record removes any PIN left from testing. ---
+NO_PIN_FIELDS = {f: firestore.DELETE_FIELD for f in ("pin", "pin_hash", "pin_salt", "pin_iterations", "pin_weak")}
 
 
 # --- Brute-force protection (shared across all app instances via Firestore) ---
@@ -1226,10 +1228,9 @@ def lookup_history(key: str):
     profile = None
     if snap.exists:
         d = snap.to_dict() or {}
-        legacy_pin = d.get("pin")
         profile = {
             "name": d.get("name") or "",
-            "pin_weak": bool(d.get("pin_weak")) or (legacy_pin is not None and len(str(legacy_pin)) < MIN_NEW_PIN_LENGTH),
+            "has_email": bool(d.get("email")),
             **{f"price_{t}": d.get(f"price_{t}") for t in TIERS},
         }
     previous = None
@@ -1247,9 +1248,9 @@ def lookup_history(key: str):
 
 # --- Participants who share a name ---
 # Older records use the name itself as their ID. New records get a random ID (new_patient_id), so two people with the same
-# name are kept apart: clinicians choose which person they mean, and at sign-in the PIN decides.
+# name are kept apart: clinicians choose which person they mean. At sign-in the email decides (a shared email offers a choice).
 def profiles_named(name_key: str) -> list:
-    """Every participant record with this name, as Firestore snapshots (these include PIN data, so never cache them)."""
+    """Every participant record with this name, as Firestore snapshots."""
     found = {s.id: s for s in db.collection(REPORTS).where(filter=FieldFilter("name_lower", "==", name_key)).limit(25).stream()}
     legacy = db.collection(REPORTS).document(name_key).get()
     if legacy.exists:
@@ -1266,11 +1267,6 @@ def participant_ids(name_key: str) -> list:
 def clear_participant_caches():
     lookup_history.clear()
     participant_ids.clear()
-
-
-def pin_in_use(pin: str, name_key: str, exclude_id: str = None) -> bool:
-    """True if another participant with this name already signs in with this PIN, which would make sign-in ambiguous."""
-    return any(verify_pin(pin, s.to_dict()) for s in profiles_named(name_key) if s.id != exclude_id)
 
 
 def describe_participant(record_id: str, fallback_name: str = "") -> str:
@@ -1451,6 +1447,9 @@ def apply_retention(now=None) -> dict:
         for d in db.collection("audit_log").where(filter=FieldFilter("at", "<", log_cutoff)).limit(RETENTION_BATCH).stream():
             d.reference.delete()
             removed["log_entries"] += 1
+        for d in db.collection(SIGNIN_CODES).where(filter=FieldFilter("expires_at", "<", time.time() - 24 * 60 * 60)).limit(RETENTION_BATCH).stream():
+            d.reference.delete()                               # sign-in codes stop working after 15 minutes; they are kept a day for checking problems
+            removed["sign_in_records"] += 1
         for d in db.collection("auth_attempts").stream():
             a = d.to_dict() or {}
             newest = max((t for t in (_as_utc(a.get("window_start")), _as_utc(a.get("locked_until"))) if t), default=None)
@@ -1866,6 +1865,282 @@ def render_portal_files(key: str, scan_date: str, scan: dict):
                 st.error("This report is not available right now. Please contact Chudleigh Health Hub.")
             except Exception:
                 fail("We couldn't open that report right now. Please try again shortly.", "Opening a shared report failed")
+
+
+# --- The portal for every patient: contact details, consent, and the exercise programme link ---
+CARE_CONSENT_LABEL = "Agreed to care messages by email or text (exercise reminders, results ready). They can switch these off at any time."
+MARKETING_CONSENT_LABEL = ("Opted in to news and offers from Chudleigh Health Hub by email or text. They can unsubscribe at any time. "
+                           "Only tick if the patient asked for this.")
+
+
+def _consent_change(fields: dict, current: dict, name: str, value: bool, wording: str, who: str):
+    """Record a consent tick-box. When it changes, keep when, who recorded it, and the exact wording the patient agreed to (the evidence PECR asks for)."""
+    fields[name] = value
+    if bool(current.get(name)) != value:
+        fields[f"{name}_at"] = firestore.SERVER_TIMESTAMP
+        fields[f"{name}_by"] = who
+        fields[f"{name}_wording"] = wording if value else ""
+
+
+def render_portal_record_editor():
+    """Clinician screen: give any patient (osteopathy, physio or Longevity) a portal record, or update one: contact details, consent and exercises."""
+    st.caption("For any patient, not only Longevity clients. Patients sign in with a code we email them, so an email is needed. "
+               "Reminders are not sent yet: the consent ticks are recorded ready for them.")
+    name = st.text_input("Patient full name", key="pr_name", max_chars=120)
+    key = patient_key(name)
+    if name and not key:
+        st.warning("This name can't be used as a record key (it must not contain '/' and must be under 200 characters).")
+    if not key or not db:
+        return
+    who_key = f"pr_who::{key}"
+    try:
+        record_id, decided = choose_participant(key, who_key, allow_new=True, label="Which patient is this?")
+        current = {}
+        if record_id:
+            snap = db.collection(REPORTS).document(record_id).get()
+            current = (snap.to_dict() or {}) if snap.exists else {}
+    except Exception:
+        fail("Couldn't look up that name. Please try again.", "Portal record lookup failed")
+        return
+    if not decided:
+        return
+    st.caption("Updating this patient's existing record." if record_id else "A new record will be created.")
+
+    with st.form(f"pr_form::{record_id or 'new'}::{key}"):
+        services = st.multiselect("Seen for", SERVICES, default=[s for s in (current.get("services") or []) if s in SERVICES])
+        c1, c2 = st.columns(2)
+        with c1:
+            email_in = st.text_input("Email (they sign in with this)", value=current.get("email") or "", max_chars=254)
+        with c2:
+            mobile_in = st.text_input("Mobile", value=current.get("mobile") or "", max_chars=20, placeholder="07…")
+        care_ok = st.checkbox(CARE_CONSENT_LABEL, value=bool(current.get("care_messages_ok")))
+        marketing_ok = st.checkbox(MARKETING_CONSENT_LABEL, value=bool(current.get("marketing_ok")))
+        link_in = st.text_input("VALD exercise programme link", value=current.get("exercise_link") or "",
+                                help="Paste the link to the patient's programme in VALD. The portal links to it; nothing is copied.")
+        note_in = st.text_area("Note for the patient about their exercises (optional)", value=current.get("exercise_note") or "", max_chars=NOTE_MAX,
+                               placeholder="e.g. Three times a week. Stop and let us know if the pain goes above 5 out of 10.")
+        saved = st.form_submit_button("💾 Save portal record", type="primary", use_container_width=True)
+    if not saved:
+        return
+
+    email, mobile = clean_email(email_in), clean_uk_mobile(mobile_in)
+    link = clean_exercise_link(link_in, EXERCISE_LINK_HOSTS)
+    problems = []
+    if email is None:
+        problems.append("That email address doesn't look right.")
+    elif not email:
+        problems.append("Add the patient's email: they sign in with a code sent to it.")
+    if mobile is None:
+        problems.append("That mobile number isn't a UK mobile number (07…).")
+    if link is None:
+        problems.append("The exercise link must be a secure (https) link to " + " or ".join(EXERCISE_LINK_HOSTS) + ".")
+    if (care_ok or marketing_ok) and not (email or mobile):
+        problems.append("Add an email or mobile number for the messages they agreed to.")
+    if problems:
+        for p in problems:
+            st.warning(p)
+        return
+    try:
+        who = st.session_state.get("clinician_email") or "clinician"
+        fields = {"name_lower": key, "name": name.strip(), "services": services, "email": email, "mobile": mobile,
+                  "exercise_link": link, "exercise_note": clean_note(note_in), "updated_at": firestore.SERVER_TIMESTAMP}
+        if link != (current.get("exercise_link") or ""):
+            fields["exercise_set_on"] = datetime.date.today().isoformat() if link else ""
+        _consent_change(fields, current, "care_messages_ok", care_ok, CARE_CONSENT_LABEL, who)
+        _consent_change(fields, current, "marketing_ok", marketing_ok, MARKETING_CONSENT_LABEL, who)
+        fields.update(NO_PIN_FIELDS)
+        target_id = record_id or new_patient_id()
+        if not record_id:
+            fields["created_at"] = firestore.SERVER_TIMESTAMP
+        db.collection(REPORTS).document(target_id).set(fields, merge=True)
+        audit("portal_record_saved", target_id, new=not record_id, exercises=bool(link))
+        clear_participant_caches()
+        remember_participant(who_key, target_id)
+        st.success(f"Saved. {name.strip()} can now sign in to the portal with a code sent to {email}.")
+    except Exception:
+        fail("Saving failed. Please try again.", "Saving a portal record failed")
+
+
+def render_portal_exercises(client_data: dict):
+    """The 'Your exercises' section of the patient portal: a link out to their programme in VALD (nothing is copied here)."""
+    link = clean_exercise_link(client_data.get("exercise_link"), EXERCISE_LINK_HOSTS)
+    treated = any(s in (client_data.get("services") or []) for s in ("Osteopathy", "Physiotherapy"))
+    if not link and not treated:
+        return
+    st.subheader("🏋️ Your exercises")
+    if not link:
+        st.caption("When your clinician gives you exercises, a link to your programme will appear here.")
+        return
+    st.link_button("Open my exercise programme", link, type="primary", use_container_width=True)
+    set_on = client_data.get("exercise_set_on")
+    if set_on:
+        st.caption(f"Programme set on {friendly_date(set_on)}. It opens in VALD, where your clinician keeps your exercises.")
+    if client_data.get("exercise_note"):
+        st.info(client_data["exercise_note"])
+
+
+def render_longevity_invite():
+    """For patients who haven't had a Longevity assessment: the results cards greyed out, and a button to book a Longevity Baseline."""
+    if not NORMS_AVAILABLE:
+        return
+    try:
+        page = norms.dashboard.render_placeholder(dashboard_library(), LONGEVITY_BOOKING_URL,
+                                                  f"Book your Longevity Baseline ({LONGEVITY_BASELINE_PRICE})", approvals=approval_hashes())
+    except Exception:
+        log.exception("Drawing the Longevity invitation failed")
+        return
+    components.html(page, height=900, scrolling=True)
+
+
+# --- Signing in with a 6-digit code sent by email ---
+# The patient types their email. If a clinician has recorded that email on a portal record, a code is emailed that works once, for 15 minutes.
+# The screen says the same whether or not the email is on file, so nobody can find out who is a patient. The email holds no link at all,
+# only the code, and is sent as plain text, so the email service has nothing to track. Each code allows 5 tries; asking for a new code replaces it.
+def _code_ref(email: str):
+    return db.collection(SIGNIN_CODES).document(hashlib.sha256(f"signin:{email}".encode("utf-8")).hexdigest())
+
+
+def _code_hash(salt: str, code: str) -> str:
+    return hashlib.sha256(f"{salt}:{code}".encode("utf-8")).hexdigest()
+
+
+def _send_quietly(msg):
+    try:
+        mailer.send(msg)
+    except Exception:
+        log.exception("Sending a sign-in email failed")
+
+
+def request_signin_code(email: str):
+    """Email a sign-in code if this email is on any portal record. Says nothing either way. Raises LookupError when too many codes were asked for."""
+    ip = client_ip()
+    if lockout_remaining("signin-request", email) or lockout_remaining("signin-request-ip", ip):
+        raise LookupError("too many requests")
+    record_failed_attempt("signin-request", email, MAX_CODE_REQUESTS_PER_EMAIL, delay=False)   # counts every request, not only failures
+    record_failed_attempt("signin-request-ip", ip, MAX_CODE_REQUESTS_PER_IP, delay=False)
+    keys = [s.id for s in db.collection(REPORTS).where(filter=FieldFilter("email", "==", email)).limit(10).stream()]
+    if not keys:
+        return
+    code, salt = f"{secrets.randbelow(10 ** 6):06d}", secrets.token_hex(16)
+    _code_ref(email).set({"email": email, "keys": keys, "salt": salt, "code_hash": _code_hash(salt, code), "attempts": 0,
+                          "expires_at": time.time() + SIGNIN_CODE_SECONDS, "used": False, "created_at": firestore.SERVER_TIMESTAMP})
+    msg = mailer.build(
+        email, f"Your Chudleigh Health Hub sign-in code: {code[:3]} {code[3:]}",
+        [f"Your code to sign in to your Chudleigh Health Hub patient portal is: {code[:3]} {code[3:]}",
+         f"Type it into the portal page where you asked for it. It works once, for the next {SIGNIN_CODE_SECONDS // 60} minutes.",
+         "If you didn't ask for this, you can ignore this email. Nobody can sign in without the code. We will never ask you for it by phone."],
+        html=False)
+    threading.Thread(target=_send_quietly, args=(msg,), daemon=True).start()   # in the background, so the reply takes as long whether or not the email is on file
+    audit("signin_code_sent", keys[0], records=len(keys))
+
+
+@firestore.transactional
+def _check_code(transaction, ref, code: str, now):
+    """Check a code inside a transaction, so each try is counted and a code can only be used once. Returns the record if it is right, else None."""
+    snap = ref.get(transaction=transaction)
+    d = snap.to_dict() if snap.exists else None
+    if not d or d.get("used") or float(d.get("expires_at") or 0) < now or int(d.get("attempts") or 0) >= MAX_CODE_TRIES:
+        return None
+    if not hmac.compare_digest(_code_hash(d.get("salt", ""), code), d.get("code_hash", "")):
+        transaction.update(ref, {"attempts": int(d.get("attempts") or 0) + 1})
+        return None
+    transaction.update(ref, {"used": True, "used_at": now})
+    return d
+
+
+def redeem_signin_code(email: str, code: str):
+    """The [(record id, name)] this email and code sign in to, or None if the code is wrong, used or out of date. Raises LookupError after too many wrong codes."""
+    ip = client_ip()
+    if lockout_remaining("signin-code-ip", ip):
+        raise LookupError("too many wrong codes")
+    d = _check_code(db.transaction(), _code_ref(email), code, time.time()) if re.fullmatch(r"[0-9]{6}", code or "") else None
+    people = []
+    for key in (d or {}).get("keys") or []:
+        snap = db.collection(REPORTS).document(key).get()
+        p = (snap.to_dict() or {}) if snap.exists else {}
+        if p and p.get("email") == email:                     # the email was not changed or removed since the code was sent
+            people.append((key, p.get("name") or "Patient"))
+            if not p.get("email_confirmed_at"):
+                snap.reference.update({"email_confirmed_at": firestore.SERVER_TIMESTAMP})   # using the code proves the email is theirs
+    if not people:
+        record_failed_attempt("signin-code-ip", ip, MAX_BAD_CODES_PER_IP)
+        return None
+    return people
+
+
+def _start_portal_session(key: str, method: str):
+    audit("patient_login", key, method=method)
+    for k in ("portal_signin_email", "portal_signin_sent", "portal_signin_choice"):
+        st.session_state.pop(k, None)
+    st.session_state.portal_auth = {"key": key, "at": time.time()}
+    st.rerun()
+
+
+def render_signin_choice():
+    """When one email is used by more than one person (a parent and child, say): who is signing in."""
+    names = dict(st.session_state["portal_signin_choice"])
+    pick = st.radio("This email is used by more than one person. Who is signing in?", list(names), format_func=names.get, index=None)
+    if st.button("Continue", type="primary", disabled=pick is None, use_container_width=True):
+        _start_portal_session(pick, "email_code")
+
+
+def render_email_sign_in():
+    """Step 1: the patient's email. Step 2: the code from the email (the email is remembered on this page, or can be typed again)."""
+    email = st.session_state.get("portal_signin_email")
+    if not email:
+        st.markdown("Enter the email address you gave the clinic and we'll email you a 6-digit code to sign in. No password needed.")
+        with st.form("patient_email_login"):
+            typed = st.text_input("Your email address", max_chars=254, placeholder="you@example.com")
+            asked = st.form_submit_button("Email me a code", type="primary", use_container_width=True)
+            have_code = st.form_submit_button("I already have a code")
+        if not (asked or have_code):
+            return
+        email = clean_email(typed)
+        if not email:
+            st.error("Please enter your email address.")
+            return
+        if asked:
+            try:
+                request_signin_code(email)
+            except LookupError:
+                st.error("Too many codes have been asked for. Please try again in 15 minutes.")
+                return
+            except Exception:
+                fail("We couldn't send a code right now. Please try again shortly.", "Sign-in code request failed")
+                return
+        st.session_state["portal_signin_email"] = email
+        st.session_state["portal_signin_sent"] = bool(asked)
+        st.rerun()
+
+    if st.session_state.get("portal_signin_sent"):
+        st.success(f"If {email} is on our records, a 6-digit code is on its way. It works once, for the next {SIGNIN_CODE_SECONDS // 60} minutes. "
+                   f"Check your junk folder if it hasn't arrived in a few minutes. If you haven't given us your email, please call us on {CLINIC_PHONE}.")
+    with st.form("patient_code_login"):
+        typed_code = st.text_input(f"The 6-digit code we emailed to {email}", max_chars=12, placeholder="123 456")
+        entered = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        restart = st.form_submit_button("Use a different email or get a new code")
+    if restart:
+        st.session_state.pop("portal_signin_email", None)
+        st.session_state.pop("portal_signin_sent", None)
+        st.rerun()
+    if not entered:
+        return
+    code = re.sub(r"\s", "", typed_code or "")
+    try:
+        people = redeem_signin_code(email, code)
+    except LookupError:
+        st.error("Too many wrong codes from here. Please try again in 15 minutes.")
+        return
+    except Exception:
+        fail("We couldn't sign you in right now. Please try again shortly.", "Sign-in with a code failed")
+        return
+    if not people:
+        st.error("That code isn't right, or it has expired. Check the code in your email, or ask for a new one.")
+    elif len(people) == 1:
+        _start_portal_session(people[0][0], "email_code")
+    else:
+        st.session_state["portal_signin_choice"] = people
+        st.rerun()
 
 
 def _latest_scan(key: str):
@@ -2816,7 +3091,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     for idx, t in enumerate(st.session_state.participant_tests):
         st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {esc(t['type'])}</b></div>", unsafe_allow_html=True)
 
-    st.subheader("📋 Participant Metadata & Security PIN")
+    with st.expander("🧑‍⚕️ Patient portal for any patient: add or update contact details and exercises"):
+        render_portal_record_editor()
+
+    st.subheader("📋 Participant Metadata & Sign-in Email")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -2826,10 +3104,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     with col2:
         assessment_date = st.date_input("Assessment Date", value=datetime.date.today(), key="p_date")
-        patient_pin = st.text_input(
-            f"Patient Secure PIN ({MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits)",
-            type="password", placeholder="••••••", key="p_pin", max_chars=MAX_PIN_LENGTH,
-            help="Required for new participants. For existing participants, leave blank to keep their current PIN.",
+        patient_email = st.text_input(
+            "Participant email (for signing in)", placeholder="name@example.com", key="p_email", max_chars=254,
+            help="The participant signs in to their portal with a code sent to this email. Required for new participants. "
+                 "For existing participants, leave blank to keep the email on record.",
         )
 
     col_sex, col_height = st.columns(2)
@@ -2863,7 +3141,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     ("A participant with this name is already on record." if same_name_count == 1
                      else f"{same_name_count} participants with this name are already on record.")
                     + " Choose the same person (check the age, sex and last scan), or create a new record if this is someone else. "
-                    "Whoever signs in with the record's PIN will see the report."
+                    "Whoever signs in with the record's email will see the report."
                 )
             record_id, identity_chosen = choose_participant(c_key, who_key, allow_new=True, label="Which participant is this?")
             if record_id:
@@ -2884,10 +3162,10 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         f"Publishing adds a scan to this record. Its previous scan recorded: age/gender \"{previous_scan.get('age_gender') or 'not specified'}\", "
                         f"body metrics \"{previous_scan.get('body_mass_height') or 'not specified'}\"."
                     )
-                if existing_info.get("pin_weak"):
-                    st.warning("This participant still has a short legacy PIN. Enter a new 6-8 digit PIN above to replace it.")
+                if not existing_info.get("has_email"):
+                    st.warning("This participant has no email on record, so they can't sign in yet. Enter their email above.")
             elif same_name_count and identity_chosen:
-                st.info("A new record will be created for this person. Give them a PIN that differs from the other participant(s) with this name.")
+                st.info("A new record will be created for this person.")
         except Exception:
             lookup_failed = True
             log.exception("History lookup failed")
@@ -3416,7 +3694,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         if not FILE_SHARING_ON:
             st.caption("Sharing the original reports with participants is switched off, because no private storage has been set up. See PDF_SHARING.md.")
         else:
-            st.caption("Tick the reports the participant may open from their page. They are stored privately and shown only to them, after they sign in with their PIN. "
+            st.caption("Tick the reports the participant may open from their page. They are stored privately and shown only to them, after they sign in. "
                        "A report usually shows the participant's name and date of birth, so check that each one is theirs.")
             for n, t in enumerate(pdf_tests):
                 sig = hashlib.sha256(t["pdf_bytes"]).hexdigest()[:16]
@@ -3454,23 +3732,21 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     # --- PUBLISH & SYNC TO GOOGLE CLOUD (LONGITUDINAL SUBCOLLECTION) ---
     if st.button("💾 Publish & Sync New Scan to Cloud", type="primary", use_container_width=True):
-        pin = (patient_pin or "").strip()
+        new_email = clean_email(patient_email)
         if not participant_name or not c_key:
             st.warning("Please ensure a valid participant name is entered.")
         elif REPORT_MODE == "dashboard" and not dash_tiles:
             st.warning("There is nothing to publish yet: none of this participant's results have approved wording. See the dashboard section above.")
         elif any(has_unresolved_notes(st.session_state.get(k, "")) for k in TEXT_KEYS):
             st.warning("Some drafts still contain CHECK notes or stray pieces of them. Resolve each one and delete its whole line before publishing.")
-        elif pin and not re.fullmatch(rf"[0-9]{{{MIN_NEW_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin):
-            st.warning(f"The PIN must be {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digits.")
+        elif new_email is None:
+            st.warning("That email address doesn't look right.")
         elif lookup_failed or not db:
             st.error("Couldn't check for existing records with this name, so nothing was published. Please try again.")
         elif not identity_chosen:
             st.warning("A participant with this name is already on record. Choose which participant this is (under their name) before publishing.")
-        elif not pin and not existing_profile:
-            st.warning(f"New participants need a {MIN_NEW_PIN_LENGTH}-{MAX_PIN_LENGTH} digit security PIN.")
-        elif pin and same_name_count and pin_in_use(pin, c_key, exclude_id=record_id):
-            st.warning("Another participant with this name already uses that PIN. Choose a different PIN so each of them can sign in.")
+        elif not new_email and not (existing_profile and existing_info.get("has_email")):
+            st.warning("Please enter the participant's email, so they can sign in to see their report.")
         elif shared_tests and not files_ok:
             st.warning("Please tick the box confirming that every report you are sharing belongs to this participant.")
         elif shared_tests and sum(len(t["pdf_bytes"]) for t in shared_tests) > MAX_SHARED_TOTAL_BYTES:
@@ -3533,8 +3809,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         **{f"price_{tier}": fmt_price(prices[tier]) for tier in TIERS},
                         "updated_at": firestore.SERVER_TIMESTAMP,
                     }
-                    if pin:
-                        profile_record.update(pin_fields(pin))
+                    if new_email:
+                        profile_record["email"] = new_email
+                    profile_record.update(NO_PIN_FIELDS)
                     is_new_record = record_id is None
                     target_id = record_id or new_patient_id()
                     if is_new_record:
@@ -3668,7 +3945,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 # VIEW 2: SECURE PATIENT MOBILE PORTAL
 # ==========================================
 elif app_mode == "Secure Patient Mobile Portal":
-    st.subheader("📱 Participant Companion Portal")
+    st.subheader("📱 Your Patient Portal")
 
     # Returning from Stripe checkout: verify payment, then strip the ID from the URL.
     stripe_session_id = st.query_params.get("session_id")
@@ -3695,52 +3972,13 @@ elif app_mode == "Secure Patient Mobile Portal":
         st.error("The client portal is temporarily unavailable. Please try again later.")
 
     elif not portal_auth:
-        st.markdown("Welcome to the Chudleigh Health Hub client portal. Enter your full name and secure PIN.")
-        with st.form("patient_login"):
-            col_l1, col_l2 = st.columns(2)
-            with col_l1:
-                client_lookup = st.text_input("Your Full Name", placeholder="e.g. John Evans", max_chars=120)
-            with col_l2:
-                client_pin = st.text_input("Your Secure PIN", type="password", placeholder="••••••", max_chars=MAX_PIN_LENGTH)
-            submitted = st.form_submit_button("Unlock My Healthspan Portal", type="primary", use_container_width=True)
-
-        if submitted:
-            lookup_key = patient_key(client_lookup)
-            pin = (client_pin or "").strip()
-            limiter_id = lookup_key or "invalid-name"
-            ip = client_ip()
-            remaining = max(lockout_remaining("patient", limiter_id), lockout_remaining("patient-ip", ip))
-            generic_error = "We couldn't verify those details. Please check your name and PIN, or contact Chudleigh Health Hub."
-
-            if remaining:
-                st.error(f"Too many failed attempts. Please try again in {math.ceil(remaining / 60)} minute(s).")
-            elif not re.fullmatch(rf"[0-9]{{{LEGACY_MIN_PIN_LENGTH},{MAX_PIN_LENGTH}}}", pin) or not lookup_key:
-                st.error(generic_error)
-            else:
-                try:
-                    # Several participants can share a name; the PIN decides which record this is.
-                    candidates = profiles_named(lookup_key)
-                    if not candidates:
-                        verify_pin(pin, None)  # same timing as a wrong PIN, so unknown names can't be detected
-                    matched = next((c for c in candidates if verify_pin(pin, c.to_dict())), None)
-                    if matched:
-                        clear_attempts("patient", limiter_id)
-                        audit("patient_login", matched.id)
-                        if not (matched.to_dict() or {}).get("pin_hash"):
-                            matched.reference.update(pin_fields(pin))  # migrate legacy plaintext PIN
-                        st.session_state.portal_auth = {"key": matched.id, "at": time.time()}
-                        signed_in = True
-                    else:
-                        record_failed_attempt("patient", limiter_id)
-                        record_failed_attempt("patient-ip", ip, MAX_PATIENT_ATTEMPTS_PER_IP, delay=False)
-                        signed_in = False
-                except Exception:
-                    signed_in = None
-                    fail("We couldn't reach your records right now. Please try again shortly.", "Patient sign-in failed")
-                if signed_in:
-                    st.rerun()
-                elif signed_in is False:
-                    st.error(generic_error)
+        if st.session_state.get("portal_signin_choice"):
+            render_signin_choice()
+        elif mailer.email_on():
+            render_email_sign_in()
+        else:
+            log.error("Patient sign-in is unavailable: no email service is set up (SMTP_HOST)")
+            st.info(f"Signing in to the portal isn't available right now. Please call us on {CLINIC_PHONE}.")
 
     else:
         lookup_key = portal_auth["key"]
@@ -3776,7 +4014,10 @@ elif app_mode == "Secure Patient Mobile Portal":
         elif client_data is None:
             st.session_state.pop("portal_auth", None)
         elif not scan_ids:
-            st.warning("No assessment scans found on file.")
+            # A patient seen for osteopathy or physio, who hasn't had a Longevity assessment yet.
+            st.success(f"Welcome, {client_data.get('name', '')}!")
+            render_portal_exercises(client_data)
+            render_longevity_invite()
         else:
             display_name = client_data.get("name", "")
             selected_scan_date = st.selectbox("Select Assessment Date", scan_ids, key="portal_scan_date")
@@ -3816,6 +4057,7 @@ elif app_mode == "Secure Patient Mobile Portal":
                 use_container_width=True,
             )
 
+            render_portal_exercises(client_data)
             render_portal_plans(lookup_key, client_data)
 
             st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
