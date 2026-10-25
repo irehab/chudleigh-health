@@ -58,7 +58,8 @@ from helpers import (
     strip_code_fences,
 )
 import mailer  # noqa: E402  (emails to patients: sign-in codes, reminders)
-import reminders  # noqa: E402  (the reminder emails; the daily job is reminders.py itself)
+import reminders  # noqa: E402  (the reminder emails and texts; the daily job is reminders.py itself)
+import sms  # noqa: E402  (text messages to patients)
 from helpers import (  # noqa: E402  (report files kept in private storage)
     MAX_SHARED_PDF_BYTES,
     MAX_SHARED_TOTAL_BYTES,
@@ -1924,11 +1925,16 @@ def render_portal_record_editor():
                                 help="Paste the link to the patient's programme in VALD. The portal links to it; nothing is copied.")
         note_in = st.text_area("Note for the patient about their exercises (optional)", value=current.get("exercise_note") or "", max_chars=NOTE_MAX,
                                placeholder="e.g. Three times a week. Stop and let us know if the pain goes above 5 out of 10.")
-        r1, r2, r3 = st.columns(3)
+        r0, r1, r2, r3 = st.columns(4)
+        with r0:
+            ways = list(reminders.CHANNEL_CHOICES)
+            current_ways = reminders.channels(current)
+            channels_in = st.selectbox("Reminders by", ways, index=ways.index(current_ways) if current_ways in ways else 0,
+                                       format_func=reminders.CHANNEL_CHOICES.get, help="Texts need a mobile number. The patient can change this in their portal.")
         with r1:
             choices = list(reminders.REMINDER_CHOICES)
             current_freq = current.get("exercise_reminders") or "weekly"
-            freq = st.selectbox("Exercise reminders by email", choices, index=choices.index(current_freq) if current_freq in choices else 0,
+            freq = st.selectbox("Exercise reminders", choices, index=choices.index(current_freq) if current_freq in choices else 0,
                                 format_func=reminders.REMINDER_CHOICES.get, help="Sent only if they agreed to care messages, and only while there is an exercise link.")
         with r2:
             until_in = st.date_input("Programme ends on (optional)", value=_as_date(current.get("exercise_until")), format="DD/MM/YYYY",
@@ -1953,6 +1959,8 @@ def render_portal_record_editor():
         problems.append("The exercise link must be a secure (https) link to " + " or ".join(EXERCISE_LINK_HOSTS) + ".")
     if (care_ok or marketing_ok) and not (email or mobile):
         problems.append("Add an email or mobile number for the messages they agreed to.")
+    if "sms" in channels_in and not mobile:
+        problems.append("Add a mobile number for text reminders, or choose email.")
     if problems:
         for p in problems:
             st.warning(p)
@@ -1960,7 +1968,7 @@ def render_portal_record_editor():
     try:
         who = st.session_state.get("clinician_email") or "clinician"
         fields = {"name_lower": key, "name": name.strip(), "services": services, "email": email, "mobile": mobile,
-                  "exercise_link": link, "exercise_note": clean_note(note_in), "exercise_reminders": freq,
+                  "exercise_link": link, "exercise_note": clean_note(note_in), "exercise_reminders": freq, "reminder_channels": list(channels_in),
                   "exercise_until": until_in.isoformat() if until_in else "", "retest_due": retest_in.isoformat() if retest_in else "",
                   "updated_at": firestore.SERVER_TIMESTAMP}
         if link != (current.get("exercise_link") or ""):
@@ -1988,17 +1996,25 @@ def _as_date(value):
         return None
 
 
+def _send_reminder_quietly(kind: str, profile: dict, channel: str):
+    try:
+        reminders.send_one(kind, profile, channel)
+    except Exception:
+        log.exception("Sending a %s message by %s failed", kind, channel)
+
+
 def notify_results_ready(key: str):
-    """Email "new results are ready in your portal" (no details) if the patient agreed to care messages. Never blocks the publish."""
+    """Send "new results are ready in your portal" (no details) by the patient's chosen email and/or text, if they agreed to care
+    messages. Never blocks the publish."""
     try:
         snap = db.collection(REPORTS).document(key).get()
         profile = (snap.to_dict() or {}) if snap.exists else {}
-        if not (profile.get("care_messages_ok") and profile.get("email") and mailer.email_on()):
-            return
-        threading.Thread(target=_send_quietly, args=(reminders.build_email("results", profile),), daemon=True).start()
-        audit("reminder_sent", key, kind="results")
+        for channel in reminders.channels(profile):
+            if reminders.can_reach(profile, channel) and (mailer.email_on() if channel == "email" else sms.sms_on()):
+                threading.Thread(target=_send_reminder_quietly, args=("results", profile, channel), daemon=True).start()
+                audit("reminder_sent", key, kind="results", channel=channel)
     except Exception:
-        log.exception("Sending the results-ready email failed")
+        log.exception("Sending the results-ready message failed")
 
 
 def render_portal_exercises(key: str, client_data: dict):
@@ -2042,7 +2058,7 @@ def render_portal_retest(client_data: dict):
     st.link_button("Book online", LONGEVITY_BOOKING_URL, use_container_width=True)
 
 
-PATIENT_CARE_LABEL = "Email me exercise reminders, re-test reminders and when new results are ready"
+PATIENT_CARE_LABEL = "Send me exercise reminders, re-test reminders and a message when new results are ready"
 PATIENT_MARKETING_LABEL = "Email me news and offers from Chudleigh Health Hub"
 
 
@@ -2051,19 +2067,33 @@ def render_message_settings(key: str, client_data: dict):
     with st.expander("✉️ Message settings"):
         with st.form("portal_message_settings"):
             care = st.checkbox(PATIENT_CARE_LABEL, value=bool(client_data.get("care_messages_ok")))
+            ways = list(reminders.CHANNEL_CHOICES)
+            current_ways = reminders.channels(client_data)
+            how = st.radio("How should we send them?", ways, index=ways.index(current_ways) if current_ways in ways else 0,
+                           format_func=reminders.CHANNEL_CHOICES.get, horizontal=True)
+            mobile_in = st.text_input("Your mobile number (for texts)", value=client_data.get("mobile") or "", max_chars=20, placeholder="07…")
             marketing = st.checkbox(PATIENT_MARKETING_LABEL, value=bool(client_data.get("marketing_ok")))
             saved = st.form_submit_button("Save my settings")
-        st.caption("These emails never include your health details. You can change this at any time.")
+        st.caption("Our emails and texts never include your health details. You can change this at any time.")
         if not saved:
+            return
+        mobile = clean_uk_mobile(mobile_in)
+        if mobile is None:
+            st.warning("That isn't a UK mobile number (07…).")
+            return
+        if "sms" in how and not mobile:
+            st.warning("Please add your mobile number for texts, or choose email.")
             return
         try:
             fields = {}
             _consent_change(fields, client_data, "care_messages_ok", care, PATIENT_CARE_LABEL, "patient")
             _consent_change(fields, client_data, "marketing_ok", marketing, PATIENT_MARKETING_LABEL, "patient")
-            if any(k.endswith("_at") for k in fields):
+            if list(how) != list(reminders.channels(client_data)) or mobile != (client_data.get("mobile") or ""):
+                fields.update({"reminder_channels": list(how), "mobile": mobile})
+            if fields and (any(k.endswith("_at") for k in fields) or "reminder_channels" in fields):
                 db.collection(REPORTS).document(key).update(fields)
-                client_data.update({k: v for k, v in fields.items() if not k.endswith("_at")})
-                audit("message_settings_changed", key, care=care, marketing=marketing)
+                client_data.update({k: v for k, v in fields.items() if not k.endswith(("_at", "_by", "_wording"))})
+                audit("message_settings_changed", key, care=care, marketing=marketing, channels=list(how))
             st.success("Saved.")
         except Exception:
             fail("We couldn't save your settings right now. Please try again shortly.", "Saving message settings failed")
