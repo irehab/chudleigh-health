@@ -293,9 +293,9 @@ def _show(value: float, unit: str, asymmetry: bool) -> str:
     return f"{value:g} {unit}".strip() if unit and unit != "%" else (f"{value:g}%" if unit == "%" else f"{value:g}")
 
 
-def app_fields(res: ReadResult) -> dict:
-    """The app's boxes for this test, filled from the report. A box whose measure is not in the report stays empty.
-    Per-kg results are left empty when the body weight on the plate failed its check (they would be wrong)."""
+def field_numbers(res: ReadResult) -> dict:
+    """The app's boxes for this test as numbers: {box: {"value", "unit", "asymmetry"}}, or None for a box whose measure is not in the report.
+    Per-kg results are None when the body weight on the plate failed its check (they would be wrong). Asymmetry is signed: negative = left."""
     code = getattr(res, "test_code", "")
     bad_bw = any(not c.ok and c.name.startswith("body weight") for c in res.checks)
     sessions = getattr(res, "sessions", [])
@@ -304,11 +304,11 @@ def app_fields(res: ReadResult) -> dict:
     for box, pattern, how in FIELD_MAP.get(code, []):
         if how == "bw":           # the latest session's body weight, only if it passed its check
             bw = max(sessions, key=lambda s: s["date"])["bw"] if sessions else None
-            out[box] = "" if bw is None or bad_bw else f"{bw:g} kg"
+            out[box] = None if bw is None or bad_bw else {"value": bw, "unit": "kg", "asymmetry": False}
             continue
         m = next((m for m in getattr(res, "measures", []) if re.fullmatch(pattern, m["name"], re.I)), None)
         if not m or (bad_bw and PER_KG.search(f"{m['name']} [{m['unit']}]")):
-            out[box] = ""
+            out[box] = None
             continue
         vals = [p["value"] for p in m["points"]]
         if how == "latest":
@@ -319,5 +319,11 @@ def app_fields(res: ReadResult) -> dict:
             value = max(vals) if how == "best_max" else min(vals)
         else:
             value = None
-        out[box] = "" if value is None else _show(value, m["unit"], m["asymmetry"])
+        out[box] = None if value is None else {"value": value, "unit": m["unit"], "asymmetry": m["asymmetry"]}
     return out
+
+
+def app_fields(res: ReadResult) -> dict:
+    """The app's boxes for this test, filled from the report. A box whose measure is not in the report stays empty."""
+    return {box: "" if n is None else (f"{n['value']:g} kg" if box == "Body Weight" else _show(n["value"], n["unit"], n["asymmetry"]))
+            for box, n in field_numbers(res).items()}

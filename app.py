@@ -17,10 +17,10 @@ from decimal import Decimal
 import nh3
 
 try:  # the app's own PDF reader (no AI). If it is not installed on the server, the AI reads PDFs as before.
-    from pdf_reader import read_pdf as read_report_pdf, reader_for
+    from pdf_reader import read_pdf as read_report_pdf, reader_for, vald_hub
     PDF_READER_AVAILABLE = True
 except Exception:  # pragma: no cover
-    read_report_pdf, reader_for, PDF_READER_AVAILABLE = None, None, False
+    read_report_pdf, reader_for, vald_hub, PDF_READER_AVAILABLE = None, None, None, False
 
 try:  # published reference data and the comparisons made from it (no AI)
     import norms
@@ -57,7 +57,8 @@ from helpers import (
     short_ref,
     strip_code_fences,
 )
-import mailer  # noqa: E402  (emails to patients: sign-in links)
+import mailer  # noqa: E402  (emails to patients: sign-in codes, reminders)
+import reminders  # noqa: E402  (the reminder emails; the daily job is reminders.py itself)
 from helpers import (  # noqa: E402  (report files kept in private storage)
     MAX_SHARED_PDF_BYTES,
     MAX_SHARED_TOTAL_BYTES,
@@ -204,6 +205,7 @@ TIER_INFO = {
 PLAN_REQUESTS = "plan_requests"
 APP_STATE = "app_state"                   # small housekeeping records, such as when the record clean-up last ran
 CLINIC_PHONE = "07902 065739"
+FORCE_PLATE = "force_plate"               # under each participant: one document per force plate test added for their progress charts
 SIGNIN_CODES = "signin_codes"             # one-time email sign-in codes: only a salted fingerprint of each code is stored, never the code
 SIGNIN_CODE_SECONDS = 15 * 60
 MAX_CODE_TRIES = 5                        # wrong guesses allowed for one code
@@ -1327,7 +1329,8 @@ def export_participant(key: str) -> str:
         for d in db.collection("payments").where(filter=FieldFilter("patient_key", "==", key)).stream()
     ]
     plans = [_with_id(d) for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream()]
-    out = {"profile": profile, "scans": scans, "payments": payments, "plan_requests": plans}
+    force_plate = {d.id: d.to_dict() for d in profile_ref.collection(FORCE_PLATE).stream()}
+    out = {"profile": profile, "scans": scans, "force_plate_tests": force_plate, "payments": payments, "plan_requests": plans}
     if any((sc or {}).get("shared_files") for sc in scans.values()):
         out["shared_report_files_note"] = ("The PDF reports shared with this participant are kept in private storage. They are listed under each scan's shared_files "
                                            "(label, size, who shared them). The files themselves can be supplied separately.")
@@ -1349,6 +1352,8 @@ def delete_participant(key: str) -> int:
     for d in profile_ref.collection("scans").stream():
         d.reference.delete()
         deleted += 1
+    for d in profile_ref.collection(FORCE_PLATE).stream():
+        d.reference.delete()
     for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream():
         d.reference.delete()
     profile_ref.delete()
@@ -1885,7 +1890,7 @@ def _consent_change(fields: dict, current: dict, name: str, value: bool, wording
 def render_portal_record_editor():
     """Clinician screen: give any patient (osteopathy, physio or Longevity) a portal record, or update one: contact details, consent and exercises."""
     st.caption("For any patient, not only Longevity clients. Patients sign in with a code we email them, so an email is needed. "
-               "Reminders are not sent yet: the consent ticks are recorded ready for them.")
+               "Reminder emails go only to patients who agreed to care messages.")
     name = st.text_input("Patient full name", key="pr_name", max_chars=120)
     key = patient_key(name)
     if name and not key:
@@ -1919,6 +1924,18 @@ def render_portal_record_editor():
                                 help="Paste the link to the patient's programme in VALD. The portal links to it; nothing is copied.")
         note_in = st.text_area("Note for the patient about their exercises (optional)", value=current.get("exercise_note") or "", max_chars=NOTE_MAX,
                                placeholder="e.g. Three times a week. Stop and let us know if the pain goes above 5 out of 10.")
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            choices = list(reminders.REMINDER_CHOICES)
+            current_freq = current.get("exercise_reminders") or "weekly"
+            freq = st.selectbox("Exercise reminders by email", choices, index=choices.index(current_freq) if current_freq in choices else 0,
+                                format_func=reminders.REMINDER_CHOICES.get, help="Sent only if they agreed to care messages, and only while there is an exercise link.")
+        with r2:
+            until_in = st.date_input("Programme ends on (optional)", value=_as_date(current.get("exercise_until")), format="DD/MM/YYYY",
+                                     help="Reminders stop after this date.")
+        with r3:
+            retest_in = st.date_input("Re-test due on (optional)", value=_as_date(current.get("retest_due")), format="DD/MM/YYYY",
+                                      help="Only if you've agreed a re-test with the patient. They get one reminder on this date.")
         saved = st.form_submit_button("💾 Save portal record", type="primary", use_container_width=True)
     if not saved:
         return
@@ -1943,7 +1960,9 @@ def render_portal_record_editor():
     try:
         who = st.session_state.get("clinician_email") or "clinician"
         fields = {"name_lower": key, "name": name.strip(), "services": services, "email": email, "mobile": mobile,
-                  "exercise_link": link, "exercise_note": clean_note(note_in), "updated_at": firestore.SERVER_TIMESTAMP}
+                  "exercise_link": link, "exercise_note": clean_note(note_in), "exercise_reminders": freq,
+                  "exercise_until": until_in.isoformat() if until_in else "", "retest_due": retest_in.isoformat() if retest_in else "",
+                  "updated_at": firestore.SERVER_TIMESTAMP}
         if link != (current.get("exercise_link") or ""):
             fields["exercise_set_on"] = datetime.date.today().isoformat() if link else ""
         _consent_change(fields, current, "care_messages_ok", care_ok, CARE_CONSENT_LABEL, who)
@@ -1961,8 +1980,30 @@ def render_portal_record_editor():
         fail("Saving failed. Please try again.", "Saving a portal record failed")
 
 
-def render_portal_exercises(client_data: dict):
-    """The 'Your exercises' section of the patient portal: a link out to their programme in VALD (nothing is copied here)."""
+def _as_date(value):
+    """An ISO date string as a date, or None."""
+    try:
+        return datetime.date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
+
+
+def notify_results_ready(key: str):
+    """Email "new results are ready in your portal" (no details) if the patient agreed to care messages. Never blocks the publish."""
+    try:
+        snap = db.collection(REPORTS).document(key).get()
+        profile = (snap.to_dict() or {}) if snap.exists else {}
+        if not (profile.get("care_messages_ok") and profile.get("email") and mailer.email_on()):
+            return
+        threading.Thread(target=_send_quietly, args=(reminders.build_email("results", profile),), daemon=True).start()
+        audit("reminder_sent", key, kind="results")
+    except Exception:
+        log.exception("Sending the results-ready email failed")
+
+
+def render_portal_exercises(key: str, client_data: dict):
+    """The 'Your exercises' section of the patient portal: a link out to their programme in VALD (nothing is copied here),
+    and a button to tick off this week's exercises, which also stops this week's reminder."""
     link = clean_exercise_link(client_data.get("exercise_link"), EXERCISE_LINK_HOSTS)
     treated = any(s in (client_data.get("services") or []) for s in ("Osteopathy", "Physiotherapy"))
     if not link and not treated:
@@ -1977,6 +2018,170 @@ def render_portal_exercises(client_data: dict):
         st.caption(f"Programme set on {friendly_date(set_on)}. It opens in VALD, where your clinician keeps your exercises.")
     if client_data.get("exercise_note"):
         st.info(client_data["exercise_note"])
+    done = sorted(client_data.get("exercise_done") or [])
+    if st.button("✅ I've done my exercises this week", key="portal_ex_done", use_container_width=True):
+        try:
+            done = sorted(set(done) | {datetime.date.today().isoformat()})[-60:]
+            db.collection(REPORTS).document(key).update({"exercise_done": done})
+            client_data["exercise_done"] = done
+            reminded = client_data.get("care_messages_ok") and (client_data.get("exercise_reminders") or "off") != "off"
+            st.success("Well done!" + (" We won't send you a reminder this week." if reminded else ""))
+        except Exception:
+            fail("We couldn't save that right now. Please try again shortly.", "Saving an exercise tick failed")
+    if done:
+        st.caption(f"Last ticked off: {friendly_date(done[-1])}.")
+
+
+def render_portal_retest(client_data: dict):
+    """A re-test the clinician agreed with the patient: when it is due, and how to book it."""
+    due_on = _as_date(client_data.get("retest_due"))
+    if not due_on:
+        return
+    when = "is due" if due_on <= datetime.date.today() else f"is due on {friendly_date(due_on.isoformat())}"
+    st.info(f"📅 Your re-test {when}. Call us on {CLINIC_PHONE}, or book online.")
+    st.link_button("Book online", LONGEVITY_BOOKING_URL, use_container_width=True)
+
+
+PATIENT_CARE_LABEL = "Email me exercise reminders, re-test reminders and when new results are ready"
+PATIENT_MARKETING_LABEL = "Email me news and offers from Chudleigh Health Hub"
+
+
+def render_message_settings(key: str, client_data: dict):
+    """The patient's own switches for the emails they get. Each change is kept with when it was made and the exact wording."""
+    with st.expander("✉️ Message settings"):
+        with st.form("portal_message_settings"):
+            care = st.checkbox(PATIENT_CARE_LABEL, value=bool(client_data.get("care_messages_ok")))
+            marketing = st.checkbox(PATIENT_MARKETING_LABEL, value=bool(client_data.get("marketing_ok")))
+            saved = st.form_submit_button("Save my settings")
+        st.caption("These emails never include your health details. You can change this at any time.")
+        if not saved:
+            return
+        try:
+            fields = {}
+            _consent_change(fields, client_data, "care_messages_ok", care, PATIENT_CARE_LABEL, "patient")
+            _consent_change(fields, client_data, "marketing_ok", marketing, PATIENT_MARKETING_LABEL, "patient")
+            if any(k.endswith("_at") for k in fields):
+                db.collection(REPORTS).document(key).update(fields)
+                client_data.update({k: v for k, v in fields.items() if not k.endswith("_at")})
+                audit("message_settings_changed", key, care=care, marketing=marketing)
+            st.success("Saved.")
+        except Exception:
+            fail("We couldn't save your settings right now. Please try again shortly.", "Saving message settings failed")
+
+
+# --- Force plate tests for patients seen for treatment: read from the VALD Hub PDF, shown to the patient as progress charts ---
+FP_TEST_NAMES = {"CMJ": "Jump (countermovement jump)", "SQT": "Squat", "STSTS": "Sit to stand", "SLSB": "Single-leg balance", "QSB": "Standing balance"}
+FP_LABELS = {"Jump Height": "Jump height", "Peak Power/Mass": "Power for your body weight", "Modified RSI": "Springiness (RSI modified)",
+             "Flight Time:Contraction Time": "Time in the air for the push", "Peak Force Asymmetry": "Left–right difference pushing off",
+             "Braking Impulse Asymmetry": "Left–right difference dipping down", "Peak Force": "Peak force", "L/R Asymmetry": "Left–right difference",
+             "Time to Stand": "Time to stand", "Peak Standing Force": "Standing force", "Limb Asymmetry": "Left–right difference",
+             "Peak Standing RFD": "How quickly you build force"}
+FP_RETEST_WEEKS = 6
+
+
+def _fp_unit(unit: str, asymmetry: bool) -> str:
+    return "%" if asymmetry else {"% L,R": "%"}.get(unit or "", unit or "")
+
+
+def render_force_plate_upload():
+    """Clinician screen: add a VALD Hub ForceDecks test to a patient's progress charts, and set their re-test reminder."""
+    st.caption("For patients seen for treatment (Longevity tests still go in a Longevity report below). The PDF is read in the app, "
+               "never by an AI, and only the numbers are kept. The patient needs a portal record first.")
+    if not (PDF_READER_AVAILABLE and vald_hub):
+        st.info("The PDF reader isn't available on this server.")
+        return
+    name = st.text_input("Patient full name", key="fp_name", max_chars=120)
+    key = patient_key(name)
+    if not key or not db:
+        return
+    try:
+        record_id, decided = choose_participant(key, f"fp_who::{key}", allow_new=False, label="Which patient is this?")
+    except Exception:
+        fail("Couldn't look up that name. Please try again.", "Force plate patient lookup failed")
+        return
+    if not decided:
+        return
+    if not record_id:
+        st.warning("There's no portal record with that name. Add the patient under \"Patient portal for any patient\" first.")
+        return
+    up = st.file_uploader("VALD Hub ForceDecks report (PDF)", type=["pdf"], key=f"fp_pdf::{record_id}")
+    if not up:
+        return
+    data = up.getvalue()
+    if len(data) > MAX_PDF_BYTES:
+        st.warning("That file is too large.")
+        return
+    res = read_report_pdf(data)
+    code = getattr(res, "test_code", "")
+    sessions = getattr(res, "sessions", [])
+    if res.device != vald_hub.DEVICE or code not in vald_hub.TESTS or not sessions:
+        st.error("This doesn't look like a VALD Hub ForceDecks report the app can read (jump, squat, sit to stand or balance).")
+        return
+    test_date = max(s["date"] for s in sessions)
+    numbers = {box: n for box, n in vald_hub.field_numbers(res).items() if n and box != "Body Weight"}
+    st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** on {friendly_date(test_date.isoformat())}")
+    shown = vald_hub.app_fields(res)
+    st.table([{"Result": FP_LABELS.get(box, box), "As read": shown[box] or "not read"} for box in shown if box != "Body Weight"])
+    problems = [c.name for c in res.checks if not c.ok and c.severity == "error"]
+    if problems:
+        st.warning("Check these against the report before adding it (results that failed their check are left out): " + "; ".join(problems))
+    if not numbers:
+        st.warning("No results could be read from this report, so there is nothing to add.")
+        return
+    set_retest = st.checkbox("Remind the patient about a re-test (only if you've agreed one with them)", value=True, key=f"fp_rt::{record_id}")
+    retest_on = st.date_input("Re-test due on", value=test_date + datetime.timedelta(weeks=FP_RETEST_WEEKS), format="DD/MM/YYYY",
+                              key=f"fp_rtd::{record_id}", disabled=not set_retest)
+    checked = st.checkbox("I've checked these numbers against the report", key=f"fp_ok::{record_id}")
+    if not st.button("📈 Add to the patient's progress charts", type="primary", disabled=not checked, key=f"fp_save::{record_id}"):
+        return
+    try:
+        profile_ref = db.collection(REPORTS).document(record_id)
+        profile_ref.collection(FORCE_PLATE).document(f"{test_date.isoformat()}_{code}").set({
+            "test_code": code, "test_date": test_date.isoformat(), "results": numbers,
+            "saved_by": st.session_state.get("clinician_email") or "clinician", "saved_at": firestore.SERVER_TIMESTAMP})
+        profile_fields = {"updated_at": firestore.SERVER_TIMESTAMP}
+        if set_retest and retest_on:
+            profile_fields["retest_due"] = retest_on.isoformat()
+        profile_ref.update(profile_fields)
+        audit("force_plate_saved", record_id, test=code)
+        notify_results_ready(record_id)
+        st.success(f"Added to {name.strip()}'s progress charts." + (f" Re-test reminder set for {friendly_date(retest_on.isoformat())}." if set_retest and retest_on else ""))
+    except Exception:
+        fail("Saving failed. Please try again.", "Saving a force plate test failed")
+
+
+def render_force_plate_progress(key: str):
+    """The patient's force plate results over time: one small chart per result, grouped by test."""
+    try:
+        tests = sorted((d.to_dict() or {} for d in db.collection(REPORTS).document(key).collection(FORCE_PLATE).stream()),
+                       key=lambda t: t.get("test_date") or "")
+    except Exception:
+        fail("We couldn't load your force plate results right now. Please try again shortly.", "Loading force plate results failed")
+        return
+    if not tests:
+        return
+    import pandas as pd
+    st.subheader("📈 Your force plate progress")
+    st.caption("Each test on our force plates adds a point, so you can see how you change over time. They are a measure of your progress, "
+               "not a diagnosis: your clinician will talk you through what they mean for you. For left–right differences, lower means more even.")
+    for code in [c for c in FP_TEST_NAMES if any(t.get("test_code") == c for t in tests)]:
+        mine = [t for t in tests if t.get("test_code") == code]
+        st.markdown(f"**{FP_TEST_NAMES[code]}** · {len(mine)} test{'s' if len(mine) != 1 else ''}")
+        boxes = [b for b, _, _ in vald_hub.FIELD_MAP.get(code, []) if b != "Body Weight" and any(b in (t.get("results") or {}) for t in mine)]
+        cols = st.columns(2)
+        for i, box in enumerate(boxes):
+            points = [(t["test_date"], t["results"][box]) for t in mine if box in (t.get("results") or {})]
+            first = points[0][1]
+            unit = _fp_unit(first.get("unit"), first.get("asymmetry"))
+            label = FP_LABELS.get(box, box) + (f" ({unit})" if unit else "")
+            values = [abs(p["value"]) if p.get("asymmetry") else p["value"] for _, p in points]
+            with cols[i % 2]:
+                if len(values) == 1:
+                    st.metric(label, f"{values[0]:g}" + ("" if not unit else unit if unit == "%" else f" {unit}"))
+                else:
+                    st.caption(label)
+                    st.line_chart(pd.DataFrame({label: values}, index=pd.to_datetime([d for d, _ in points])), height=160)
+                    st.caption(f"First test {values[0]:g}, latest {values[-1]:g}.")
 
 
 def render_longevity_invite():
@@ -3093,6 +3298,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     with st.expander("🧑‍⚕️ Patient portal for any patient: add or update contact details and exercises"):
         render_portal_record_editor()
+    with st.expander("📈 Force plate test for a treatment patient: add it to their progress charts"):
+        render_force_plate_upload()
 
     st.subheader("📋 Participant Metadata & Sign-in Email")
     col1, col2 = st.columns(2)
@@ -3846,6 +4053,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                         raise
                     clear_participant_caches()
                     remember_participant(who_key, target_id)
+                    notify_results_ready(target_id)
                     kept = {f["object"] for f in uploaded}
                     replaced = 0
                     for f in old_files:                          # publishing again for the same date replaces the earlier files
@@ -4016,8 +4224,11 @@ elif app_mode == "Secure Patient Mobile Portal":
         elif not scan_ids:
             # A patient seen for osteopathy or physio, who hasn't had a Longevity assessment yet.
             st.success(f"Welcome, {client_data.get('name', '')}!")
-            render_portal_exercises(client_data)
+            render_portal_exercises(lookup_key, client_data)
+            render_portal_retest(client_data)
+            render_force_plate_progress(lookup_key)
             render_longevity_invite()
+            render_message_settings(lookup_key, client_data)
         else:
             display_name = client_data.get("name", "")
             selected_scan_date = st.selectbox("Select Assessment Date", scan_ids, key="portal_scan_date")
@@ -4057,13 +4268,16 @@ elif app_mode == "Secure Patient Mobile Portal":
                 use_container_width=True,
             )
 
-            render_portal_exercises(client_data)
+            render_portal_exercises(lookup_key, client_data)
+            render_portal_retest(client_data)
+            render_force_plate_progress(lookup_key)
             render_portal_plans(lookup_key, client_data)
 
             st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
             components.html(html_output, height=800, scrolling=True)
 
             render_portal_files(lookup_key, selected_scan_date, scan_data)
+            render_message_settings(lookup_key, client_data)
 
 
 # --- Footer on the patient site: privacy notice link ---

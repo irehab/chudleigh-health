@@ -22,6 +22,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or 587)
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", "").strip() or formataddr(("Chudleigh Health Hub", "portal@chudleighhealth.com"))
+REPLY_TO = os.environ.get("MAIL_REPLY_TO", "info@chudleighhealth.com").strip()   # replies go to the clinic's own inbox (portal@ has none)
 EMAIL_OUTBOX_DIR = os.environ.get("EMAIL_OUTBOX_DIR", "").strip()
 SIGNATURE = "Chudleigh Health Hub · 90 Fore Street, Chudleigh, Devon TQ13 0HT · 07902 065739"
 
@@ -36,6 +37,8 @@ def build(to: str, subject: str, lines: list, button_text: str = "", button_url:
     Plain text only (html=False) gives the email service no tracking image and no links to rewrite: used for sign-in codes."""
     msg = EmailMessage()
     msg["From"], msg["To"], msg["Subject"] = MAIL_FROM, to, subject
+    if REPLY_TO:
+        msg["Reply-To"] = REPLY_TO
     msg["Message-ID"] = make_msgid(domain="chudleighhealth.com")
     text = "\n\n".join(lines + ([f"{button_text}:\n{button_url}"] if button_url else []) + ([footer] if footer else []) + [SIGNATURE])
     msg.set_content(text)
