@@ -3,6 +3,7 @@
 Run as a Cloud Run job, started by Cloud Scheduler:
     python reminders.py                  emails (9am)
     python reminders.py --channel sms    texts (6pm, when people are home and more likely to do their exercises)
+    add --dry-run to log how many would be sent, without sending anything or recording it
 The app itself sends "new results are ready" when a clinician publishes (build_email / build_sms with "results").
 
 Only care messages, only to patients whose record says they agreed to them (care_messages_ok), and never any health details:
@@ -147,6 +148,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = list(sys.argv[1:] if argv is None else argv)
     channel = args[args.index("--channel") + 1] if "--channel" in args else "email"
+    dry_run = "--dry-run" in args
     if channel not in CHANNELS:
         log.error("Unknown channel %r", channel)
         return 2
@@ -156,6 +158,12 @@ def main(argv=None) -> int:
     from google.cloud import firestore
     db = firestore.Client(database=os.environ.get("FIRESTORE_DATABASE", "default"))
     today = datetime.datetime.now(datetime.timezone.utc).date()   # it runs during the UK day, when the UK and UTC dates are the same
+    if dry_run:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        n = sum(len(due(s.to_dict() or {}, today, channel))
+                for s in db.collection(REPORTS).where(filter=FieldFilter("care_messages_ok", "==", True)).stream())
+        log.info("Dry run: %d reminder(s) would be sent by %s today; nothing was sent", n, channel)
+        return 0
     log.info("Reminders sent by %s: %d", channel, run(db, today, channel))
     return 0
 

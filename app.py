@@ -1927,7 +1927,7 @@ def render_portal_record_editor():
                                placeholder="e.g. Three times a week. Stop and let us know if the pain goes above 5 out of 10.")
         r0, r1, r2, r3 = st.columns(4)
         with r0:
-            ways = list(reminders.CHANNEL_CHOICES)
+            ways = channel_options()
             current_ways = reminders.channels(current)
             channels_in = st.selectbox("Reminders by", ways, index=ways.index(current_ways) if current_ways in ways else 0,
                                        format_func=reminders.CHANNEL_CHOICES.get, help="Texts need a mobile number. The patient can change this in their portal.")
@@ -1994,6 +1994,11 @@ def _as_date(value):
         return datetime.date.fromisoformat(str(value)[:10]) if value else None
     except ValueError:
         return None
+
+
+def channel_options() -> list:
+    """The ways reminders can be sent right now: email, and text only once a text service is set up (BREVO_API_KEY)."""
+    return list(reminders.CHANNEL_CHOICES) if sms.sms_on() else [("email",)]
 
 
 def _send_reminder_quietly(kind: str, profile: dict, channel: str):
@@ -2067,11 +2072,14 @@ def render_message_settings(key: str, client_data: dict):
     with st.expander("✉️ Message settings"):
         with st.form("portal_message_settings"):
             care = st.checkbox(PATIENT_CARE_LABEL, value=bool(client_data.get("care_messages_ok")))
-            ways = list(reminders.CHANNEL_CHOICES)
+            ways = channel_options()
             current_ways = reminders.channels(client_data)
-            how = st.radio("How should we send them?", ways, index=ways.index(current_ways) if current_ways in ways else 0,
-                           format_func=reminders.CHANNEL_CHOICES.get, horizontal=True)
-            mobile_in = st.text_input("Your mobile number (for texts)", value=client_data.get("mobile") or "", max_chars=20, placeholder="07…")
+            if len(ways) > 1:
+                how = st.radio("How should we send them?", ways, index=ways.index(current_ways) if current_ways in ways else 0,
+                               format_func=reminders.CHANNEL_CHOICES.get, horizontal=True)
+                mobile_in = st.text_input("Your mobile number (for texts)", value=client_data.get("mobile") or "", max_chars=20, placeholder="07…")
+            else:
+                how, mobile_in = ways[0], client_data.get("mobile") or ""
             marketing = st.checkbox(PATIENT_MARKETING_LABEL, value=bool(client_data.get("marketing_ok")))
             saved = st.form_submit_button("Save my settings")
         st.caption("Our emails and texts never include your health details. You can change this at any time.")
