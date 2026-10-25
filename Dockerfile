@@ -24,7 +24,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Copy only the application code (not .env files, keys, PDFs, tests, etc.). Owned by root, so read-only for appuser.
-COPY app.py helpers.py mailer.py reminders.py sms.py ./
+COPY app.py serve.py helpers.py mailer.py reminders.py sms.py ./
 COPY pdf_reader ./pdf_reader
 COPY norms ./norms
 
@@ -32,8 +32,9 @@ USER appuser
 
 EXPOSE 8080
 
+# serve.py runs app.py with one extra header that keeps the portal out of search engines.
 # Theme: the Health Autonomy at Chudleigh Health Hub colours (teal buttons and links, soft off-white backgrounds, charcoal text)
-CMD ["streamlit", "run", "app.py", \
+CMD ["streamlit", "run", "serve.py", \
      "--server.port=8080", \
      "--server.address=0.0.0.0", \
      "--server.headless=true", \
