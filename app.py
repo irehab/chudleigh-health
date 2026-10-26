@@ -21,6 +21,10 @@ try:  # the app's own PDF reader (no AI). If it is not installed on the server, 
     PDF_READER_AVAILABLE = True
 except Exception:  # pragma: no cover
     read_report_pdf, reader_for, vald_hub, vald_profile, PDF_READER_AVAILABLE = None, None, None, None, False
+try:  # VALD Hub's Test Metrics CSV exports (plain Python, no PDF software needed)
+    from pdf_reader import vald_csv
+except Exception:  # pragma: no cover
+    vald_csv = None
 
 try:  # published reference data and the comparisons made from it (no AI)
     import norms
@@ -2118,9 +2122,14 @@ def render_message_settings(key: str, client_data: dict):
             fail("We couldn't save your settings right now. Please try again shortly.", "Saving message settings failed")
 
 
-# --- Force plate tests for patients seen for treatment: read from the VALD Hub PDF, shown to the patient as progress charts ---
-FP_TEST_NAMES = {"CMJ": "Jump (countermovement jump)", "SQT": "Squat", "STSTS": "Sit to stand", "SLSB": "Single-leg balance", "QSB": "Standing balance",
-                 "DJ": "Drop jump"}
+# --- Force plate tests: imported from VALD Hub's Test Metrics CSV export (or, the older route, a VALD PDF), shown to the patient ---
+FP_TEST_NAMES = {"QSB": "Standing balance", "SLSB": "Single-leg balance", "SQT": "Squat", "STSTS": "Sit to stand", "PUSHUPT": "Push-up",
+                 "CMJ": "Jump (countermovement jump)", "DJ": "Drop jump"}
+FP_LONGEVITY_TESTS = ["QSB", "SLSB", "SQT", "STSTS", "PUSHUPT"]       # the cards every Longevity client sees; the jump is added once done
+FP_WHAT = {"QSB": "How steady you stand on both feet.", "SLSB": "How steady you are on each leg.",
+           "SQT": "How evenly your legs share the work in a squat.", "STSTS": "How quickly and evenly you stand up from a chair.",
+           "PUSHUPT": "How evenly your arms share the work in a push-up.", "CMJ": "How high and how springily you jump.",
+           "DJ": "How you absorb a landing and spring back."}
 FP_LABELS = {"Jump Height": "Jump height", "Peak Power/Mass": "Power for your body weight", "Modified RSI": "Springiness (RSI modified)",
              "Flight Time:Contraction Time": "Time in the air for the push", "Peak Force Asymmetry": "Left–right difference pushing off",
              "Braking Impulse Asymmetry": "Left–right difference dipping down", "Peak Force": "Peak force", "L/R Asymmetry": "Left–right difference",
@@ -2129,19 +2138,122 @@ FP_LABELS = {"Jump Height": "Jump height", "Peak Power/Mass": "Power for your bo
              "Max Peak Power / BM": "Power for your body weight", "Left Total Excursion": "Sway on the left leg",
              "Right Total Excursion": "Sway on the right leg", "Total Path Length": "Sway standing on both legs"}
 FP_RETEST_WEEKS = 6
+# PROPOSED traffic lights for left-right differences (%), for John to approve. Until "approved" is True, only clinicians see them.
+FP_ASYM_LIGHTS = {"green_below": 10.0, "amber_below": 15.0, "approved": False}
 
 
 def _fp_unit(unit: str, asymmetry: bool) -> str:
     return "%" if asymmetry else {"% L,R": "%"}.get(unit or "", unit or "")
 
 
+def _fp_label(box: str, result: dict) -> str:
+    return FP_LABELS.get(box) or result.get("label") or box
+
+
+def _fp_show(result: dict) -> str:
+    if result.get("asymmetry"):
+        v = result["value"]
+        return "0%" if v == 0 else f"{abs(v):g}% {'L' if v < 0 else 'R'}"
+    unit = _fp_unit(result.get("unit"), False)
+    return f"{result['value']:g}" + ("" if not unit else unit if unit == "%" else f" {unit}")
+
+
+def _fp_light(result: dict):
+    """The proposed traffic light for a left-right difference: 'green' | 'amber' | 'red', or None for other results."""
+    if not result.get("asymmetry"):
+        return None
+    v = abs(result["value"])
+    return "green" if v < FP_ASYM_LIGHTS["green_below"] else "amber" if v < FP_ASYM_LIGHTS["amber_below"] else "red"
+
+
+FP_DOTS = {"green": "🟢", "amber": "🟠", "red": "🔴", None: ""}
+
+
+def _fp_entries_from_csv(files, chosen_name: str):
+    """Read the uploaded VALD Test Metrics exports. Returns the tests to save, or None after showing why nothing can be saved."""
+    entries, shown_any = {}, False
+    for f in files:
+        res = vald_csv.read_csv(f.getvalue())
+        if res.problems and not res.tests:
+            st.error(f"{f.name}: " + " ".join(res.problems))
+            continue
+        shown_any = True
+        names = sorted({t.name for t in res.tests if t.name})
+        if names and all(patient_key(n) != patient_key(chosen_name) for n in names):
+            st.warning(f"{f.name} is for **{', '.join(names)}**, but you chose **{chosen_name.strip()}**. Check it's the right patient before adding.")
+        for code in res.codes:
+            rows = [t for t in res.tests if t.code == code]
+            latest = max(rows, key=lambda t: (t.date, t.time))
+            st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** ({f.name}): {len(rows)} test{'s' if len(rows) != 1 else ''}, "
+                        f"{', '.join(friendly_date(t.date) + (' ' + t.time if t.time else '') for t in sorted(rows, key=lambda t: (t.date, t.time), reverse=True))}")
+            st.table([{"Result (latest test)": m["label"], "Value": vald_csv.display(m),
+                       "Proposed light": FP_DOTS[_fp_light(m)] + (" (not approved yet)" if _fp_light(m) else "")}
+                      for k, m in latest.metrics.items()])
+            if res.missing.get(code):
+                st.caption("Not in this export (add the column in VALD Hub if you want it): " + ", ".join(res.missing[code]))
+            for t in rows:
+                for n in t.notes:
+                    st.caption(f"{friendly_date(t.date)}: {n}")
+            for t in rows:
+                entries[t.doc_id] = {"test_code": t.code, "test_date": t.date, "test_time": t.time, "body_weight": t.body_weight,
+                                     "results": {k: {kk: m[kk] for kk in ("value", "unit", "asymmetry", "label")} for k, m in t.metrics.items()},
+                                     "source": "vald_csv"}
+        if res.unknown_columns:
+            st.caption(f"{f.name}: ignored columns the app doesn't use: " + ", ".join(res.unknown_columns))
+        for p in res.problems:
+            st.caption(f"{f.name}: {p}")
+    if shown_any and not entries:
+        st.warning("No test results were found in these files.")
+    return entries or None
+
+
+def _fp_entries_from_pdf(up, record_id: str):
+    """The older route: one VALD PDF (a test report or the one-page profile summary). Returns the tests to save, or None."""
+    data = up.getvalue()
+    if len(data) > MAX_PDF_BYTES:
+        st.warning("That file is too large.")
+        return None
+    res = read_report_pdf(data)
+    if res.device == vald_profile.DEVICE and getattr(res, "tiles", None):
+        # VALD's one-page summary: several tests, and only the date the report was made, so the clinician confirms the test date
+        tests = {t["code"]: {box: n for box, n in vald_profile.field_numbers_for(t).items()} for t in res.tiles}
+        tests = {code: nums for code, nums in tests.items() if nums}
+        st.markdown(f"**VALD profile summary**, report made {res.report_date or 'on an unknown date'}")
+        st.table([{"Test": FP_TEST_NAMES.get(code, code), "Result": _fp_label(box, n), "As read": _fp_show(n)}
+                  for code, nums in tests.items() for box, n in nums.items()])
+        st.caption("The summary shows one headline result per test. Sit-to-stand shows its slowest time, not the average, so it is not charted.")
+        try:
+            made = datetime.datetime.strptime(res.report_date, "%d %b %Y").date()
+        except (TypeError, ValueError):
+            made = datetime.date.today()
+        test_date = st.date_input("Date of the test (the summary shows only the date the report was made)", value=made, format="DD/MM/YYYY",
+                                  key=f"fp_date::{record_id}")
+    else:
+        code = getattr(res, "test_code", "")
+        sessions = getattr(res, "sessions", [])
+        if res.device != vald_hub.DEVICE or code not in vald_hub.TESTS or not sessions:
+            st.error("This doesn't look like a VALD Hub report the app can read (a ForceDecks test report, or the one-page profile summary).")
+            return None
+        test_date = max(s["date"] for s in sessions)
+        tests = {code: {box: n for box, n in vald_hub.field_numbers(res).items() if n and box != "Body Weight"}}
+        st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** on {friendly_date(test_date.isoformat())}")
+        shown = vald_hub.app_fields(res)
+        st.table([{"Result": FP_LABELS.get(box, box), "As read": shown[box] or "not read"} for box in shown if box != "Body Weight"])
+    problems = [c.name for c in res.checks if not c.ok and c.severity == "error"]
+    if problems:
+        st.warning("Check these against the report before adding it (results that failed their check are left out): " + "; ".join(problems))
+    entries = {f"{test_date.isoformat()}_{code}": {"test_code": code, "test_date": test_date.isoformat(), "test_time": "", "results": nums,
+                                                   "source": res.device} for code, nums in tests.items() if nums}
+    if not entries:
+        st.warning("No results could be read from this report, so there is nothing to add.")
+    return entries or None
+
+
 def render_force_plate_upload():
-    """Clinician screen: add a VALD Hub ForceDecks test to a patient's progress charts, and set their re-test reminder."""
-    st.caption("For patients seen for treatment (Longevity tests still go in a Longevity report below). The PDF is read in the app, "
-               "never by an AI, and only the numbers are kept. The patient needs a portal record first.")
-    if not (PDF_READER_AVAILABLE and vald_hub):
-        st.info("The PDF reader isn't available on this server.")
-        return
+    """Clinician screen: add VALD ForceDecks tests to a patient's record (charts and cards), and set their re-test reminder."""
+    st.caption("Export from VALD Hub: Profiles → the patient → Result Table → ForceDecks → choose the test type → tick the tests → "
+               "Export → Test Metrics. You can add several files at once. Only the numbers are kept, never sent to an AI. "
+               "The patient needs a portal record first.")
     name = st.text_input("Patient full name", key="fp_name", max_chars=120)
     key = patient_key(name)
     if not key or not db:
@@ -2156,106 +2268,113 @@ def render_force_plate_upload():
     if not record_id:
         st.warning("There's no portal record with that name. Add the patient under \"Patient portal for any patient\" first.")
         return
-    up = st.file_uploader("VALD Hub ForceDecks report (PDF)", type=["pdf"], key=f"fp_pdf::{record_id}")
-    if not up:
-        return
-    data = up.getvalue()
-    if len(data) > MAX_PDF_BYTES:
-        st.warning("That file is too large.")
-        return
-    res = read_report_pdf(data)
-    if res.device == vald_profile.DEVICE and getattr(res, "tiles", None):
-        # VALD's one-page summary: several tests, and only the date the report was made, so the clinician confirms the test date
-        tests = {t["code"]: {box: n for box, n in vald_profile.field_numbers_for(t).items()} for t in res.tiles}
-        tests = {code: nums for code, nums in tests.items() if nums}
-        st.markdown(f"**VALD profile summary**, report made {res.report_date or 'on an unknown date'}")
-        st.table([{"Test": FP_TEST_NAMES.get(code, code), "Result": FP_LABELS.get(box, box),
-                   "As read": (f"{abs(n['value']) if n['asymmetry'] else n['value']:g}"
-                               + ("%" if _fp_unit(n["unit"], n["asymmetry"]) == "%" else f" {_fp_unit(n['unit'], n['asymmetry'])}")).strip()
-                   + (f" {'L' if n['value'] < 0 else 'R'}" if n["asymmetry"] and n["value"] else "")}
-                  for code, nums in tests.items() for box, n in nums.items()])
-        st.caption("The summary shows one headline result per test. Sit-to-stand shows its slowest time, not the average, so it is not charted.")
-        try:
-            made = datetime.datetime.strptime(res.report_date, "%d %b %Y").date()
-        except (TypeError, ValueError):
-            made = datetime.date.today()
-        test_date = st.date_input("Date of the test (the summary shows only the date the report was made)", value=made, format="DD/MM/YYYY",
-                                  key=f"fp_date::{record_id}")
+    csv_files = st.file_uploader("VALD Hub Test Metrics export (CSV)", type=["csv"], accept_multiple_files=True, key=f"fp_csv::{record_id}")
+    up = None
+    if PDF_READER_AVAILABLE and vald_hub:
+        with st.expander("Older route: a VALD PDF report instead"):
+            up = st.file_uploader("VALD Hub ForceDecks report (PDF)", type=["pdf"], key=f"fp_pdf::{record_id}")
+    if csv_files:
+        entries = _fp_entries_from_csv(csv_files, name)
+    elif up:
+        entries = _fp_entries_from_pdf(up, record_id)
     else:
-        code = getattr(res, "test_code", "")
-        sessions = getattr(res, "sessions", [])
-        if res.device != vald_hub.DEVICE or code not in vald_hub.TESTS or not sessions:
-            st.error("This doesn't look like a VALD Hub report the app can read (a ForceDecks test report, or the one-page profile summary).")
-            return
-        test_date = max(s["date"] for s in sessions)
-        tests = {code: {box: n for box, n in vald_hub.field_numbers(res).items() if n and box != "Body Weight"}}
-        st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** on {friendly_date(test_date.isoformat())}")
-        shown = vald_hub.app_fields(res)
-        st.table([{"Result": FP_LABELS.get(box, box), "As read": shown[box] or "not read"} for box in shown if box != "Body Weight"])
-    numbers = {box: n for nums in tests.values() for box, n in nums.items()}
-    problems = [c.name for c in res.checks if not c.ok and c.severity == "error"]
-    if problems:
-        st.warning("Check these against the report before adding it (results that failed their check are left out): " + "; ".join(problems))
-    if not numbers:
-        st.warning("No results could be read from this report, so there is nothing to add.")
         return
+    if not entries:
+        return
+    latest = max(datetime.date.fromisoformat(e["test_date"]) for e in entries.values())
     set_retest = st.checkbox("Remind the patient about a re-test (only if you've agreed one with them)", value=True, key=f"fp_rt::{record_id}")
-    retest_on = st.date_input("Re-test due on", value=test_date + datetime.timedelta(weeks=FP_RETEST_WEEKS), format="DD/MM/YYYY",
+    retest_on = st.date_input("Re-test due on", value=latest + datetime.timedelta(weeks=FP_RETEST_WEEKS), format="DD/MM/YYYY",
                               key=f"fp_rtd::{record_id}", disabled=not set_retest)
-    checked = st.checkbox("I've checked these numbers against the report", key=f"fp_ok::{record_id}")
-    if not st.button("📈 Add to the patient's progress charts", type="primary", disabled=not checked, key=f"fp_save::{record_id}"):
+    checked = st.checkbox("I've checked these numbers and this is the right patient", key=f"fp_ok::{record_id}")
+    if not st.button(f"📈 Add {len(entries)} test{'s' if len(entries) != 1 else ''} to the patient's record", type="primary", disabled=not checked,
+                     key=f"fp_save::{record_id}"):
         return
     try:
         profile_ref = db.collection(REPORTS).document(record_id)
-        for code, nums in tests.items():
-            profile_ref.collection(FORCE_PLATE).document(f"{test_date.isoformat()}_{code}").set({
-                "test_code": code, "test_date": test_date.isoformat(), "results": nums, "source": res.device,
-                "saved_by": st.session_state.get("clinician_email") or "clinician", "saved_at": firestore.SERVER_TIMESTAMP})
+        who = st.session_state.get("clinician_email") or "clinician"
+        for doc_id, e in entries.items():          # the same test imported again replaces itself (same date, time and test)
+            profile_ref.collection(FORCE_PLATE).document(doc_id).set({**e, "saved_by": who, "saved_at": firestore.SERVER_TIMESTAMP})
         profile_fields = {"updated_at": firestore.SERVER_TIMESTAMP}
         if set_retest and retest_on:
             profile_fields["retest_due"] = retest_on.isoformat()
         profile_ref.update(profile_fields)
-        audit("force_plate_saved", record_id, tests=sorted(tests))
+        audit("force_plate_saved", record_id, tests=sorted({e["test_code"] for e in entries.values()}), count=len(entries))
         notify_results_ready(record_id)
-        st.success(f"Added {len(tests)} test{'s' if len(tests) != 1 else ''} to {name.strip()}'s progress charts." + (f" Re-test reminder set for {friendly_date(retest_on.isoformat())}." if set_retest and retest_on else ""))
+        st.success(f"Added {len(entries)} test{'s' if len(entries) != 1 else ''} to {name.strip()}'s record." +
+                   (f" Re-test reminder set for {friendly_date(retest_on.isoformat())}." if set_retest and retest_on else ""))
     except Exception:
         fail("Saving failed. Please try again.", "Saving a force plate test failed")
 
 
-def render_force_plate_progress(key: str):
-    """The patient's force plate results over time: one small chart per result, grouped by test."""
+def _fp_headline(test: dict) -> list:
+    """The results a person sees first for one test: [(label, result)], at most 4."""
+    results = test.get("results") or {}
+    keys = [k for k in vald_csv.HEADLINES.get(test.get("test_code"), []) if k in results] if vald_csv else []
+    keys = keys or list(results)[:3]
+    return [(_fp_label(k, results[k]), results[k]) for k in keys[:4]]
+
+
+def _fp_sort(t: dict):
+    return (t.get("test_date") or "", t.get("test_time") or "")
+
+
+def render_force_plate_progress(key: str, client_data: dict | None = None):
+    """The patient's force plate results: a card per test with the latest headline results (or 'Not tested yet' for the Longevity
+    tests), then one small chart per headline result over time."""
     try:
-        tests = sorted((d.to_dict() or {} for d in db.collection(REPORTS).document(key).collection(FORCE_PLATE).stream()),
-                       key=lambda t: t.get("test_date") or "")
+        tests = sorted((d.to_dict() or {} for d in db.collection(REPORTS).document(key).collection(FORCE_PLATE).stream()), key=_fp_sort)
     except Exception:
         fail("We couldn't load your force plate results right now. Please try again shortly.", "Loading force plate results failed")
         return
-    if not tests:
+    longevity = "Longevity" in ((client_data or {}).get("services") or [])
+    if not tests and not longevity:
         return
     import pandas as pd
-    st.subheader("📈 Your force plate progress")
-    st.caption("Each test on our force plates adds a point, so you can see how you change over time. They are a measure of your progress, "
-               "not a diagnosis: your clinician will talk you through what they mean for you. For left–right differences, lower means more even.")
-    for code in [c for c in FP_TEST_NAMES if any(t.get("test_code") == c for t in tests)]:
+    st.subheader("📈 Your force plate results")
+    st.caption("Measured on our force plates. A health and fitness baseline, not a medical diagnosis: your clinician will talk you through "
+               "what they mean for you. For left–right differences, lower means more even.")
+    done = [c for c in FP_TEST_NAMES if any(t.get("test_code") == c for t in tests)]
+    cards = list(dict.fromkeys((FP_LONGEVITY_TESTS if longevity else []) + done))
+    cols = st.columns(3)
+    for i, code in enumerate(cards):
         mine = [t for t in tests if t.get("test_code") == code]
-        st.markdown(f"**{FP_TEST_NAMES[code]}** · {len(mine)} test{'s' if len(mine) != 1 else ''}")
-        order = [b for b, _, _ in vald_hub.FIELD_MAP.get(code, [])] + ["VALD Percentile"]
-        found = list(dict.fromkeys(b for t in mine for b in (t.get("results") or {})))
-        boxes = [b for b in order if b in found and b != "Body Weight"] + [b for b in found if b not in order]
-        cols = st.columns(2)
-        for i, box in enumerate(boxes):
-            points = [(t["test_date"], t["results"][box]) for t in mine if box in (t.get("results") or {})]
+        with cols[i % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{FP_TEST_NAMES.get(code, code)}**")
+                st.caption(FP_WHAT.get(code, ""))
+                if not mine:
+                    st.markdown("### – –")
+                    st.caption("Not tested yet")
+                    continue
+                latest = mine[-1]
+                for label, r in _fp_headline(latest):
+                    light = FP_DOTS[_fp_light(r)] + " " if FP_ASYM_LIGHTS["approved"] and _fp_light(r) else ""
+                    st.markdown(f"{light}{label}: **{_fp_show(r)}**")
+                st.caption(f"Tested {friendly_date(latest['test_date'])}")
+    for code in done:
+        mine = [t for t in tests if t.get("test_code") == code]
+        if len(mine) < 2:
+            continue
+        st.markdown(f"**{FP_TEST_NAMES[code]}** over time · {len(mine)} tests")
+        keys = list(dict.fromkeys(k for t in mine for k in (t.get("results") or {})))
+        wanted = [k for k in vald_csv.HEADLINES.get(code, []) if k in keys] if vald_csv else []
+        if not wanted:
+            order = [b for b, _, _ in vald_hub.FIELD_MAP.get(code, [])] + ["VALD Percentile"] if vald_hub else []
+            wanted = [b for b in order if b in keys and b != "Body Weight"] + [b for b in keys if b not in order]
+        ccols = st.columns(2)
+        for i, box in enumerate(wanted):
+            points = [(t["test_date"] + " " + (t.get("test_time") or "12:00"), t["results"][box]) for t in mine if box in (t.get("results") or {})]
+            if len(points) < 2:
+                continue
             first = points[0][1]
             unit = _fp_unit(first.get("unit"), first.get("asymmetry"))
-            label = FP_LABELS.get(box, box) + (f" ({unit})" if unit else "")
+            label = _fp_label(box, first) + (f" ({unit})" if unit else "")
             values = [abs(p["value"]) if p.get("asymmetry") else p["value"] for _, p in points]
-            with cols[i % 2]:
-                if len(values) == 1:
-                    st.metric(label, f"{values[0]:g}" + ("" if not unit else unit if unit == "%" else f" {unit}"))
-                else:
-                    st.caption(label)
-                    st.line_chart(pd.DataFrame({label: values}, index=pd.to_datetime([d for d, _ in points])), height=160)
-                    st.caption(f"First test {values[0]:g}, latest {values[-1]:g}.")
+            with ccols[i % 2]:
+                st.caption(label)
+                # a fixed column name: the chart library reads some characters in a name (such as ':') as instructions
+                st.line_chart(pd.DataFrame({"Result": values}, index=pd.to_datetime([d for d, _ in points])), height=160)
+                st.caption(f"First test {values[0]:g}, latest {values[-1]:g}.")
 
 
 def render_longevity_invite():
@@ -3372,7 +3491,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     with st.expander("🧑‍⚕️ Patient portal for any patient: add or update contact details and exercises"):
         render_portal_record_editor()
-    with st.expander("📈 Force plate test for a treatment patient: add it to their progress charts"):
+    with st.expander("📈 Force plate tests (VALD export): add them to a patient's record"):
         render_force_plate_upload()
 
     st.subheader("📋 Participant Metadata & Sign-in Email")
@@ -4300,7 +4419,7 @@ elif app_mode == "Secure Patient Mobile Portal":
             st.success(f"Welcome, {client_data.get('name', '')}!")
             render_portal_exercises(lookup_key, client_data)
             render_portal_retest(client_data)
-            render_force_plate_progress(lookup_key)
+            render_force_plate_progress(lookup_key, client_data)
             render_longevity_invite()
             render_message_settings(lookup_key, client_data)
         else:
@@ -4344,7 +4463,7 @@ elif app_mode == "Secure Patient Mobile Portal":
 
             render_portal_exercises(lookup_key, client_data)
             render_portal_retest(client_data)
-            render_force_plate_progress(lookup_key)
+            render_force_plate_progress(lookup_key, client_data)
             render_portal_plans(lookup_key, client_data)
 
             st.subheader(f"🔎 Clinical Healthspan Dashboard ({selected_scan_date})")
