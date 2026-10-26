@@ -2790,7 +2790,9 @@ ASSESSMENTS = {
     },
     "Autonomic / HRV (3-Min Rest, BP, Respiration)": {
         "columns": [
-            [("RMSSD (ms)", "52 ms", "RMSSD"), ("SDNN (ms)", "64 ms", "SDNN")],
+            # one HRV number: RMSSD, the usual short-recording measure (and what most wearables call "HRV"). SDNN is no longer asked for;
+            # values stored before stay in those records.
+            [("HRV (RMSSD, ms)", "52 ms", "Heart rate variability")],
             [("Respiration Rate (breaths/min)", "12 breaths/min", "Respiration Rate"), ("Blood Pressure (mmHg)", "118/76 mmHg", "Blood Pressure")],
         ],
     },
