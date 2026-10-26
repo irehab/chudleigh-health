@@ -11,10 +11,10 @@ read_image(). Add new ones to TEXT_READERS or IMAGE_READERS.
 """
 from __future__ import annotations
 
-from . import age_scanner, kardia_ecg, ocr, spirometry, tanita_mc780, vald_hub, vihealth_oxygen
+from . import age_scanner, kardia_ecg, ocr, spirometry, tanita_mc780, vald_hub, vald_profile, vihealth_oxygen
 from .base import MAX_PDF_BYTES, Check, ReadResult, Value, line_text, load_pages
 
-TEXT_READERS = [tanita_mc780, kardia_ecg, age_scanner, vald_hub, spirometry]
+TEXT_READERS = [tanita_mc780, kardia_ecg, age_scanner, vald_hub, vald_profile, spirometry]
 IMAGE_READERS = [vihealth_oxygen]
 ALL_READERS = TEXT_READERS + IMAGE_READERS
 __all__ = ["read_pdf", "ReadResult", "Value", "Check", "ALL_READERS", "reader_for"]

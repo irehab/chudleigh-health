@@ -17,10 +17,10 @@ from decimal import Decimal
 import nh3
 
 try:  # the app's own PDF reader (no AI). If it is not installed on the server, the AI reads PDFs as before.
-    from pdf_reader import read_pdf as read_report_pdf, reader_for, vald_hub
+    from pdf_reader import read_pdf as read_report_pdf, reader_for, vald_hub, vald_profile
     PDF_READER_AVAILABLE = True
 except Exception:  # pragma: no cover
-    read_report_pdf, reader_for, vald_hub, PDF_READER_AVAILABLE = None, None, None, False
+    read_report_pdf, reader_for, vald_hub, vald_profile, PDF_READER_AVAILABLE = None, None, None, None, False
 
 try:  # published reference data and the comparisons made from it (no AI)
     import norms
@@ -905,10 +905,17 @@ def try_pdf_reader(pdf_bytes: bytes, assessment_type: str):
     out = {"result": result, "found": None, "mismatch": False, "by": ""}
     if reader is None or result.status not in ("ok", "check"):
         return out
-    if (result.app_assessment or reader.APP_ASSESSMENT) != assessment_type:   # one reader can cover several tests (VALD Hub)
+    covers = getattr(result, "app_assessments", None)     # a VALD profile summary covers several tests
+    if covers is not None:
+        if assessment_type not in covers:
+            out["mismatch"] = True
+            return out
+        out["found"] = {k: v for k, v in reader.app_fields(result, assessment_type).items() if v}
+    elif (result.app_assessment or reader.APP_ASSESSMENT) != assessment_type:   # one reader can cover several tests (VALD Hub)
         out["mismatch"] = True
         return out
-    out["found"] = {k: v for k, v in reader.app_fields(result).items() if v}
+    else:
+        out["found"] = {k: v for k, v in reader.app_fields(result).items() if v}
     out["by"] = "PDF reader with text recognition (no AI)" if result.used_ocr else "PDF reader (no AI)"
     return out
 
@@ -920,9 +927,13 @@ def show_reader_result(result, assessment_type: str):
         why = {"unknown_device": "it is not a device the reader knows", "no_text": "it is a picture or scan the reader could not read", "error": "it could not be opened"}.get(result.status, "it was not recognised")
         st.caption(f"The app's own reader could not read this PDF ({why}), so the AI was used instead, or you can enter the values by hand.")
         return
-    belongs_to = result.app_assessment or reader.APP_ASSESSMENT
+    covers = getattr(result, "app_assessments", None)
+    belongs_to = (assessment_type if assessment_type in covers else ", ".join(covers)) if covers else (result.app_assessment or reader.APP_ASSESSMENT)
     if not belongs_to:
         st.warning(f"This PDF looks like a {result.device_label}, but the app has no form for that test yet. Enter the values by hand.")
+        return
+    if covers and belongs_to != assessment_type:
+        st.warning(f"This PDF is a {result.device_label} with these tests: {belongs_to}. Choose one of them above and upload it there.")
         return
     if belongs_to != assessment_type:
         st.warning(f"This PDF looks like a {result.device_label}, but \"{assessment_type}\" is selected. Choose \"{belongs_to}\" above and upload it there, so the right boxes are filled.")
@@ -2108,12 +2119,15 @@ def render_message_settings(key: str, client_data: dict):
 
 
 # --- Force plate tests for patients seen for treatment: read from the VALD Hub PDF, shown to the patient as progress charts ---
-FP_TEST_NAMES = {"CMJ": "Jump (countermovement jump)", "SQT": "Squat", "STSTS": "Sit to stand", "SLSB": "Single-leg balance", "QSB": "Standing balance"}
+FP_TEST_NAMES = {"CMJ": "Jump (countermovement jump)", "SQT": "Squat", "STSTS": "Sit to stand", "SLSB": "Single-leg balance", "QSB": "Standing balance",
+                 "DJ": "Drop jump"}
 FP_LABELS = {"Jump Height": "Jump height", "Peak Power/Mass": "Power for your body weight", "Modified RSI": "Springiness (RSI modified)",
              "Flight Time:Contraction Time": "Time in the air for the push", "Peak Force Asymmetry": "Left–right difference pushing off",
              "Braking Impulse Asymmetry": "Left–right difference dipping down", "Peak Force": "Peak force", "L/R Asymmetry": "Left–right difference",
              "Time to Stand": "Time to stand", "Peak Standing Force": "Standing force", "Limb Asymmetry": "Left–right difference",
-             "Peak Standing RFD": "How quickly you build force"}
+             "Peak Standing RFD": "How quickly you build force", "VALD Percentile": "Percentile against VALD's database",
+             "Max Peak Power / BM": "Power for your body weight", "Left Total Excursion": "Sway on the left leg",
+             "Right Total Excursion": "Sway on the right leg", "Total Path Length": "Sway standing on both legs"}
 FP_RETEST_WEEKS = 6
 
 
@@ -2150,16 +2164,35 @@ def render_force_plate_upload():
         st.warning("That file is too large.")
         return
     res = read_report_pdf(data)
-    code = getattr(res, "test_code", "")
-    sessions = getattr(res, "sessions", [])
-    if res.device != vald_hub.DEVICE or code not in vald_hub.TESTS or not sessions:
-        st.error("This doesn't look like a VALD Hub ForceDecks report the app can read (jump, squat, sit to stand or balance).")
-        return
-    test_date = max(s["date"] for s in sessions)
-    numbers = {box: n for box, n in vald_hub.field_numbers(res).items() if n and box != "Body Weight"}
-    st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** on {friendly_date(test_date.isoformat())}")
-    shown = vald_hub.app_fields(res)
-    st.table([{"Result": FP_LABELS.get(box, box), "As read": shown[box] or "not read"} for box in shown if box != "Body Weight"])
+    if res.device == vald_profile.DEVICE and getattr(res, "tiles", None):
+        # VALD's one-page summary: several tests, and only the date the report was made, so the clinician confirms the test date
+        tests = {t["code"]: {box: n for box, n in vald_profile.field_numbers_for(t).items()} for t in res.tiles}
+        tests = {code: nums for code, nums in tests.items() if nums}
+        st.markdown(f"**VALD profile summary**, report made {res.report_date or 'on an unknown date'}")
+        st.table([{"Test": FP_TEST_NAMES.get(code, code), "Result": FP_LABELS.get(box, box),
+                   "As read": (f"{abs(n['value']) if n['asymmetry'] else n['value']:g}"
+                               + ("%" if _fp_unit(n["unit"], n["asymmetry"]) == "%" else f" {_fp_unit(n['unit'], n['asymmetry'])}")).strip()
+                   + (f" {'L' if n['value'] < 0 else 'R'}" if n["asymmetry"] and n["value"] else "")}
+                  for code, nums in tests.items() for box, n in nums.items()])
+        st.caption("The summary shows one headline result per test. Sit-to-stand shows its slowest time, not the average, so it is not charted.")
+        try:
+            made = datetime.datetime.strptime(res.report_date, "%d %b %Y").date()
+        except (TypeError, ValueError):
+            made = datetime.date.today()
+        test_date = st.date_input("Date of the test (the summary shows only the date the report was made)", value=made, format="DD/MM/YYYY",
+                                  key=f"fp_date::{record_id}")
+    else:
+        code = getattr(res, "test_code", "")
+        sessions = getattr(res, "sessions", [])
+        if res.device != vald_hub.DEVICE or code not in vald_hub.TESTS or not sessions:
+            st.error("This doesn't look like a VALD Hub report the app can read (a ForceDecks test report, or the one-page profile summary).")
+            return
+        test_date = max(s["date"] for s in sessions)
+        tests = {code: {box: n for box, n in vald_hub.field_numbers(res).items() if n and box != "Body Weight"}}
+        st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** on {friendly_date(test_date.isoformat())}")
+        shown = vald_hub.app_fields(res)
+        st.table([{"Result": FP_LABELS.get(box, box), "As read": shown[box] or "not read"} for box in shown if box != "Body Weight"])
+    numbers = {box: n for nums in tests.values() for box, n in nums.items()}
     problems = [c.name for c in res.checks if not c.ok and c.severity == "error"]
     if problems:
         st.warning("Check these against the report before adding it (results that failed their check are left out): " + "; ".join(problems))
@@ -2174,16 +2207,17 @@ def render_force_plate_upload():
         return
     try:
         profile_ref = db.collection(REPORTS).document(record_id)
-        profile_ref.collection(FORCE_PLATE).document(f"{test_date.isoformat()}_{code}").set({
-            "test_code": code, "test_date": test_date.isoformat(), "results": numbers,
-            "saved_by": st.session_state.get("clinician_email") or "clinician", "saved_at": firestore.SERVER_TIMESTAMP})
+        for code, nums in tests.items():
+            profile_ref.collection(FORCE_PLATE).document(f"{test_date.isoformat()}_{code}").set({
+                "test_code": code, "test_date": test_date.isoformat(), "results": nums, "source": res.device,
+                "saved_by": st.session_state.get("clinician_email") or "clinician", "saved_at": firestore.SERVER_TIMESTAMP})
         profile_fields = {"updated_at": firestore.SERVER_TIMESTAMP}
         if set_retest and retest_on:
             profile_fields["retest_due"] = retest_on.isoformat()
         profile_ref.update(profile_fields)
-        audit("force_plate_saved", record_id, test=code)
+        audit("force_plate_saved", record_id, tests=sorted(tests))
         notify_results_ready(record_id)
-        st.success(f"Added to {name.strip()}'s progress charts." + (f" Re-test reminder set for {friendly_date(retest_on.isoformat())}." if set_retest and retest_on else ""))
+        st.success(f"Added {len(tests)} test{'s' if len(tests) != 1 else ''} to {name.strip()}'s progress charts." + (f" Re-test reminder set for {friendly_date(retest_on.isoformat())}." if set_retest and retest_on else ""))
     except Exception:
         fail("Saving failed. Please try again.", "Saving a force plate test failed")
 
@@ -2205,7 +2239,9 @@ def render_force_plate_progress(key: str):
     for code in [c for c in FP_TEST_NAMES if any(t.get("test_code") == c for t in tests)]:
         mine = [t for t in tests if t.get("test_code") == code]
         st.markdown(f"**{FP_TEST_NAMES[code]}** · {len(mine)} test{'s' if len(mine) != 1 else ''}")
-        boxes = [b for b, _, _ in vald_hub.FIELD_MAP.get(code, []) if b != "Body Weight" and any(b in (t.get("results") or {}) for t in mine)]
+        order = [b for b, _, _ in vald_hub.FIELD_MAP.get(code, [])] + ["VALD Percentile"]
+        found = list(dict.fromkeys(b for t in mine for b in (t.get("results") or {})))
+        boxes = [b for b in order if b in found and b != "Body Weight"] + [b for b in found if b not in order]
         cols = st.columns(2)
         for i, box in enumerate(boxes):
             points = [(t["test_date"], t["results"][box]) for t in mine if box in (t.get("results") or {})]
