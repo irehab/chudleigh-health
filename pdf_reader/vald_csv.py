@@ -215,6 +215,8 @@ def read_csv(data: bytes) -> CsvResult:
             v = _value(r[i] if i < len(r) else "", asym)
             if v is not None:
                 t.metrics[key] = {"value": v, "unit": unit, "asymmetry": asym, "label": label, "better": better}
+        if t.code == "CMJ" and t.metrics.get("cm_depth", {}).get("value") == 0:
+            t.notes.append("The dip depth reads 0, which usually means a failed or incomplete jump.")
         if t.doc_id in seen:
             continue                                    # the same test twice in one file
         seen.add(t.doc_id)

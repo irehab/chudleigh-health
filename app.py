@@ -2138,8 +2138,8 @@ FP_LABELS = {"Jump Height": "Jump height", "Peak Power/Mass": "Power for your bo
              "Max Peak Power / BM": "Power for your body weight", "Left Total Excursion": "Sway on the left leg",
              "Right Total Excursion": "Sway on the right leg", "Total Path Length": "Sway standing on both legs"}
 FP_RETEST_WEEKS = 6
-# PROPOSED traffic lights for left-right differences (%), for John to approve. Until "approved" is True, only clinicians see them.
-FP_ASYM_LIGHTS = {"green_below": 10.0, "amber_below": 15.0, "approved": False}
+# Traffic lights for left-right differences (%), approved by John on 26 Oct 2026. With "approved" False, only clinicians see them.
+FP_ASYM_LIGHTS = {"green_below": 10.0, "amber_below": 15.0, "approved": True}
 
 
 def _fp_unit(unit: str, asymmetry: bool) -> str:
@@ -2169,7 +2169,7 @@ def _fp_light(result: dict):
 FP_DOTS = {"green": "🟢", "amber": "🟠", "red": "🔴", None: ""}
 
 
-def _fp_entries_from_csv(files, chosen_name: str):
+def _fp_entries_from_csv(files, chosen_name: str, record_id: str = ""):
     """Read the uploaded VALD Test Metrics exports. Returns the tests to save, or None after showing why nothing can be saved."""
     entries, shown_any = {}, False
     for f in files:
@@ -2186,15 +2186,21 @@ def _fp_entries_from_csv(files, chosen_name: str):
             latest = max(rows, key=lambda t: (t.date, t.time))
             st.markdown(f"**{FP_TEST_NAMES.get(code, code)}** ({f.name}): {len(rows)} test{'s' if len(rows) != 1 else ''}, "
                         f"{', '.join(friendly_date(t.date) + (' ' + t.time if t.time else '') for t in sorted(rows, key=lambda t: (t.date, t.time), reverse=True))}")
+            light_col = "Light" if FP_ASYM_LIGHTS["approved"] else "Proposed light"
             st.table([{"Result (latest test)": m["label"], "Value": vald_csv.display(m),
-                       "Proposed light": FP_DOTS[_fp_light(m)] + (" (not approved yet)" if _fp_light(m) else "")}
+                       light_col: FP_DOTS[_fp_light(m)] + ("" if FP_ASYM_LIGHTS["approved"] or not _fp_light(m) else " (not approved yet)")}
                       for k, m in latest.metrics.items()])
             if res.missing.get(code):
                 st.caption("Not in this export (add the column in VALD Hub if you want it): " + ", ".join(res.missing[code]))
             for t in rows:
                 for n in t.notes:
                     st.caption(f"{friendly_date(t.date)}: {n}")
-            for t in rows:
+            # one tick per test: a test with a problem noted starts unticked, so a failed trial is left out unless the clinician keeps it
+            for t in sorted(rows, key=lambda t: (t.date, t.time), reverse=True):
+                when = friendly_date(t.date) + (f" {t.time}" if t.time else "")
+                if not st.checkbox(f"Include {FP_TEST_NAMES.get(code, code).lower()} on {when}" + (" (problem noted above)" if t.notes else ""),
+                                   value=not t.notes, key=f"fp_inc::{record_id}::{f.name}::{t.doc_id}"):
+                    continue
                 entries[t.doc_id] = {"test_code": t.code, "test_date": t.date, "test_time": t.time, "body_weight": t.body_weight,
                                      "results": {k: {kk: m[kk] for kk in ("value", "unit", "asymmetry", "label")} for k, m in t.metrics.items()},
                                      "source": "vald_csv"}
@@ -2274,7 +2280,7 @@ def render_force_plate_upload():
         with st.expander("Older route: a VALD PDF report instead"):
             up = st.file_uploader("VALD Hub ForceDecks report (PDF)", type=["pdf"], key=f"fp_pdf::{record_id}")
     if csv_files:
-        entries = _fp_entries_from_csv(csv_files, name)
+        entries = _fp_entries_from_csv(csv_files, name, record_id)
     elif up:
         entries = _fp_entries_from_pdf(up, record_id)
     else:
