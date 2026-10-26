@@ -64,6 +64,7 @@ from helpers import (
 import mailer  # noqa: E402  (emails to patients: sign-in codes, reminders)
 import reminders  # noqa: E402  (the reminder emails and texts; the daily job is reminders.py itself)
 import sms  # noqa: E402  (text messages to patients)
+import report_drafts  # noqa: E402  (shared report drafts: health checks on one device, force plates on another)
 from helpers import (  # noqa: E402  (report files kept in private storage)
     MAX_SHARED_PDF_BYTES,
     MAX_SHARED_TOTAL_BYTES,
@@ -407,7 +408,7 @@ def fail(user_msg: str, context: str, ai: bool = False):
 
 def strip_pdf_payloads(tests):
     """Remove raw PDF data so records stay under Firestore's 1 MiB limit and out of prompts."""
-    return [{k: v for k, v in t.items() if k not in ("pdf_b64", "pdf_bytes")} for t in (tests or [])]
+    return [{k: v for k, v in t.items() if k not in ("pdf_b64", "pdf_bytes", "pdf_ref")} for t in (tests or [])]
 
 
 # --- PINs are no longer used: patients sign in with a code sent to their email. Saving a record removes any PIN left from testing. ---
@@ -3221,7 +3222,7 @@ REPORT_TEMPLATE = """
 def report_links(tests, tiles, state, comparisons=None):
     """(linked findings, clinician's interpretation) for the participant's page. Only results whose tiles are on the page are linked,
     and the links are left out if the clinician unticked them."""
-    links = norms.dashboard.linked_findings(tests, {t.key for t in tiles}, comparisons) if state.get("cmp_links_show", True) else []
+    links = [g for g in norms.dashboard.linked_findings(tests, {t.key for t in tiles}, comparisons) if state.get(f"cmp_link::{g['title']}", True)]
     return links, clean_note(state.get("cmp_interpretation", ""), NOTE_MAX)
 
 
@@ -3415,6 +3416,360 @@ def clinician_gate() -> bool:
     return False
 
 
+# --- SHARED REPORT DRAFTS: one report, filled in two halves (health checks, force plates), from two devices (report_drafts.py) ---
+REPORT_DRAFTS = "report_drafts"
+DRAFT_FS_FILE_MAX = 900 * 1024      # without file storage (local testing only), a PDF up to this size is kept in the database instead
+# the boxes on the screen a draft carries, and the names they are saved under
+DRAFT_META = {"p_name": "name", "p_age": "age", "p_sex": "sex", "p_height": "height", "p_bm": "bm", "p_email": "email",
+              "cmp_note": "note", "cmp_note_by": "note_by", "cmp_interpretation": "interpretation"}
+
+
+def _draft_file_put(draft_id: str, uid: str, data: bytes) -> str:
+    """Keep a draft's PDF. Returns where it is: 'gcs:<object>' in private storage, or 'fs:<uid>' in the database."""
+    if FILE_SHARING_ON:
+        return "gcs:" + shared_file_upload(data)
+    if len(data) > DRAFT_FS_FILE_MAX:
+        raise StorageError("the PDF is too large to keep in a draft without file storage")
+    db.collection(REPORT_DRAFTS).document(draft_id).collection("files").document(uid).set({"data": data})
+    return f"fs:{uid}"
+
+
+def _draft_file_get(draft_id: str, ref: str):
+    kind, _, name = (ref or "").partition(":")
+    if kind == "gcs" and FILE_SHARING_ON:
+        return shared_file_fetch(name)
+    if kind == "fs":
+        snap = db.collection(REPORT_DRAFTS).document(draft_id).collection("files").document(name).get()
+        return (snap.to_dict() or {}).get("data") if snap.exists else None
+    return None
+
+
+def _draft_file_delete(draft_id: str, ref: str):
+    kind, _, name = (ref or "").partition(":")
+    try:
+        if kind == "gcs" and FILE_SHARING_ON:
+            shared_file_delete(name)
+        elif kind == "fs":
+            db.collection(REPORT_DRAFTS).document(draft_id).collection("files").document(name).delete()
+    except Exception:
+        log.exception("Could not remove a draft's file")
+
+
+def _draft_meta_from_state() -> dict:
+    s = st.session_state
+    out = {field: s.get(key) for key, field in DRAFT_META.items() if s.get(key) not in (None, "", "Not stated")}
+    if s.get("p_date"):
+        out["date"] = s["p_date"].isoformat()
+    return out
+
+
+def _draft_meta_to_state(d: dict, only_blank: bool = False):
+    """Fill the boxes from a draft. only_blank: leave anything already typed on this device alone."""
+    s = st.session_state
+    for key, field in DRAFT_META.items():
+        if d.get(field) in (None, ""):
+            continue
+        if only_blank and s.get(key) not in (None, "", "Not stated"):
+            continue
+        s[key] = d[field]
+    if d.get("date") and not only_blank:
+        try:
+            s["p_date"] = datetime.date.fromisoformat(d["date"])
+        except ValueError:
+            pass
+
+
+def _draft_pull(draft_id: str, saved: dict) -> int:
+    """Bring the other device's tests onto this screen (with their PDFs), and drop any it removed. Returns how many were added."""
+    removed = set(saved.get("removed") or [])
+    st.session_state.participant_tests = [t for t in st.session_state.participant_tests if t.get("uid") not in removed]
+    have = {t.get("uid") for t in st.session_state.participant_tests}
+    added = 0
+    for t in saved.get("tests") or []:
+        if t.get("uid") in have:
+            continue
+        local = dict(t)
+        if t.get("pdf_ref"):
+            try:
+                local["pdf_bytes"] = _draft_file_get(draft_id, t["pdf_ref"])
+            except Exception:
+                log.exception("Could not fetch a draft's PDF")
+                local["pdf_bytes"] = None
+        st.session_state.participant_tests.append(local)
+        added += 1
+    return added
+
+
+def draft_save() -> bool:
+    """Save this device's part of the open draft, merged with whatever the other device has saved meanwhile, then bring theirs here."""
+    draft_id = st.session_state.get("draft_id")
+    if not draft_id or not db:
+        return False
+    who = st.session_state.get("clinician_email") or "clinician"
+    try:
+        ref = db.collection(REPORT_DRAFTS).document(draft_id)
+        snap = ref.get()
+        if not snap.exists:            # published or deleted on the other device: never bring it back
+            st.session_state.pop("draft_id", None)
+            st.session_state["draft_error"] = ("This draft has been published or deleted on the other device, so nothing more was saved to it. "
+                                               "What's on this screen is unchanged.")
+            return False
+        saved = snap.to_dict() or {}
+        removed = set(saved.get("removed") or []) | set(st.session_state.get("draft_removed") or [])
+        for t in st.session_state.participant_tests:
+            t.setdefault("uid", report_drafts.new_uid())
+            if t.get("pdf_bytes") and not t.get("pdf_ref"):
+                t["pdf_ref"] = _draft_file_put(draft_id, t["uid"], t["pdf_bytes"])
+        for t in saved.get("tests") or []:
+            if t.get("uid") in removed and t.get("pdf_ref"):
+                _draft_file_delete(draft_id, t["pdf_ref"])
+        tests = report_drafts.merge_tests(saved.get("tests"), [report_drafts.for_storage(t) for t in st.session_state.participant_tests], removed)
+        record = {**saved, **_draft_meta_from_state(), "tests": tests, "removed": sorted(removed), "status": "open",
+                  "updated_at": firestore.SERVER_TIMESTAMP, "updated_by": who}
+        ref.set(record)
+        st.session_state["draft_removed"] = []
+        _draft_pull(draft_id, record)
+        return True
+    except Exception:
+        log.exception("Saving the shared draft failed")
+        st.session_state["draft_error"] = "The shared draft could not be saved. What's on this screen is kept; please try again."
+        return False
+
+
+def draft_list() -> list:
+    """Open drafts, newest first: [(id, draft)]. Drafts not touched for DRAFT_KEEP_DAYS are deleted here, with their files."""
+    if not db:
+        return []
+    out = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for d in db.collection(REPORT_DRAFTS).stream():
+        data = d.to_dict() or {}
+        if data.get("status") != "open":
+            continue
+        when = data.get("updated_at")
+        if isinstance(when, datetime.datetime):
+            when = when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)
+            if now - when > datetime.timedelta(days=report_drafts.DRAFT_KEEP_DAYS):
+                draft_discard(d.id)
+                continue
+        out.append((d.id, data))
+    out.sort(key=lambda x: str(x[1].get("updated_at") or ""), reverse=True)
+    return out
+
+
+def draft_discard(draft_id: str = "") -> bool:
+    """Delete a draft and its uploaded files (after publishing, or when it is no longer wanted)."""
+    draft_id = draft_id or st.session_state.get("draft_id")
+    if not draft_id or not db:
+        return False
+    try:
+        ref = db.collection(REPORT_DRAFTS).document(draft_id)
+        snap = ref.get()
+        for t in ((snap.to_dict() or {}).get("tests") or []) if snap.exists else []:
+            if t.get("pdf_ref"):
+                _draft_file_delete(draft_id, t["pdf_ref"])
+        ref.delete()
+        audit("report_draft_deleted", "", draft=draft_id)
+        return True
+    except Exception:
+        log.exception("Deleting a shared draft failed")
+        return False
+
+
+def _clear_report_screen():
+    """Empty the report builder for the next participant (the draft itself stays in the database)."""
+    st.session_state.participant_tests = []
+    for k in TEXT_KEYS:
+        st.session_state[k] = ""
+    reset_measurement_inputs()
+    for k in [k for k in st.session_state.keys() if isinstance(k, str) and k.startswith(("cmp_link::", "rb_csv"))]:
+        del st.session_state[k]
+    for k in ("draft_id", "draft_removed", "p_name", "p_email", "p_bm", "p_date"):
+        st.session_state.pop(k, None)
+
+
+def _draft_start():
+    if not db:
+        return
+    draft_id = report_drafts.new_uid() + report_drafts.new_uid()
+    who = st.session_state.get("clinician_email") or "clinician"
+    try:
+        db.collection(REPORT_DRAFTS).document(draft_id).set({"status": "open", "tests": [], "removed": [], "created_by": who,
+                                                              "created_at": firestore.SERVER_TIMESTAMP, "updated_at": firestore.SERVER_TIMESTAMP})
+    except Exception:
+        log.exception("Starting a shared draft failed")
+        st.session_state["draft_error"] = "The shared draft could not be started. Please try again."
+        return
+    st.session_state["draft_id"] = draft_id
+    audit("report_draft_started", "", draft=draft_id)
+    if draft_save():
+        st.session_state["draft_notice"] = "Shared draft started. Open it on the other device under 'Shared drafts'."
+
+
+def _draft_open(draft_id: str):
+    if not draft_id or not db:
+        return
+    try:
+        snap = db.collection(REPORT_DRAFTS).document(draft_id).get()
+    except Exception:
+        log.exception("Opening a shared draft failed")
+        st.session_state["draft_error"] = "The draft could not be opened. Please try again."
+        return
+    if not snap.exists:
+        st.session_state["draft_error"] = "That draft no longer exists (it may have been published or deleted)."
+        return
+    _clear_report_screen()
+    saved = snap.to_dict() or {}
+    _draft_meta_to_state(saved)
+    st.session_state["draft_id"] = draft_id
+    n = _draft_pull(draft_id, saved)
+    st.session_state["draft_notice"] = f"Draft opened with {n} test{'s' if n != 1 else ''}."
+
+
+def _draft_refresh():
+    draft_id = st.session_state.get("draft_id")
+    before = len(st.session_state.participant_tests)
+    if draft_save():
+        snap = db.collection(REPORT_DRAFTS).document(draft_id).get()
+        _draft_meta_to_state(snap.to_dict() or {}, only_blank=True)
+        added = len(st.session_state.participant_tests) - before
+        st.session_state["draft_notice"] = (f"Up to date: {added} new test{'s' if added != 1 else ''} from the other device." if added > 0
+                                            else "Up to date. Nothing new from the other device.")
+
+
+def _draft_save_clicked():
+    if draft_save():
+        st.session_state["draft_notice"] = "Saved to the shared draft."
+
+
+def _draft_close():
+    _clear_report_screen()
+    st.session_state["draft_notice"] = "Draft closed. It's still under 'Shared drafts' for you or the other device."
+
+
+def _remove_test(uid: str):
+    """Take one test out of the report (and out of the shared draft, on both devices)."""
+    tests = st.session_state.participant_tests
+    st.session_state.participant_tests = [t for t in tests if t.get("uid") != uid]
+    if len(st.session_state.participant_tests) < len(tests):
+        st.session_state.setdefault("draft_removed", []).append(uid)
+        draft_save()
+
+
+def render_draft_bar():
+    """Top of the report builder: start a shared draft, or open one that another device started."""
+    if not db:
+        return
+    err = st.session_state.pop("draft_error", "")
+    if err:
+        st.error(err)
+    notice = st.session_state.pop("draft_notice", "")
+    if st.session_state.get("draft_id"):
+        c = report_drafts.counts(st.session_state.participant_tests)
+        st.info(f"📂 **Shared draft open.** Everything you add is saved to it, so you can carry on from another device. So far: "
+                f"**{c[report_drafts.HEALTH_CHECKS]}** health check{'s' if c[report_drafts.HEALTH_CHECKS] != 1 else ''} and "
+                f"**{c[report_drafts.FORCE_PLATES]}** force plate test{'s' if c[report_drafts.FORCE_PLATES] != 1 else ''}. "
+                "The participant sees nothing until you publish.")
+        if notice:
+            st.success(notice)
+        b1, b2, b3 = st.columns(3)
+        b1.button("🔄 Get the latest from the other device", on_click=_draft_refresh, use_container_width=True, key="draft_refresh")
+        b2.button("💾 Save the details now", on_click=_draft_save_clicked, use_container_width=True, key="draft_save_btn",
+                  help="Tests are saved as you add them. This also saves the name, age and other details typed above them.")
+        b3.button("Close this draft (keep it)", on_click=_draft_close, use_container_width=True, key="draft_close")
+        with st.expander("Delete this draft"):
+            st.caption("Deletes the draft and the reports uploaded to it, on every device. Nothing published is affected.")
+            if st.button("🗑️ Delete the draft", key="draft_delete"):
+                draft_discard()
+                _clear_report_screen()
+                st.rerun()
+        return
+    if notice:
+        st.success(notice)
+    try:
+        drafts = draft_list()
+    except Exception:
+        log.exception("Listing shared drafts failed")
+        drafts = []
+        st.caption("Couldn't list the shared drafts just now.")
+    with st.container(border=True):
+        st.markdown("**📂 Shared drafts.** Do the health checks on one device (e.g. the iPad) and the force plates on another, into one report.")
+        if drafts:
+            labels = {d_id: report_drafts.draft_label({**d, "date_text": friendly_date(d["date"]) if d.get("date") else ""}) for d_id, d in drafts}
+            c1, c2 = st.columns([3, 1])
+            pick = c1.selectbox("Open a draft", list(labels), format_func=labels.get, key="draft_pick", label_visibility="collapsed")
+            c2.button("Open", on_click=_draft_open, args=(pick,), use_container_width=True, key="draft_open")
+        st.button("➕ Start a shared draft" + (" with what's on this screen" if st.session_state.participant_tests or st.session_state.get("p_name") else ""),
+                  on_click=_draft_start, key="draft_start")
+
+
+def render_force_plate_csv_fill(participant_name: str):
+    """Force plate half: fill the report's force plate boxes from VALD Hub Test Metrics exports, one test of each type."""
+    if not vald_csv:
+        return
+    files = st.file_uploader("VALD Hub Test Metrics export (CSV): add one or more files", type=["csv"], accept_multiple_files=True, key="rb_csv")
+    st.caption("Export from VALD Hub: Profiles → the patient → Result Table → ForceDecks → choose the test type → Export → Test Metrics. "
+               "Only results that mean the same as a box in the report are filled; the others stay blank. Values are as the Result Table "
+               "shows them (its Calculation Type, e.g. Average). Never sent to an AI.")
+    if not files:
+        return
+    rows = []
+    for f in files:
+        res = vald_csv.read_csv(f.getvalue())
+        if res.problems and not res.tests:
+            st.error(f"{f.name}: " + " ".join(res.problems))
+            continue
+        names = sorted({t.name for t in res.tests if t.name})
+        if participant_name and names and all(patient_key(n) != patient_key(participant_name) for n in names):
+            st.warning(f"{f.name} is for **{', '.join(names)}**, but this report is for **{participant_name.strip()}**. Check it's the right person.")
+        rows += res.tests
+    chosen = []
+    for code in report_drafts.CSV_TO_BOXES:
+        tests = sorted((t for t in rows if t.code == code), key=lambda t: (t.date, t.time), reverse=True)
+        if not tests:
+            continue
+        good = [t for t in tests if not t.notes] or tests      # a test with a problem noted is never picked for you
+        labels = {t.doc_id: friendly_date(t.date) + (f" {t.time}" if t.time else "") + (" (problem: " + " ".join(t.notes) + ")" if t.notes else "")
+                  for t in tests}
+        ids = [t.doc_id for t in tests]
+        pick = st.selectbox(f"{FP_TEST_NAMES.get(code, code)}: which test goes in the report?", ids, index=ids.index(good[0].doc_id),
+                            format_func=labels.get, key=f"rb_csv_pick::{code}")
+        row = next(t for t in tests if t.doc_id == pick)
+        got = report_drafts.boxes_from_csv_row(row, vald_csv.display)
+        if got:
+            chosen.append((got[0], got[1], row))
+    other = sorted({vald_csv.TEST_NAMES.get(t.code, t.code) for t in rows if t.code not in report_drafts.CSV_TO_BOXES})
+    if other:
+        st.caption("Not part of the Longevity report, so not added here: " + ", ".join(other) + ". For the progress charts, use the force plate box at the top.")
+    if not chosen:
+        if rows:
+            st.warning("None of these results match a box in the report.")
+        return
+    st.table([{"Report section": a.replace("VALD ForceDecks - ", ""), "Box": k, "Value": v} for a, data, _r in chosen for k, v in data.items()])
+    types = {a for a, _d, _r in chosen}
+    replacing = sorted(types & {t["type"] for t in st.session_state.participant_tests})
+    if replacing:
+        st.caption("Already in this report, and will be replaced: " + ", ".join(a.replace("VALD ForceDecks - ", "") for a in replacing))
+    ok = st.checkbox("I've checked these numbers and this is the right patient", key="rb_csv_ok")
+    if st.button(f"➕ Add {len(chosen)} force plate test{'s' if len(chosen) != 1 else ''} to the report", disabled=not ok, key="rb_csv_add",
+                 use_container_width=True):
+        who = st.session_state.get("clinician_email") or "clinician"
+        removed = st.session_state.setdefault("draft_removed", [])
+        keep = []
+        for t in st.session_state.participant_tests:
+            if t["type"] in types:
+                if t.get("uid"):
+                    removed.append(t["uid"])
+            else:
+                keep.append(t)
+        for a, data, r in chosen:
+            keep.append({"uid": report_drafts.new_uid(), "type": a, "data": data, "pdf_filename": None, "pdf_bytes": None, "from_reader": True,
+                         "source": f"VALD export, test on {r.date}" + (f" {r.time}" if r.time else ""), "added_by": who})
+        st.session_state.participant_tests = keep
+        draft_save()
+        st.rerun()
+
+
 # --- URL ROUTING & NAVIGATION ---
 # A misconfigured role must never silently expose the wrong half of the app, so bad values stop the app.
 if APP_ROLE not in VALID_APP_ROLES:
@@ -3486,21 +3841,27 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.sidebar.subheader("Active Participant Queue")
 
-    if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True):
-        st.session_state.participant_tests = []
-        for k in TEXT_KEYS:
-            st.session_state[k] = ""
-        reset_measurement_inputs()
+    if st.sidebar.button("🔄 Clear All Tests / New Patient", use_container_width=True,
+                         help="Empties this screen. A shared draft is kept, under 'Shared drafts'."):
+        _clear_report_screen()
         st.rerun()
 
     st.sidebar.markdown(f"**Tests Queued:** {len(st.session_state.participant_tests)}")
-    for idx, t in enumerate(st.session_state.participant_tests):
-        st.sidebar.markdown(f"<div class='test-card'><b>{idx+1}. {esc(t['type'])}</b></div>", unsafe_allow_html=True)
+    for half in report_drafts.HALVES:
+        items = [(i, t) for i, t in enumerate(st.session_state.participant_tests) if report_drafts.half_of(t["type"]) == half]
+        st.sidebar.markdown(f"**{half}:** {len(items) if items else 'none yet'}")
+        for idx, t in items:
+            c_card, c_rm = st.sidebar.columns([5, 1])
+            c_card.markdown(f"<div class='test-card'><b>{esc(t['type'])}</b></div>", unsafe_allow_html=True)
+            t.setdefault("uid", report_drafts.new_uid())
+            c_rm.button("✖", key=f"rm::{t['uid']}", on_click=_remove_test, args=(t["uid"],), help="Take this test out of the report")
 
     with st.expander("🧑‍⚕️ Patient portal for any patient: add or update contact details and exercises"):
         render_portal_record_editor()
     with st.expander("📈 Force plate tests (VALD export): add them to a patient's record"):
         render_force_plate_upload()
+
+    render_draft_bar()
 
     st.subheader("📋 Participant Metadata & Sign-in Email")
     col1, col2 = st.columns(2)
@@ -3581,7 +3942,14 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
 
     st.divider()
 
-    assessment_type = st.selectbox("Select Diagnostic Assessment Type", list(ASSESSMENTS.keys()))
+    half = st.radio("Which half of the report are you adding to?", report_drafts.HALVES, horizontal=True, key="rb_half",
+                    help="Health checks: Tanita, ECG, spirometry, AGE Reader and the rest. Force plates: the VALD tests. "
+                         "With a shared draft open, each half can be done on a different device.")
+    if half == report_drafts.FORCE_PLATES:
+        with st.expander("📈 Fill the force plate boxes from a VALD export (CSV)", expanded=True):
+            render_force_plate_csv_fill(participant_name)
+        st.caption("Or add one force plate test at a time, from a VALD PDF or by hand:")
+    assessment_type = st.selectbox("Select Diagnostic Assessment Type", [a for a in ASSESSMENTS if report_drafts.half_of(a) == half])
 
     st.subheader(f"📊 Input Data: {assessment_type}")
 
@@ -3706,10 +4074,12 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     {"type": assessment_type, "by": read_back["by"], "read": read_back["read"], "kept": kept_values}
                 )
             new_test = {
+                "uid": report_drafts.new_uid(),
                 "type": assessment_type,
                 "data": kept_values,
                 "pdf_filename": pdf_filename_str,
                 "pdf_bytes": pdf_bytes_content,
+                "added_by": st.session_state.get("clinician_email") or "clinician",
             }
             view = reader_views.get(assessment_type)
             if read_back and read_back["by"].startswith("PDF reader") and autofill_done.get(assessment_type) == pdf_sig:
@@ -3720,6 +4090,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     new_test["printed_ranges"] = list(view["result"].printed_ranges)
             st.session_state.participant_tests.append(new_test)
             autofill_unverified.pop(assessment_type, None)
+            draft_save()
             st.success(f"Successfully added {assessment_type} to {participant_name}'s profile!")
             st.rerun()
 
@@ -4048,16 +4419,20 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             # --- LINKED FINDINGS: results from different tests that point the same way ---
             all_links = norms.dashboard.linked_findings(st.session_state.participant_tests, None, comparisons_all)
             shown_links = norms.dashboard.linked_findings(st.session_state.participant_tests, {t.key for t in dash_tiles}, comparisons_all)
-            st.markdown("#### 🔗 Linked findings")
+            st.markdown("#### 🔗 Connections between the results")
+            for check in norms.dashboard.data_checks(st.session_state.participant_tests):
+                st.warning("Check before publishing (not shown to the participant): " + check)
             if all_links:
-                st.caption("Results from different tests that point to the same side or the same thing. They are only put side by side: "
-                           "nothing here says why. Add your interpretation below.")
+                st.caption("Results from different tests (for example the health checks and the force plates) that point to the same side or "
+                           "the same thing. They are only put side by side: nothing here says why. Untick any you don't want in the report, "
+                           "and add your interpretation below.")
                 for g in all_links:
                     in_report = any(g["title"] == s["title"] for s in shown_links)
-                    st.markdown(f"**{g['title']}**" + ("" if in_report else " _(not in the report yet: some of these results are drafts or left out)_"))
-                    for item in g["items"]:
-                        st.markdown(f"- {item}")
-                st.checkbox("Show the linked findings in the participant's report", value=True, key="cmp_links_show")
+                    with st.container(border=True):
+                        st.markdown(f"**{g['title']}**" + ("" if in_report else " _(not in the report yet: some of these results are drafts or left out)_"))
+                        for item in g["items"]:
+                            st.markdown(f"- {item}")
+                        st.checkbox("Include in the participant's report", value=True, key=f"cmp_link::{g['title']}")
             else:
                 st.caption("No results from different tests point the same way for this participant.")
             st.text_area("Clinical interpretation (optional)", key="cmp_interpretation", max_chars=NOTE_MAX, height=140,
@@ -4270,6 +4645,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     log.info("Published scan %s (new record: %s)", scan_id, is_new_record)
                     st.success(f"✨ Scan for {assessment_date} published & synced to cloud historical records!"
                                + (" A new participant record was created." if is_new_record else ""))
+                    if st.session_state.get("draft_id") and draft_discard():
+                        st.session_state.pop("draft_id", None)
+                        st.caption("The shared draft is closed and its copies of the reports deleted, now the report is published.")
             except StorageError as e:
                 log.exception("Publishing stopped by file storage")
                 st.error(f"Nothing was published. The device reports could not be stored: {e}.")

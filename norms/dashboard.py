@@ -701,6 +701,40 @@ def linked_findings(tests: list, shown_keys=None, comparisons=None) -> list:
     out = [{"title": title, "items": [t for _s, t in items]} for title, items in groups.items() if len({s for s, _t in items}) >= 2]
     if len({s for s, _t in strength}) >= 2:
         out.append({"title": "Muscle and strength", "items": [t for _s, t in strength]})
+    power = [text for key, text in _power_findings(tests, comparisons) if keep(key)]
+    if len(power) >= 2:
+        out.append({"title": "Body fat and power for your weight", "items": power})
+    return out
+
+
+def _power_findings(tests: list, comparisons=None) -> list:
+    """[(tile key, sentence)]: body fat above the range for age and sex, next to the jump's power per kilo (power is measured per kilo of
+    body weight, so the two are read together). Only made when the body fat is above the range."""
+    fat = next((c for c in comparisons or [] if c.get("key") == "fat_pct" and c.get("status") in (ABOVE, WELL_ABOVE)), None)
+    power = str(_device_data("vald_cmj:", tests).get("Peak Power/Mass", "")).strip()
+    if not fat or not power:
+        return []
+    words = (fat.get("status_text") or "above the range for your age and sex").lower()
+    return [("fat_pct", f"Tanita: body fat {fat['value_text']}, {words}"),
+            ("fat_pct", f"Jump (CMJ): power for your body weight {power}")]
+
+
+WEIGHT_CHECK_KG = 2.0       # the Tanita and the force plate weigh the participant; a bigger gap than this is worth checking
+
+
+def data_checks(tests: list) -> list:
+    """Things for the clinician to check before publishing, never shown to the participant: e.g. the two halves of a report
+    weighing the participant differently, which can mean a mis-weigh or results from different days or people."""
+    out = []
+    tanita = _num(str(_device_data("tanita:", tests).get("Weight", "")))
+    plates = []
+    for dev in ("vald_cmj", "vald_squat", "vald_sts"):
+        plate = _num(str(_device_data(f"{dev}:", tests).get("Body Weight", "")))
+        if tanita and plate and abs(tanita - plate) > WEIGHT_CHECK_KG:
+            plates.append(f"{plate:g} kg ({DEVICE_NAMES[dev]})")
+    if plates:
+        out.append(f"The Tanita weighed {tanita:g} kg, but the force plates weighed " + " and ".join(plates) + ". "
+                   "Check both halves are this participant, from the same visit.")
     return out
 
 
