@@ -3620,6 +3620,33 @@ def _draft_start():
         st.session_state["draft_notice"] = "Shared draft started. Open it on the other device under 'Shared drafts'."
 
 
+def _draft_from_published(key: str, scan_id: str):
+    """Start a shared draft holding a published report's results, to re-run it with the latest wording and links, or to correct it.
+    The published report is not changed (publishing again for the same date replaces it)."""
+    if not db or not key or not scan_id:
+        return
+    try:
+        profile = db.collection(REPORTS).document(key).get().to_dict() or {}
+        scan = db.collection(REPORTS).document(key).collection("scans").document(scan_id).get().to_dict() or {}
+    except Exception:
+        log.exception("Reading a published report for a draft failed")
+        st.session_state["draft_error"] = "The published report could not be read. Please try again."
+        return
+    if not scan.get("tests"):
+        st.session_state["draft_error"] = "That report has no results saved with it, so there is nothing to copy."
+        return
+    _clear_report_screen()
+    _draft_meta_to_state({"name": profile.get("name"), "email": profile.get("email"), "age": scan.get("age_years"), "sex": scan.get("sex"),
+                          "height": scan.get("height_cm"), "bm": scan.get("body_mass_height"), "date": scan.get("assessment_date") or scan_id,
+                          "note": scan.get("clinician_note"), "note_by": scan.get("clinician_note_by"), "interpretation": scan.get("clinical_interpretation")})
+    st.session_state.participant_tests = [{**t, "uid": t.get("uid") or report_drafts.new_uid()} for t in strip_pdf_payloads(scan["tests"])]
+    audit("report_draft_from_published", key, scan_date=scan_id)
+    _draft_start()
+    if st.session_state.get("draft_id"):
+        st.session_state["draft_notice"] = (f"Draft started from the report of {friendly_date(scan_id)}, with {len(st.session_state.participant_tests)} tests. "
+                                            "The device PDFs are not copied. Preview it below; publishing it replaces the report for that date.")
+
+
 def _draft_open(draft_id: str):
     if not draft_id or not db:
         return
@@ -3715,6 +3742,27 @@ def render_draft_bar():
             c2.button("Open", on_click=_draft_open, args=(pick,), use_container_width=True, key="draft_open")
         st.button("➕ Start a shared draft" + (" with what's on this screen" if st.session_state.participant_tests or st.session_state.get("p_name") else ""),
                   on_click=_draft_start, key="draft_start")
+        with st.expander("↩️ Start a draft from a published report"):
+            st.caption("Copies a published report's results into a new shared draft, to see it with the latest wording and links, or to correct it. "
+                       "The participant sees nothing new unless you publish it.")
+            pub_name = st.text_input("Participant's full name", key="pub_pick_name", max_chars=120, placeholder="e.g. John Evans")
+            pub_key = patient_key(pub_name) if pub_name.strip() else ""
+            if pub_key:
+                try:
+                    reports = [(p.id, s.id) for p in profiles_named(pub_key)
+                               for s in p.reference.collection("scans").order_by("assessment_date", direction=firestore.Query.DESCENDING).limit(10).stream()]
+                except Exception:
+                    log.exception("Listing published reports failed")
+                    reports = []
+                    st.caption("Couldn't list the published reports just now.")
+                if reports:
+                    several = len({k for k, _s in reports}) > 1      # two people with this name: tell their records apart
+                    labels = {f"{k}|{s}": friendly_date(s) + (f" · record …{k[-4:]}" if several else "") for k, s in reports}
+                    c1, c2 = st.columns([3, 1])
+                    pub_pick = c1.selectbox("Published report", list(labels), format_func=labels.get, key="pub_pick", label_visibility="collapsed")
+                    c2.button("Start draft", on_click=_draft_from_published, args=tuple(pub_pick.split("|", 1)), use_container_width=True, key="pub_start")
+                else:
+                    st.caption("No published reports found for that name.")
 
 
 def render_force_plate_csv_fill(participant_name: str):
