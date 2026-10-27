@@ -1184,7 +1184,7 @@ def reset_measurement_inputs():
         if isinstance(k, str) and k.startswith(("in::", "verified::", "raw::")):
             del st.session_state[k]
     for k in ("autofill_done", "autofill_unverified", "autofill_log", "reader_view", "ai_used", "ai_last", "ai_usage", "ai_last_usage",
-              "cmp_excluded", "cmp_note", "cmp_note_by", "cmp_interpretation", "cmp_links_show", "p_age", "p_sex", "p_height"):
+              "cmp_excluded", "cmp_note", "cmp_note_by", "cmp_interpretation", "cmp_meaning", "cmp_links_show", "p_age", "p_sex", "p_height"):
         st.session_state.pop(k, None)
 
 
@@ -2759,6 +2759,7 @@ ASSESSMENTS = {
         "columns": [
             [("Peak Push Force (N)", "520 N", "Peak Push Force"), ("Concentric Impulse (Ns)", "310 Ns", "Concentric Impulse")],
             [("Left/Right Symmetry (%)", "96.5%", "L/R Symmetry"), ("Peak Power Output (W)", "680 W", "Peak Power")],
+            [("Concentric Impulse Asymmetry, average (% and side)", "7% L", "Push-up Impulse Asymmetry")],
         ],
     },
     # Spirometry: the boxes match the 'Spirometry Results' report (pdf_reader/spirometry.py fills them). The z-scores and % predicted are the
@@ -2821,7 +2822,8 @@ ASSESSMENTS = {
     "VALD ForceDecks - Multi-Rep Squat": {
         "columns": [
             [("Peak Force, best rep (N)", "1053 N", "Peak Force")],
-            [("Concentric Peak Force Asymmetry, average (% and side)", "11% R", "L/R Asymmetry")],
+            [("Concentric Peak Force Asymmetry, average (% and side)", "11% R", "L/R Asymmetry"),
+             ("Concentric Impulse Asymmetry, average (% and side)", "4% L", "Standing-up Impulse Asymmetry")],
             [("VALD Hub percentile for peak force (0-100)", "35", "VALD Percentile"),
              ("Body Weight on the Plate (kg)", "76.6", "Body Weight")],
         ],
@@ -2840,6 +2842,8 @@ ASSESSMENTS = {
             [("Modified RSI, best rep", "0.58", "Modified RSI"), ("Flight Time : Contraction Time, best rep", "0.4", "Flight Time:Contraction Time")],
             [("Concentric Peak Force Asymmetry, average (% and side)", "14% L", "Peak Force Asymmetry"),
              ("Eccentric Braking Impulse Asymmetry, average (% and side)", "1.1% L", "Braking Impulse Asymmetry")],
+            [("Concentric Impulse Asymmetry, average (% and side)", "6.2% R", "Push-off Impulse Asymmetry"),
+             ("Peak Landing Force Asymmetry, average (% and side)", "9% L", "Landing Force Asymmetry")],
             [("VALD Hub percentile for jump height, or peak power per kg (0-100)", "35", "VALD Percentile"),
              ("Body Weight on the Plate (kg)", "76.6", "Body Weight")],
         ],
@@ -2848,6 +2852,7 @@ ASSESSMENTS = {
         "columns": [
             [("Total Path Length, average (mm)", "123 mm", "Total Path Length"), ("Mean Velocity, average (mm/s)", "8 mm/s", "Mean Velocity")],
             [("Side-to-Side Sway, average (mm)", "7 mm", "Side-to-Side Sway"), ("Front-to-Back Sway, average (mm)", "27 mm", "AP Sway Range")],
+            [("Weight Asymmetry, average (% and side)", "3% R", "Weight Asymmetry")],
         ],
     },
 }
@@ -3226,6 +3231,15 @@ def report_links(tests, tiles, state, comparisons=None):
     return links, clean_note(state.get("cmp_interpretation", ""), NOTE_MAX)
 
 
+def report_meaning(tests, tiles, state, comparisons=None, lib=None):
+    """The 'What this all means' paragraph for the participant's page: the clinician's edited version if there is one, otherwise the one built from the results."""
+    own = clean_note(state.get("cmp_meaning", ""), NOTE_MAX)
+    if own:
+        return own
+    links, _unused = report_links(tests, tiles, state, comparisons)
+    return norms.dashboard.meaning_paragraph(tiles, (lib or dashboard_library()).summary, links)
+
+
 def build_report(participant_name, age_gender, assessment_date, body_mass_height, tests, state, comparisons=None, note="", note_by="", preview=False, exclude=(), files_shared=False):
     """Build the patient report HTML. Returns (report_html, sanitised_text_by_key). `state` is st.session_state.
 
@@ -3237,7 +3251,7 @@ def build_report(participant_name, age_gender, assessment_date, body_mass_height
         meta = {"participant_name": participant_name, "age_gender": age_gender, "assessment_date": assessment_date, "body_mass_height": body_mass_height}
         links, interpretation = report_links(tests, tiles, state, comparisons)
         return norms.dashboard.render_report(meta, tiles, lib, note=note, note_by=note_by, hidden=hidden, preview=preview, files_shared=files_shared,
-                                             links=links, interpretation=interpretation), {k: "" for k in TEXT_KEYS}
+                                             links=links, interpretation=interpretation, meaning=report_meaning(tests, tiles, state, comparisons, lib)), {k: "" for k in TEXT_KEYS}
     tests_html = ""
     for idx, t in enumerate(tests):
         items = [f"<li><b>{esc(k)}:</b> {esc(v)}</li>" for k, v in t["data"].items() if v]
@@ -3421,7 +3435,7 @@ REPORT_DRAFTS = "report_drafts"
 DRAFT_FS_FILE_MAX = 900 * 1024      # without file storage (local testing only), a PDF up to this size is kept in the database instead
 # the boxes on the screen a draft carries, and the names they are saved under
 DRAFT_META = {"p_name": "name", "p_age": "age", "p_sex": "sex", "p_height": "height", "p_bm": "bm", "p_email": "email",
-              "cmp_note": "note", "cmp_note_by": "note_by", "cmp_interpretation": "interpretation"}
+              "cmp_note": "note", "cmp_note_by": "note_by", "cmp_interpretation": "interpretation", "cmp_meaning": "meaning"}
 
 
 def _draft_file_put(draft_id: str, uid: str, data: bytes) -> str:
@@ -4439,6 +4453,24 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                          placeholder="e.g. The lower muscle and the weaker push on the left leg fit with the knee problem you told me about. We will...",
                          help="Shown under the linked findings in the participant's report, in your own words, signed with the name above. "
                               "Plain text. It is never sent to any AI service.")
+
+            # --- WHAT THIS ALL MEANS: one plain-English paragraph (good news, what needs work, good news), built from the lights, no AI ---
+            if dash_tiles:
+                st.markdown("#### 🗣️ What this all means")
+                auto_meaning = norms.dashboard.meaning_paragraph(dash_tiles, dash_lib.summary,
+                                                                 report_links(st.session_state.participant_tests, dash_tiles, st.session_state, comparisons_all)[0])
+                st.caption("A plain-English paragraph near the top of the participant's page: something good, then what needs work, then something good to finish. "
+                           "It is written from the results by fixed rules (no AI), so it changes as you change the results above.")
+                if (st.session_state.get("cmp_meaning") or "").strip():
+                    st.info("Your edited version will be used. Clear the box to go back to the automatic paragraph.")
+                else:
+                    st.success(auto_meaning)
+                    if st.button("✏️ Edit this paragraph", key="cmp_meaning_edit"):
+                        st.session_state.cmp_meaning = auto_meaning
+                        st.rerun()
+                if (st.session_state.get("cmp_meaning") or "").strip():
+                    st.text_area("Your version of 'What this all means'", key="cmp_meaning", max_chars=NOTE_MAX, height=180,
+                                 help="Shown to the participant instead of the automatic paragraph. Plain text. It is never sent to any AI service.")
         st.divider()
     else:
         # --- COMPARISON WITH REFERENCE DATA ---
@@ -4569,6 +4601,8 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     # the linked findings and interpretation exactly as on the participant's page (dashboard mode only)
                     **(dict(zip(("linked_findings", "clinical_interpretation"), report_links(st.session_state.participant_tests, dash_tiles, st.session_state, comparisons)))
                        if REPORT_MODE == "dashboard" and NORMS_AVAILABLE else {}),
+                    "plain_english_summary": report_meaning(st.session_state.participant_tests, dash_tiles, st.session_state, comparisons, dash_lib)
+                                             if REPORT_MODE == "dashboard" and NORMS_AVAILABLE and dash_tiles else "",
                     "report_mode": REPORT_MODE,
                     "dashboard": [t.record() for t in dash_tiles] if REPORT_MODE == "dashboard" else [],
                     "wording": {t.key: t.hash for t in dash_tiles} if REPORT_MODE == "dashboard" else {},

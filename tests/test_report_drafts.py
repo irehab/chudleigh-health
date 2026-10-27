@@ -34,7 +34,7 @@ def test_boxes_from_csv_row():
                                     "con_impulse_asym": {"value": 11.0, "unit": "%", "asymmetry": True}})
     assessment, data = rd.boxes_from_csv_row(row, vald_csv.display)
     assert assessment == "VALD ForceDecks - Countermovement Jump (CMJ)"
-    assert data == {"Jump Height": "30 cm", "Braking Impulse Asymmetry": "4.2% L", "Body Weight": "80"}
+    assert data == {"Jump Height": "30 cm", "Braking Impulse Asymmetry": "4.2% L", "Push-off Impulse Asymmetry": "11% R", "Body Weight": "80"}
     only_weight = vald_csv.TestRow(code="STSTS", date="2026-10-26", time="", name="", body_weight=80.0, reps="", metrics={})
     assert rd.boxes_from_csv_row(only_weight, vald_csv.display) is None
     assert rd.boxes_from_csv_row(vald_csv.TestRow(code="PUSHUPT", date="", time="", name="", body_weight=None, reps=""), vald_csv.display) is None

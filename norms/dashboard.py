@@ -61,8 +61,11 @@ A_VALD_CMJ = "VALD ForceDecks - Countermovement Jump (CMJ)"
 A_VALD_SQUAT = "VALD ForceDecks - Multi-Rep Squat"
 A_VALD_STS = "VALD ForceDecks - Sit-to-Stand"
 A_VALD_SLSB = "VALD ForceDecks - Single Leg Stance / Balance"
+A_VALD_QSB = "VALD ForceDecks - Quiet Stand (Balance)"
+A_VALD_PUSHUP = "Push-Up Assessment (VALD ForceDecks)"
 A_SPIRO = "Spirometry (Pulmonary Function)"
-VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB, "spiro": A_SPIRO, "grip": A_GRIP}
+VALUE_DEVICES = {"tanita": A_TANITA, "vald_cmj": A_VALD_CMJ, "vald_squat": A_VALD_SQUAT, "vald_sts": A_VALD_STS, "vald_slsb": A_VALD_SLSB, "spiro": A_SPIRO, "grip": A_GRIP,
+                 "vald_qsb": A_VALD_QSB, "vald_pushup": A_VALD_PUSHUP}
 DEVICE_NAMES = {"vald_cmj": "Jump (CMJ)", "vald_squat": "Squat", "vald_sts": "Sit-to-stand", "vald_slsb": "Single-leg balance"}
 COVERED_ASSESSMENTS = {A_TANITA, A_ECG, A_AGE, A_SPO2, A_PAR, A_GRIP, A_SPIRO, A_VALD_CMJ, A_VALD_SQUAT, A_VALD_STS, A_VALD_SLSB}      # the devices that have dashboard tiles so far
 TEXT_FIELDS = ("headline", "text", "do")
@@ -616,6 +619,13 @@ def force_plate_balance(row: Row, tests: list):
 LINK_MIN_PCT = 5.0          # a left/right difference smaller than this is not counted as one side being lower
 LINK_MIN_DEGREES = 0.5      # phase angle difference between limbs
 GRIP_LINK_PCT = 20.0        # hands commonly differ by about 10% (the dominant hand is stronger), so only a bigger gap is linked
+# Force plate left/right differences that are only used to link results (they have no light of their own on the force plate tile):
+# (device, box, arm or leg, sentence). As in FP_ASYMMETRY, VALD's letter is the side that produced MORE.
+LINK_ASYMMETRY = [("vald_cmj", "Push-off Impulse Asymmetry", "leg", "Jump (pushing off): the {side} side did {pct}% less"),
+                  ("vald_cmj", "Landing Force Asymmetry", "leg", "Jump (landing): the {side} side took {pct}% less"),
+                  ("vald_squat", "Standing-up Impulse Asymmetry", "leg", "Squat (standing up): the {side} side did {pct}% less"),
+                  ("vald_qsb", "Weight Asymmetry", "leg", "Standing still: {pct}% less weight on the {side} leg"),
+                  ("vald_pushup", "Push-up Impulse Asymmetry", "arm", "Push-up (pushing up): the {side} arm did {pct}% less")]
 
 
 def _side_findings(tests: list) -> list:
@@ -646,6 +656,11 @@ def _side_findings(tests: list) -> list:
         if got and got[1] and got[0] >= LINK_MIN_PCT:
             side = "right" if got[1] == "L" else "left"
             out.append((side, "leg", dev, "fp_balance", f"{test.capitalize()} ({action}): the {side} side did {got[0]:g}% less"))
+    for dev, box, limb, sentence in LINK_ASYMMETRY:
+        got = _asym(_device_data(f"{dev}:", tests).get(box, ""))
+        if got and got[1] and got[0] >= LINK_MIN_PCT:
+            side = "right" if got[1] == "L" else "left"
+            out.append((side, limb, dev, "fp_balance", sentence.format(side=side, pct=f"{got[0]:g}")))
     grip = _device_data("grip:", tests) if "grip" in VALUE_DEVICES else {}
     gr, gl = _num(str(grip.get("Right Grip", ""))), _num(str(grip.get("Left Grip", "")))
     if gr and gl and abs(gr - gl) / max(gr, gl) * 100 >= GRIP_LINK_PCT:
@@ -868,6 +883,86 @@ def summarize(tiles: list, S: dict) -> dict:
             "priorities": [{"key": t.key, "title": t.title, "light": t.light, "do": t.do} for t in todo]}
 
 
+# ------------------------------------------------------------------------------------------------------------------------ what this all means
+# One plain-English paragraph that ties the page together, built the same way every time from the lights (no AI): something good, then what needs
+# work, then something good to finish. The clinician can edit it before publishing. Any phrase can be replaced from summary.csv with the same key.
+MEANING_HEADING = "What this all means"
+MEANING_AREAS = {"Fitness": "fitness", "Strength": "grip strength", "Your lungs (spirometry)": "lungs", "Your heart (ECG)": "heart",
+                 "Your longevity age": "longevity age", "Oxygen and pulse": "blood oxygen and pulse", "Body composition": "body composition",
+                 "Skin ageing": "skin age", "Strength and balance (force plates)": "force plate tests"}
+MEANING_WORK = {"fat_pct": "your body fat", "bmi": "your BMI", "visceral_fat": "the fat stored around your organs", "limb_balance": "the muscle balance between your left and right sides",
+                "leg_score": "the muscle in your legs", "phase_angle": "your muscle quality (phase angle)", "phase_angle_limbs": "the muscle quality in your arms and legs",
+                "muscle_mass": "your muscle mass", "asm_index": "the muscle in your arms and legs", "metabolic_age": "your metabolic age", "age_level": "your skin AGE level",
+                "age_bodyage": "your skin age estimate", "ecg_hr": "your heart rate", "ecg_timings": "your heart timings", "spo2_avg": "your blood oxygen",
+                "pulse_avg": "your resting pulse", "fp_balance": "the balance between your left and right sides", "fp_strength": "your leg strength for your age",
+                "vo2max_est": "your fitness", "longevity_age": "your longevity age", "grip": "your grip strength", "lung_function": "your breathing test"}
+TRAINABLE = {"fat_pct", "bmi", "visceral_fat", "limb_balance", "leg_score", "phase_angle", "phase_angle_limbs", "muscle_mass", "asm_index", "metabolic_age",
+             "fp_balance", "fp_strength", "vo2max_est", "grip", "pulse_avg"}     # results that usually move with exercise, sleep and food; the rest are for the clinician to talk through
+MEANING_TEXT = {
+    "open_strong": "Overall, this is a strong set of results.",
+    "open_good": "Overall, there is a lot to be pleased about here.",
+    "open_some": "There are some good signs here, and a clear starting point to build from.",
+    "open_start": "Thank you for doing your baseline. It gives us a clear starting point to build from.",
+    "strengths": "The results for your {areas} are where we would want them.|Your {areas} are where we would want them.",
+    "partial": "Most of your {areas} results are healthy too.",
+    "partial_only": "Most of your {areas} results are healthy.",
+    "work_red": "The main thing to work on is {what}.",
+    "work_amber": "The main thing to look at is {what}.",
+    "work_talk": "The main thing to talk through with your clinician is {what}.",
+    "work_next": "We would also like to look at {what}.",
+    "nothing": "Nothing stands out that needs work right now.",
+    "links": "Some results from different tests point the same way, and we have put them side by side further down the page.",
+    "close_train": "Changes like these often respond well to steady, targeted work. With your {area} in such good shape, you are starting from a strong base.",
+    "close_train_plain": "Changes like these often respond well to steady, targeted work.",
+    "close_talk": "We will agree the next steps together.",
+    "close_keep": "The best thing to do is keep doing what you are doing.",
+    "close_retest": "We will measure again at your next visit so you can see how things are moving.",
+}
+
+
+def _and_list(items: list) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def meaning_paragraph(tiles: list, S: dict, links: list | None = None) -> str:
+    """The 'What this all means' paragraph: good news, what needs work, good news to finish. Empty if no result has a light."""
+    W = {k: S.get(f"meaning_{k}") or v for k, v in MEANING_TEXT.items()}
+    summary = summarize(tiles, S)
+    if not summary["n"]:
+        return ""
+    groups: dict = {}
+    for t in tiles:
+        if t.light in (GREEN, AMBER, RED):
+            groups.setdefault(t.group, []).append(t)
+    ranked = sorted(groups.items(), key=lambda kv: (min(t.priority for t in kv[1]), min(t.order for t in kv[1])))
+    area = lambda g: S.get(f"meaning_area::{g}") or MEANING_AREAS.get(g) or g.lower()
+    strong = [area(g) for g, ts in ranked if all(t.light == GREEN for t in ts)][:5]
+    partial = [area(g) for g, ts in ranked if not all(t.light == GREEN for t in ts) and sum(t.light == GREEN for t in ts) * 2 > len(ts)][:2]
+    share = summary["green"] / summary["n"]
+    out = [W["open_strong"] if share >= 0.75 else W["open_good"] if share >= 0.5 else W["open_some"] if summary["green"] else W["open_start"]]
+    if strong:
+        out.append(fmt_pair(W["strengths"], len(strong), areas=_and_list(strong)))
+    if partial:
+        out.append((W["partial"] if strong else W["partial_only"]).format(areas=_and_list(partial)))
+    todo = summary["priorities"]
+    work = lambda p: S.get(f"meaning_work::{p['key']}") or MEANING_WORK.get(p["key"]) or "your " + p["title"].lower()
+    if todo:
+        first = W["work_talk"] if todo[0]["key"] not in TRAINABLE else W["work_red"] if todo[0]["light"] == RED else W["work_amber"]
+        out.append(first.format(what=work(todo[0])))
+        if len(todo) > 1:
+            out.append(W["work_next"].format(what=work(todo[1])))
+        if links:
+            out.append(W["links"])
+        if all(p["key"] in TRAINABLE for p in todo[:2]):
+            out.append(W["close_train"].format(area=strong[0]) if strong else W["close_train_plain"])
+        else:
+            out.append(W["close_talk"])
+    else:
+        out += [W["nothing"], W["close_keep"]]
+    out.append(W["close_retest"])
+    return " ".join(out)
+
+
 # ------------------------------------------------------------------------------------------------------------------------ the page
 # Health Autonomy at Chudleigh Health Hub brand (chudleighhealth.com): charcoal and teal, Lato text, Cormorant Garamond headings, the handwritten
 # 'Health autonomy' wordmark. Without the internet (a saved report opened offline) the page falls back to ordinary fonts. The light colours are unchanged.
@@ -928,6 +1023,8 @@ h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600}
 .link-group h3{margin:0 0 6px;font-size:16px;color:var(--primary)}.link-group ul{margin:0;padding-left:20px}.link-group li{margin:3px 0}
 .interp{margin-top:12px;padding:12px 14px;background:#fff;border:1px dashed var(--secondary);border-radius:10px}
 .interp h3{margin:0 0 6px;color:var(--primary);font-size:16px}.interp p{margin:0 0 8px}.interp .by{font-weight:700;color:var(--primary)}
+.meaning{background:#fff;border:1px solid var(--border);border-left:5px solid var(--secondary);border-radius:12px;padding:18px 20px;margin-bottom:20px}
+.meaning h2{margin:0 0 8px;color:var(--primary);font-size:19px}.meaning p{margin:0 0 8px;font-size:16px;line-height:1.65}.meaning p:last-child{margin-bottom:0}
 """
 
 
@@ -998,10 +1095,15 @@ def _sources_html(tiles: list, S: dict) -> str:
 
 
 def render_report(meta: dict, tiles: list, library: Library, note: str = "", note_by: str = "", hidden: list | None = None, preview: bool = False,
-                  files_shared: bool = False, links: list | None = None, interpretation: str = "", interpretation_by: str = "") -> str:
-    """The whole page, as one self-contained HTML document. meta: participant_name, age_gender, assessment_date, body_mass_height."""
+                  files_shared: bool = False, links: list | None = None, interpretation: str = "", interpretation_by: str = "", meaning: str | None = None) -> str:
+    """The whole page, as one self-contained HTML document. meta: participant_name, age_gender, assessment_date, body_mass_height.
+    meaning: the clinician's edited 'What this all means' paragraph; None builds it from the results, and "" leaves it out."""
     S = library.summary
     summary = summarize(tiles, S)
+    meaning = meaning_paragraph(tiles, S, links) if meaning is None else meaning
+    paras = [p.strip() for p in str(meaning or "").replace("\r\n", "\n").split("\n\n") if p.strip()]
+    meaning_html = (f'<div class="meaning"><h2>{esc(S.get("meaning_heading") or MEANING_HEADING)}</h2>'
+                    + "".join("<p>" + "<br>".join(esc(line) for line in p.split("\n")) + "</p>" for p in paras) + "</div>") if paras and summary["n"] else ""
     drafts = [t for t in tiles if not t.approved]
     banner = ""
     if preview and (drafts or hidden):
@@ -1037,7 +1139,7 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
             f'<div><label>Age / sex</label><span>{esc(meta.get("age_gender", ""))}</span></div>'
             f'<div><label>Assessment date</label><span>{esc(meta.get("assessment_date", ""))}</span></div>'
             f'<div><label>Body mass / height</label><span>{esc(meta.get("body_mass_height", ""))}</span></div></div>'
-            f'{banner}{_note_html(note, note_by, S)}{head}{prio}{_links_html(links, interpretation, interpretation_by or note_by, S)}{tap}{sections}{how}'
+            f'{banner}{_note_html(note, note_by, S)}{head}{meaning_html}{prio}{_links_html(links, interpretation, interpretation_by or note_by, S)}{tap}{sections}{how}'
             f'{_sources_html(tiles, S)}</div>'
             f'<div class="footer">{esc(S.get("disclosure", ""))}<br>{version}</div></div></body></html>')
 
