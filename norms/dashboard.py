@@ -761,7 +761,7 @@ def _pick(row: Row, light: str, status: str = ""):
         t = row.text["info"]
         return t["headline"] or "For your information", t["text"], t["do"]
     low = row.text["low"]
-    t = low if (status == BELOW and low["text"]) else row.text[light]
+    t = low if ((status == BELOW or light == BLUE) and low["text"]) else row.text[GREEN if light == BLUE else light]
     return t["headline"], t["text"], t["do"]
 
 

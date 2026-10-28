@@ -4460,9 +4460,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             if not st.session_state.participant_tests:
                 st.caption("Add assessments above to see the dashboard the participant will receive.")
             elif dash_all:
-                light_word = {"green": "🟢 doing well", "amber": "🟠 room to improve", "red": "🔴 focus first", "info": "⚪ for information"}
+                light_word = {"green": "🟢 doing well", "amber": "🟠 room to improve", "red": "🔴 focus first", "info": "⚪ for information", "blue": "🔵 lower than usual, healthy"}
                 st.markdown("| Result | Value | Light | Wording |\n|---|---|---|---|\n" + "\n".join(
-                    f"| {t.title} | {t.value_text or '-'} | {light_word[t.light]} | {'approved' if (t.approved and t.key not in excluded) else ('left out' if t.key in excluded else 'DRAFT: not shown yet')} |"
+                    f"| {t.title} | {t.value_text or '-'} | {light_word.get(t.light, t.light)} | {'approved' if (t.approved and t.key not in excluded) else ('left out' if t.key in excluded else 'DRAFT: not shown yet')} |"
                     for t in dash_all))
             else:
                 st.warning("None of the results entered can be shown on the dashboard yet.")
