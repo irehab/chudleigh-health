@@ -161,6 +161,43 @@ SOURCES = {
         "population": "Not taken from a study. Each device uses its own reference group.",
         "note": "A simple summary to follow over time. It is not a validated measure of biological ageing.",
     },
+    "ace_essential_fat": {
+        "short": "Essential body fat (American Council on Exercise)",
+        "citation": ("The American Council on Exercise body fat categories: essential fat is about 2 to 5% for men and 10 to 13% for women, "
+                     "athletes about 6 to 13% for men and 14 to 20% for women."),
+        "url": "https://www.acefitness.org/resources/everyone/tools-calculators/percent-body-fat-calculator/",
+        "population": "Not a single study. A widely used guide from a fitness education body.",
+        "note": ("Chudleigh Health Hub uses the top of the essential range (5% for men, 13% for women) as its line for very low body fat. "
+                 "Between that line and the healthy range is shown as lean, not as something to work on: the clinic's own working guide."),
+    },
+    "clinic_age_profile": {
+        "short": "Longevity age: the age your results match",
+        "citation": ("Chudleigh Health Hub turns each result into the age at which an average person of your sex has that result, using the published "
+                     "data listed here. Your longevity age is a weighted average of those ages: fitness counts 3 times (2 when it is estimated), "
+                     "strength twice, and lungs, skin and the Tanita's metabolic age once each. Ages are kept between 20 and 80."),
+        "url": "",
+        "population": "Not taken from a single study. Each part uses its own reference data.",
+        "note": ("A summary to follow over time, and a starting point for a conversation. It is not a validated measure of biological ageing, "
+                 "and the weights are the clinic's own choice. Fitness counts most because it is one of the strongest signs of long-term health."),
+    },
+    "nes_fitness_age": {
+        "short": "Fitness age (Nes 2014, the HUNT study)",
+        "citation": ("Nes BM, Vatten LJ, Nauman J, Janszky I, Wisloff U. A simple nonexercise model of cardiorespiratory fitness predicts long-term mortality. "
+                     "Medicine and Science in Sports and Exercise 2014;46(6):1159-1165."),
+        "url": "https://doi.org/10.1249/MSS.0000000000000219",
+        "population": "About 37,000 Norwegian adults followed for around 24 years.",
+        "note": ("The idea of a fitness age: the age at which your fitness is average. Here it is worked out from the FRIEND treadmill medians, "
+                 "not from the HUNT tables."),
+    },
+    "morris_lung_age": {
+        "short": "Lung age (Morris and Temple 1985)",
+        "citation": ("Morris JF, Temple W. Spirometric 'lung age' estimation for motivating smoking cessation. Preventive Medicine 1985;14(5):655-662. "
+                     "Lung age from height and FEV1: men 2.87 x height (inches) - 31.25 x FEV1 (litres) - 39.375; "
+                     "women 3.56 x height (inches) - 40 x FEV1 (litres) - 77.28."),
+        "url": "https://doi.org/10.1016/0091-7435(85)90085-4",
+        "population": "Healthy non-smoking adults in Oregon, USA.",
+        "note": "A guide to follow over time. A poor-quality breathing test can make the lung age read older than it is.",
+    },
     "vald_hub_norms": {
         "short": "VALD Hub: percentiles for your age and sex",
         "citation": ("The percentiles shown in VALD Hub for your ForceDecks results, which compare them with VALD's own reference data for people "
@@ -238,6 +275,15 @@ FAT = {  # (at BMI 18.5, at BMI 25, at BMI 30)
     "female": {"20 to 39": (21, 33, 39), "40 to 59": (23, 34, 40), "60 to 79": (24, 36, 42)},
     "male": {"20 to 39": (8, 20, 25), "40 to 59": (11, 22, 28), "60 to 79": (13, 25, 30)},
 }
+
+# ---- Very low body fat: the top of the American Council on Exercise's essential fat range. Below the healthy range but at or above this is 'lean'.
+ESSENTIAL_FAT_LINE = {"male": 5.0, "female": 13.0}
+
+# ---- Longevity age (the clinic's age profile): the weight each part carries, and the youngest and oldest age shown
+AGE_WEIGHTS = {"fitness": 3.0, "fitness_est": 2.0, "strength": 2.0, "lungs": 1.0, "skin": 1.0, "body": 1.0}
+AGE_LIMITS = (20, 80)
+# Morris and Temple 1985 lung age: (x height in inches, x FEV1 in litres, constant)
+MORRIS_LUNG_AGE = {"male": (2.87, -31.25, -39.375), "female": (3.56, -40.0, -77.28)}
 
 # ---- BMI, WHO adult groups
 BMI_LIMITS = (18.5, 25.0, 30.0)

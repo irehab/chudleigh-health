@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-20.2"
+NORMS_VERSION = "2026-10-28.1"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -33,6 +33,7 @@ A_ECG = "12-Lead ECG (Electrocardiogram)"
 A_AGE = "AGE Reader (Advanced Glycation End-Products)"
 A_PAR = "Physical Activity Rating (PA-R)"
 A_GRIP = "Grip Strength (Dynamometer)"
+A_SPIRO = "Spirometry (Pulmonary Function)"
 
 # What a participant reads as the name of each result, and one plain line on what it measures.
 PATIENT_TEXT = {
@@ -50,7 +51,7 @@ PATIENT_TEXT = {
     "asm_index": ("Arm and leg muscle (sarcopenia check)", "The muscle in your arms and legs, compared with your height."),
     "grip": ("Grip strength", "How hard you can squeeze: a simple sign of your overall muscle strength."),
     "vo2max_est": ("Fitness (estimated VO2 max)", "How much oxygen your body can use at full effort, estimated from your activity, age, sex and body fat."),
-    "longevity_age": ("Longevity age (estimate)", "The average of the age estimates from your Tanita and your AGE Reader."),
+    "longevity_age": ("Longevity age (estimate)", "The age your fitness, strength, lungs, skin and body composition match, weighted together."),
 }
 
 
@@ -79,6 +80,7 @@ class Comparison:
     measures: str = ""        # one plain line on what it measures
     low: float | None = None  # the usual range, as numbers, for the bar
     high: float | None = None
+    parts: list = field(default_factory=list)   # for a result made of several: [{"label", "value_text", "light", "words"}]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -184,21 +186,21 @@ def measures_from_tests(tests: list, height_cm: float | None = None) -> dict:
     if par is not None and ("fat_pct" in out or "bmi" in out):
         out["vo2max_est"] = {"value": par, "par": par, "fat": (out.get("fat_pct") or {}).get("value"), "bmi": (out.get("bmi") or {}).get("value"),
                              "assessment": A_PAR, "calculated": True}
-    # the device age estimates, for an overall longevity age: the Tanita's metabolic age and the AGE Reader's BodyAge
-    metabolic = bodyage = None
+    # for the longevity age: the Tanita's metabolic age, the AGE Reader's BodyAge and the breathing test's FEV1 (fitness and grip come from their comparisons)
+    parts = {}
     for t in tests or []:
         d = t.get("data") or {}
         if t.get("type") == A_TANITA and _num(d.get("Metabolic Age")) is not None:
-            metabolic = _num(d.get("Metabolic Age"))
+            parts["metabolic"] = _num(d.get("Metabolic Age"))
         if t.get("type") == A_AGE:
             b = _extra_num(t, "BodyAge (years)")
             if b is None:
                 b = _num(d.get("BodyAge"))
             if b is not None:
-                bodyage = b
-    if metabolic is not None and bodyage is not None:
-        out["longevity_age"] = {"value": round((metabolic + bodyage) / 2, 1), "metabolic": metabolic, "bodyage": bodyage,
-                                "assessment": "Tanita and AGE Reader", "calculated": True}
+                parts["bodyage"] = b
+        if t.get("type") == A_SPIRO and _num(d.get("FEV1")):
+            parts["fev1"], parts["fev1_grade"] = _num(d.get("FEV1")), str(d.get("FEV1 Grade") or "").strip().upper()
+    out["age_parts"] = parts
     return out
 
 
@@ -356,7 +358,8 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         who = _who(sex, g)
         status = BELOW if v < low else WITHIN if v < over else ABOVE if v < obese else WELL_ABOVE
         pos = _position(v, low, over) if status == WITHIN else ""
-        where = {BELOW: "lower than it, in the range that matches a BMI under 18.5",
+        where = {BELOW: "below it. The bottom of that range is simply where BMI is 18.5, so it is not a health limit for lean or muscular people"
+                 if v >= data.ESSENTIAL_FAT_LINE[sex] else "lower than it, in the range that matches a BMI under 18.5",
                  WITHIN: f"within it, {_POS_TEXT.get(pos, '')}",
                  ABOVE: "above it, in the range that matches a BMI of 25 to 30",
                  WELL_ABOVE: "well above it, in the range that matches a BMI of 30 or more"}[status]
@@ -376,15 +379,20 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             headline, theme = "Worth working on", WORK_ON
             meaning = ("That matches a BMI of 30 or more. The World Health Organization rates the chance of type 2 diabetes and heart disease as moderate or higher. "
                        "This is worth taking seriously and working on steadily. Realistic, steady steps matter more than quick fixes. We will talk through how.")
+        elif v >= data.ESSENTIAL_FAT_LINE[sex]:
+            headline, theme = "Lean", DOING_WELL            # below the range but above essential fat: lean, not something to work on
+            meaning = ("Your body fat is below the usual range, but above the level your body needs. That is common, and healthy, in people who train regularly. "
+                       "Keep eating enough to fuel your training.")
         else:
-            headline, theme = "Worth a mention to your clinician", DISCUSS
-            meaning = ("A low body fat is common in people who train hard. If it is not intentional, please mention it to your clinician. "
-                       "Please also mention it if you feel tired or run down, or have lost weight without trying.")
+            headline, theme = "Worth talking to your clinician", DISCUSS
+            meaning = (f"Your body fat is below {_fmt(data.ESSENTIAL_FAT_LINE[sex])}%, the level your body needs for everyday health. "
+                       "Please talk it through with your clinician, especially if you feel tired or run down, get ill often, or have lost weight without trying.")
         return Comparison(
             key=key, label=label, assessment=a, status=status, source="gallagher_fat", value=v, value_text=f"{_fmt(v)}%",
             range_text=f"{low}% to under {over}%", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=low, high=over,
             detail="These ranges are provisional and were worked out from BMI limits. Body fat from a body composition scale can differ from the laboratory methods used to make them.",
-            also_sources=["who_bmi", "guh_comorbidities"] if status in (ABOVE, WELL_ABOVE, WITHIN) else [],
+            also_sources=["who_bmi", "guh_comorbidities"] if status in (ABOVE, WELL_ABOVE, WITHIN) else ["ace_essential_fat"],
+            status_text="Lean" if status == BELOW and theme == DOING_WELL else "",
         )
 
     if key == "bmi":
@@ -450,8 +458,6 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         return _vo2max(m, age, sex)
     if key == "grip":
         return _grip(m, age, sex)
-    if key == "longevity_age":
-        return _longevity_age(m, age)
 
     if key == "age_level":
         return _age_level(m, age)
@@ -606,25 +612,88 @@ def _grip(m, age, sex) -> Comparison:
                       detail="Grip depends on the dynamometer and on doing the test the same way each time, so compare results from the same clinic.")
 
 
-def _longevity_age(m, age) -> Comparison:
-    """The average of the Tanita's metabolic age and the AGE Reader's BodyAge, against the person's actual age."""
-    a, v, met, body = m["assessment"], m["value"], m["metabolic"], m["bodyage"]
-    label = "Longevity age: average of metabolic age (Tanita) and BodyAge (AGE Reader)"
+def _age_from_averages(points, v):
+    """points: [(age, the average result at that age)], the average falling as age rises. The age at which the average equals v, by straight-line
+    steps between the points, and 'young' or 'old' when v is beyond the youngest or oldest point (the age is then that point's)."""
+    if v >= points[0][1]:
+        return points[0][0], "young"
+    if v <= points[-1][1]:
+        return points[-1][0], "old"
+    for (a0, v0), (a1, v1) in zip(points, points[1:]):
+        if v1 <= v <= v0 and v0 > v1:
+            return a0 + (a1 - a0) * (v0 - v) / (v0 - v1), ""
+    return points[-1][0], "old"
+
+
+def _age_profile(parts_in: dict, results: list, age, sex, height_cm):
+    """The longevity age: each result turned into the age at which an average person of the same sex has it, then a weighted average
+    (data.AGE_WEIGHTS), kept within data.AGE_LIMITS. None unless there is an age and at least two parts."""
     if age is None:
-        return _no_ref("longevity_age", label, a, v, "years", "An age is needed to compare with.", True)
-    diff = round(abs(v - age), 1)
+        return None
+    lo_cap, hi_cap = data.AGE_LIMITS
+    cap = lambda x: max(lo_cap, min(hi_cap, x))
+    by = {c.key: c for c in results if c.status != NO_REFERENCE}
+    parts, sources = [], []                                             # (label, age, shown, weight, note)
+    vo2 = by.get("vo2max_est")
+    if vo2 and sex:
+        points = [((lo + hi + 1) / 2, values[3]) for (lo, hi), values in data.FRIEND_TREADMILL[sex].items()]
+        a, edge = _age_from_averages(points, vo2.value)
+        shown = {"young": f"{a:.0f} or younger", "old": f"{a:.0f} or older"}.get(edge, f"about {a:.0f}")
+        parts.append(("Fitness" + (" (estimated)" if vo2.calculated else ""), a, shown,
+                      data.AGE_WEIGHTS["fitness_est" if vo2.calculated else "fitness"], ""))
+        sources += ["nes_fitness_age", "friend_2015"]
+    grip = by.get("grip")
+    if grip and sex:
+        averages = sorted((a, cents[2]) for a, cents in data.DODDS_GRIP[sex].items())
+        peak = max(m for _a, m in averages)
+        peak_ages = [a for a, m in averages if m == peak]
+        if grip.value >= peak:
+            a, shown = sum(peak_ages) / len(peak_ages), f"at the peak for any age (an average {peak_ages[0]} to {peak_ages[-1]} year old)"
+        else:
+            a, edge = _age_from_averages([(x, m) for x, m in averages if x >= peak_ages[-1]], grip.value)
+            shown = f"{a:.0f} or older" if edge == "old" else f"about {a:.0f}"
+        parts.append(("Strength (grip)", a, shown, data.AGE_WEIGHTS["strength"], ""))
+        sources.append("dodds_2014")
+    if parts_in.get("fev1") and height_cm and sex:
+        k_height, k_fev1, k0 = data.MORRIS_LUNG_AGE[sex]
+        a = k_height * height_cm / 2.54 + k_fev1 * parts_in["fev1"] + k0
+        poor = parts_in.get("fev1_grade") not in ("", "A", "B", "C")
+        shown = f"under {lo_cap}" if a < lo_cap else f"over {hi_cap}" if a > hi_cap else f"about {a:.0f}"
+        parts.append(("Lungs", a, shown, data.AGE_WEIGHTS["lungs"], "a rough guide: the breathing test quality was lower" if poor else ""))
+        sources.append("morris_lung_age")
+    if parts_in.get("bodyage") is not None:
+        parts.append(("Skin (AGE Reader)", parts_in["bodyage"], f"{_fmt(parts_in['bodyage'])}", data.AGE_WEIGHTS["skin"], ""))
+        sources.append("age_scanner_printed")
+    if parts_in.get("metabolic") is not None:
+        parts.append(("Body composition (Tanita metabolic age)", parts_in["metabolic"], f"{_fmt(parts_in['metabolic'])}", data.AGE_WEIGHTS["body"], ""))
+        sources.append("tanita_bands")
+    if len(parts) < 2:
+        return None
+    v = round(sum(cap(a) * w for _l, a, _s, w, _n in parts) / sum(w for _l, a, _s, w, _n in parts))
+    diff = abs(v - age)
     way = "younger" if v < age else "older" if v > age else "same"
-    sentence = (f"Your Tanita metabolic age is {_fmt(met)} and your AGE Reader BodyAge is {_fmt(body)}. Their average is {_fmt(v)}. "
-                + ("That is the same as your actual age." if way == "same" else f"That is {_fmt(diff)} years {way} than your actual age of {_fmt(age)}."))
+
+    def words(a, note):
+        d = round(abs(cap(a) - age))
+        w = "the same as your age" if d == 0 else f"{d} years {'younger' if cap(a) < age else 'older'} than your age"
+        return w + (f" ({note})" if note else "")
+
+    shown_parts = [{"label": label, "value_text": shown, "light": "green" if cap(a) <= age else "amber", "words": words(a, note)}
+                   for label, a, shown, _w, note in parts]
+    sentence = (f"Each of your results is turned into the age at which an average person of your sex has that result. "
+                f"Weighted together, they come to about {v}. " + ("That is the same as your actual age." if way == "same"
+                                                                  else f"That is {diff} years {way} than your actual age of {_fmt(age)}."))
     if way in ("younger", "same"):
         status, theme, headline = WITHIN, DOING_WELL, "A good result"
-        words = "Younger than your age" if way == "younger" else "The same as your age"
+        status_text = f"{diff} years younger than your age" if diff else "The same as your age"
     else:
-        status, theme, headline, words = ABOVE, WATCH, "Room to improve", "Older than your age"
-    meaning = "This is a simple average of two device estimates. It is not a medical measure of ageing, but it is a useful number to follow over time."
-    return Comparison(key="longevity_age", label=label, assessment=a, status=status, source="clinic_longevity_age", value=v, value_text=f"{_fmt(v)} years",
-                      calculated=True, range_text=f"your age: {_fmt(age)}", group="your device estimates", headline=headline, sentence=sentence, meaning=meaning,
-                      theme=theme, status_text=words, also_sources=["tanita_bands", "age_scanner_printed"])
+        status, theme, headline, status_text = ABOVE, WATCH, "Room to improve", f"{diff} years older than your age"
+    meaning = ("This is an estimate made from published averages, not a medical measure of ageing. "
+               "The parts show where you are strongest, and which ones could bring the number down.")
+    return Comparison(key="longevity_age", label="Longevity age: weighted age profile", assessment="Several tests", status=status, source="clinic_age_profile",
+                      value=v, value_text=f"about {v} years", calculated=True, range_text=f"your age: {_fmt(age)}", group="your results",
+                      headline=headline, sentence=sentence, meaning=meaning, theme=theme, status_text=status_text, also_sources=sources, parts=shown_parts,
+                      detail="Fitness counts most. The weights are the clinic's own choice, and the result is a guide to follow over time.")
 
 
 def _label_kind(label: str) -> str:
@@ -704,7 +773,7 @@ def _age_bodyage(m, age) -> Comparison:
 
 
 _ORDER = ["pulse_avg", "spo2_avg", "ecg_hr", "ecg_pr", "ecg_qrs", "ecg_qtcf", "ecg_qtcb", "fat_pct", "bmi", "asm_index", "grip", "age_level", "age_bodyage",
-          "vo2max_est", "longevity_age"]
+          "vo2max_est"]
 
 
 def _read_together(results: list):
@@ -733,6 +802,9 @@ def compare(tests: list, age, sex, height_cm=None) -> list:
     measures = measures_from_tests(tests, height_cm)
     results = [_compare_one(k, measures[k], age, sex, height_cm) for k in _ORDER if k in measures]
     _read_together(results)
+    profile = _age_profile(measures.get("age_parts") or {}, results, age, sex, height_cm)
+    if profile:
+        results.append(profile)
     for c in results:
         c.patient_label, c.measures = PATIENT_TEXT.get(c.key, (c.label, ""))
     return results

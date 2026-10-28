@@ -32,9 +32,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LIBRARY_FILE = os.path.join(HERE, "measures.csv")
 SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 
-GREEN, AMBER, RED, GREY = "green", "amber", "red", "info"
-SEVERITY = {GREEN: 0, GREY: 0, AMBER: 1, RED: 2}
-SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i"}      # a tick, a triangle, an exclamation mark, an i: the light is never colour alone
+GREEN, AMBER, RED, GREY, BLUE = "green", "amber", "red", "info", "blue"
+SEVERITY = {GREEN: 0, GREY: 0, BLUE: 0, AMBER: 1, RED: 2}
+SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i", BLUE: "\u25c6"}   # a tick, a triangle, an exclamation mark, an i, a diamond: never colour alone
+DEFAULT_WORDS = {BLUE: "Lower than usual, healthy"}       # blue: below the usual range, but not a concern (e.g. lean body fat)
 RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts", "fp_balance", "spiro")
 # rule 'spiro': the spirometer's own z-scores for FVC, FEV1 and FEV1/FVC, each given a light from the row's ranges (ERS/ATS 2022: -1.645 or above
 # is within the expected range). A caution is added when the test quality grades are below C.
@@ -405,7 +406,7 @@ def engine_light(c: dict) -> str:
     """How a comparison from the engine becomes a light. Green = doing well, amber = something you can work on, red = well above or worth discussing."""
     theme, status = c.get("theme"), c.get("status")
     if theme == DOING_WELL:
-        return GREEN
+        return BLUE if status == BELOW else GREEN         # below the usual range, yet doing well: lean, shown calmly
     if theme == WATCH:
         return AMBER
     if theme == WORK_ON:
@@ -763,7 +764,7 @@ def _pick(row: Row, light: str, status: str = ""):
 
 
 def _words(S: dict, light: str) -> str:
-    return S.get(f"legend_{'info' if light == GREY else light}", light)
+    return S.get(f"legend_{'info' if light == GREY else light}") or DEFAULT_WORDS.get(light, light)
 
 
 def build_tiles(tests: list, comparisons: list, library: Library, include_drafts: bool = False, exclude=(), approvals: dict | None = None):
@@ -786,12 +787,15 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
             if c:
                 light = engine_light(c)
                 low = c["status"] == BELOW and bool(row.text["low"]["text"])
+                very_low = low and light == RED and row.key == "fat_pct"     # under essential fat: the engine's own careful words, not the 'lean' ones
                 if low and light == RED:
                     light = AMBER                                       # lower than expected is 'worth a mention', not 'focus first'
-                head, text, do = _pick(row, light, c["status"])
+                head, text, do = (c["headline"], c["meaning"], row.text["low"]["do"]) if very_low else _pick(row, light, c["status"])
                 src = [c["source"]] if c.get("source") else []          # only the table the range came from; other sources are named in the row's 'sources' column
+                src += [s for s in c.get("also_sources") or [] if c.get("parts") or s == "ace_essential_fat"]   # what a combined result, or the 'lean' line, rests on
                 tile = Tile(row.key, row.group, row.title, light, c["value_text"], row.what_it_is, [c["sentence"]], head, text, do, row.book, src + row.sources,
-                            shown, row.priority, row.order, bar_html(c), [], (row.text["low"]["headline"] if low else ""), row.hash)
+                            shown, row.priority, row.order, bar_html(c), c.get("parts") or [],
+                            ("Very low" if very_low else row.text["low"]["headline"] if low else c.get("status_text", "") if c.get("parts") else ""), row.hash)
         elif row.rule == "composite":
             members = [comps[m] for m in row.members if m in comps and m not in exclude]
             if members:
@@ -879,7 +883,7 @@ def summarize(tiles: list, S: dict) -> dict:
         lead = fmt_pair(S["no_green"], n, green=g, n=n) if g == 0 else fmt_pair(S["mixed_lead"], g, green=g, n=n)
         headline = " ".join([lead] + ([fmt_pair(S["amber_clause"], a)] if a else []) + ([fmt_pair(S["red_clause"], r)] if r else []))
     todo = sorted([t for t in lit if t.light != GREEN], key=lambda t: (-SEVERITY[t.light], t.priority, t.order))[:3]
-    return {"headline": headline, "green": g, "amber": a, "red": r, "n": n,
+    return {"headline": headline, "green": g, "amber": a, "red": r, "n": n, BLUE: sum(1 for t in tiles if t.light == BLUE),   # lean: shown, not counted
             "priorities": [{"key": t.key, "title": t.title, "light": t.light, "do": t.do} for t in todo]}
 
 
@@ -971,7 +975,7 @@ FONTS_URL = ("https://fonts.googleapis.com/css2?family=Herr+Von+Muellerhoff&fami
 CSS = """
 :root{--primary:#2F3130;--secondary:#3D7F88;--charcoal:#4D4F4E;--teal-light:#8CC6CC;--teal-pale:#A9D7DB;--mint:#E4F1F2;--sand:#F4F4F2;
 --bg:#FBFBFA;--card:#ffffff;--text:#3F4140;--muted:#5E615F;--border:#E2E4E3;
---green:#15803d;--amber:#b45309;--red:#b91c1c;--grey:#475569;--green-bg:#f0fdf4;--amber-bg:#fffbeb;--red-bg:#fef2f2;--grey-bg:#f1f5f9;}
+--green:#15803d;--amber:#b45309;--red:#b91c1c;--grey:#475569;--green-bg:#f0fdf4;--amber-bg:#fffbeb;--red-bg:#fef2f2;--grey-bg:#f1f5f9;--blue:#1d6fa5;--blue-bg:#eaf4fb;}
 *{box-sizing:border-box}
 body{font-family:'Lato',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;margin:0;padding:16px;}
 .report{max-width:950px;margin:0 auto;background:var(--card);border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.05);overflow:hidden;border:1px solid var(--border);}
@@ -991,7 +995,7 @@ h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600}
 .summary{background:linear-gradient(to bottom right,var(--mint),#F7FBFB);border:2px solid var(--secondary);border-radius:12px;padding:20px;margin-bottom:20px}
 .summary h2{margin:0 0 10px;color:var(--primary);font-size:20px}.summary .headline{font-size:19px;font-weight:700;color:var(--primary);margin:0 0 12px;line-height:1.45}
 .pills{display:flex;flex-wrap:wrap;gap:8px}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-weight:700;font-size:14px;color:#fff}
-.pill.green{background:var(--green)}.pill.amber{background:var(--amber)}.pill.red{background:var(--red)}.pill.info{background:var(--grey)}
+.pill.green{background:var(--green)}.pill.amber{background:var(--amber)}.pill.red{background:var(--red)}.pill.info{background:var(--grey)}.pill.blue{background:var(--blue)}
 .priorities{background:#fff;border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-bottom:24px}
 .priorities h2{margin:0 0 4px;color:var(--primary);font-size:19px}.priorities .intro{margin:0 0 10px;color:var(--muted);font-size:14px}
 .priorities ol{margin:0;padding-left:0;list-style:none}.priorities li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border)}
@@ -999,18 +1003,18 @@ h2,h3{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600}
 .group h2{color:var(--primary);font-size:22px;margin:26px 0 10px;border-bottom:3px solid var(--secondary);padding-bottom:4px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start}
 .tile{border:1px solid var(--border);border-left:6px solid var(--grey);border-radius:10px;background:#fff;overflow:hidden}
-.tile.green{border-left-color:var(--green)}.tile.amber{border-left-color:var(--amber)}.tile.red{border-left-color:var(--red)}
+.tile.green{border-left-color:var(--green)}.tile.amber{border-left-color:var(--amber)}.tile.red{border-left-color:var(--red)}.tile.blue{border-left-color:var(--blue)}
 .tile summary{list-style:none;cursor:pointer;display:flex;gap:12px;align-items:center;padding:12px 14px;flex-wrap:wrap}
 .tile summary::-webkit-details-marker{display:none}
 .tile summary::after{content:"\\25BE";margin-left:auto;color:var(--muted);font-size:14px}.tile[open] summary::after{content:"\\25B4"}
 .dot{flex:none;display:inline-flex;width:34px;height:34px;border-radius:50%;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:17px;background:var(--grey)}
-.dot.small{width:26px;height:26px;font-size:14px}.dot.green{background:var(--green)}.dot.amber{background:var(--amber)}.dot.red{background:var(--red)}
+.dot.small{width:26px;height:26px;font-size:14px}.dot.green{background:var(--green)}.dot.amber{background:var(--amber)}.dot.red{background:var(--red)}.dot.blue{background:var(--blue)}
 .main{flex:1;min-width:150px}.title{display:block;font-weight:700;color:var(--primary);font-size:16px}.what{display:block;color:var(--muted);font-size:13px;line-height:1.4}
 .side{display:flex;flex-direction:column;align-items:flex-end;gap:3px}.val{font-weight:800;font-size:17px;color:var(--text)}
 .chip{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12.5px;font-weight:700}
-.chip.green{background:var(--green-bg);color:#166534}.chip.amber{background:var(--amber-bg);color:#92400e}.chip.red{background:var(--red-bg);color:#991b1b}.chip.info{background:var(--grey-bg);color:#334155}
+.chip.green{background:var(--green-bg);color:#166534}.chip.amber{background:var(--amber-bg);color:#92400e}.chip.red{background:var(--red-bg);color:#991b1b}.chip.info{background:var(--grey-bg);color:#334155}.chip.blue{background:var(--blue-bg);color:#0c4a6e}
 .body{padding:2px 16px 14px 16px;border-top:1px solid var(--border)}.body p{margin:8px 0}
-.facts{color:var(--text)}.headline{font-weight:800;margin-top:10px}.headline.green{color:var(--green)}.headline.amber{color:var(--amber)}.headline.red{color:var(--red)}.headline.info{color:var(--grey)}
+.facts{color:var(--text)}.headline{font-weight:800;margin-top:10px}.headline.green{color:var(--green)}.headline.amber{color:var(--amber)}.headline.red{color:var(--red)}.headline.info{color:var(--grey)}.headline.blue{color:var(--blue)}
 .parts{list-style:none;margin:8px 0;padding:0}.parts li{display:flex;gap:8px;align-items:center;margin:5px 0;font-size:14.5px}
 .book{color:var(--muted);font-size:13px}.draft-badge{display:inline-block;background:var(--red);color:#fff;font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;margin-top:8px}
 .how{margin-top:28px;padding:16px 18px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;font-size:14px;color:#334155}.how h2{margin:0 0 8px;font-size:17px;color:var(--primary)}.how p{margin:0 0 8px}
@@ -1110,9 +1114,9 @@ def render_report(meta: dict, tiles: list, library: Library, note: str = "", not
         names = ", ".join(sorted({t.title for t in drafts} | {h["title"] for h in (hidden or [])}))
         banner = (f'<div class="draft-banner">PREVIEW ONLY. These results are drafts and will not be shown to the participant until they are approved '
                   f'(approve them in the dashboard section of the clinician screen): {esc(names)}.</div>' if drafts else "")
-    pills = "".join(f'<span class="pill {lt}">{_dot(lt, True)} {summary[lt]} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED) if summary[lt])
+    pills = "".join(f'<span class="pill {lt}">{_dot(lt, True)} {summary[lt]} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED, BLUE) if summary[lt])
     head = (f'<div class="summary"><h2>{esc(S.get("page_title", ""))}</h2><p class="headline">{esc(summary["headline"])}</p><div class="pills">{pills}</div>'
-            f'<p class="legend">' + "".join(f'<span>{_dot(lt, True)} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED, GREY)) + f'</p></div>') if summary["n"] else ""
+            f'<p class="legend">' + "".join(f'<span>{_dot(lt, True)} {esc(_words(S, lt))}</span>' for lt in (GREEN, AMBER, RED) + ((BLUE,) if summary[BLUE] else ()) + (GREY,)) + f'</p></div>') if summary["n"] else ""
     if summary["n"]:
         if summary["priorities"]:
             items = "".join(f'<li>{_dot(p["light"], True)}<span><b>{esc(p["title"])}</b>: {esc(p["do"])}</span></li>' for p in summary["priorities"])
