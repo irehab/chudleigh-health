@@ -3435,7 +3435,8 @@ REPORT_DRAFTS = "report_drafts"
 DRAFT_FS_FILE_MAX = 900 * 1024      # without file storage (local testing only), a PDF up to this size is kept in the database instead
 # the boxes on the screen a draft carries, and the names they are saved under
 DRAFT_META = {"p_name": "name", "p_age": "age", "p_sex": "sex", "p_height": "height", "p_bm": "bm", "p_email": "email",
-              "cmp_note": "note", "cmp_note_by": "note_by", "cmp_interpretation": "interpretation", "cmp_meaning": "meaning"}
+              "cmp_note": "note", "cmp_note_by": "note_by", "cmp_interpretation": "interpretation", "cmp_meaning": "meaning",
+              "draft_from_scan": "from_scan"}
 
 
 def _draft_file_put(draft_id: str, uid: str, data: bytes) -> str:
@@ -3598,8 +3599,11 @@ def _clear_report_screen():
     reset_measurement_inputs()
     for k in [k for k in st.session_state.keys() if isinstance(k, str) and k.startswith(("cmp_link::", "rb_csv"))]:
         del st.session_state[k]
-    for k in ("draft_id", "draft_removed", "p_name", "p_email", "p_bm", "p_date"):
+    for k in ("draft_id", "draft_removed", "draft_from_scan"):
         st.session_state.pop(k, None)
+    # forgetting a box is not enough: the screen keeps showing what was typed, so set each one back to empty
+    st.session_state.update({"p_name": "", "p_email": "", "p_bm": "", "p_age": None, "p_height": None, "p_sex": "Not stated", "p_date": datetime.date.today(),
+                             "cmp_note": "", "cmp_note_by": "", "cmp_interpretation": "", "cmp_meaning": ""})
 
 
 def _draft_start():
@@ -3640,11 +3644,13 @@ def _draft_from_published(key: str, scan_id: str):
                           "height": scan.get("height_cm"), "bm": scan.get("body_mass_height"), "date": scan.get("assessment_date") or scan_id,
                           "note": scan.get("clinician_note"), "note_by": scan.get("clinician_note_by"), "interpretation": scan.get("clinical_interpretation")})
     st.session_state.participant_tests = [{**t, "uid": t.get("uid") or report_drafts.new_uid()} for t in strip_pdf_payloads(scan["tests"])]
+    st.session_state["draft_from_scan"] = f"{key}|{scan_id}"
     audit("report_draft_from_published", key, scan_date=scan_id)
     _draft_start()
     if st.session_state.get("draft_id"):
         st.session_state["draft_notice"] = (f"Draft started from the report of {friendly_date(scan_id)}, with {len(st.session_state.participant_tests)} tests. "
-                                            "The device PDFs are not copied. Preview it below; publishing it replaces the report for that date.")
+                                            "Preview it below. Publishing it replaces the report for that date; the device reports already shared "
+                                            "with the participant are kept, unless you add a new one for the same test.")
 
 
 def _draft_open(draft_id: str):
@@ -4567,6 +4573,19 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             if shared_tests:
                 files_ok = st.checkbox("I have checked that every report ticked above belongs to this participant, and I am happy for them to see it.", key="chk_files_ok")
         st.divider()
+    # a draft started from a published report keeps that report's device PDFs when it is published again for the same date,
+    # except for a test given a new PDF above
+    carried_files = []
+    from_scan = st.session_state.get("draft_from_scan")
+    if from_scan and db and record_id and from_scan == f"{record_id}|{assessment_date}":
+        try:
+            prior = db.collection(REPORTS).document(record_id).collection("scans").document(str(assessment_date)).get()
+            new_types = {t["type"] for t in shared_tests}
+            carried_files = [f for f in ((prior.to_dict() or {}).get("shared_files") or []) if f.get("object") and f.get("label") not in new_types] if prior.exists else []
+        except Exception:
+            log.exception("Could not read the published report's shared files")
+        if carried_files:
+            st.caption("📎 Kept from the published report for the participant to open: " + ", ".join(f.get("label") or "report" for f in carried_files) + ".")
 
     # --- REVIEW, APPROVE & PUBLISH ---
     st.markdown("#### ✅ Review & Approve")
@@ -4575,7 +4594,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
             preview_html, _ = build_report(
                 participant_name, age_gender, assessment_date, body_mass_height,
                 st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, preview=True, exclude=excluded,
-                files_shared=bool(shared_tests),
+                files_shared=bool(shared_tests or carried_files),
             )
             components.html(preview_html, height=700, scrolling=True)
         else:
@@ -4627,7 +4646,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 final_html_output, safe = build_report(
                     participant_name, age_gender, assessment_date, body_mass_height,
                     st.session_state.participant_tests, st.session_state, comparisons, report_note, report_note_by, exclude=excluded,
-                    files_shared=bool(shared_tests),
+                    files_shared=bool(shared_tests or carried_files),
                 )
                 note_shown = bool(dash_tiles) if REPORT_MODE == "dashboard" else compare_page_shown(comparisons)
 
@@ -4699,7 +4718,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                             name = shared_file_upload(data)
                             uploaded.append({"file_id": name[:-4], "object": name, "label": t["type"], "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                                              "shared_by": approver.strip(), "original_name": t.get("pdf_filename") or ""})
-                        scan_record["shared_files"] = uploaded
+                        scan_record["shared_files"] = uploaded + carried_files
                         profile_ref.set(profile_record, merge=True)
                         scan_ref.set(scan_record)
                     except Exception:
@@ -4712,7 +4731,7 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                     clear_participant_caches()
                     remember_participant(who_key, target_id)
                     notify_results_ready(target_id)
-                    kept = {f["object"] for f in uploaded}
+                    kept = {f["object"] for f in uploaded + carried_files}
                     replaced = 0
                     for f in old_files:                          # publishing again for the same date replaces the earlier files
                         if f["object"] not in kept:
