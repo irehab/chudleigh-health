@@ -35,7 +35,9 @@ SUMMARY_FILE = os.path.join(HERE, "summary.csv")
 GREEN, AMBER, RED, GREY, BLUE = "green", "amber", "red", "info", "blue"
 SEVERITY = {GREEN: 0, GREY: 0, BLUE: 0, AMBER: 1, RED: 2}
 SYMBOL = {GREEN: "\u2713", AMBER: "\u25b2", RED: "!", GREY: "i", BLUE: "\u25c6"}   # a tick, a triangle, an exclamation mark, an i, a diamond: never colour alone
-DEFAULT_WORDS = {BLUE: "Lower than usual, healthy"}       # blue: below the usual range, but not a concern (e.g. lean body fat)
+DEFAULT_WORDS = {BLUE: "Lower than usual, healthy"}       # blue: below the usual range, but not a concern (e.g. lean body fat, a fit person's pulse)
+OWN_VERY_LOW_WORDS = {"fat_pct", "pulse_avg", "ecg_hr"}  # results whose 'low' wording is the calm one, so a very low result uses the engine's own words
+VERY_LOW_DO = "Talk it through with your clinician at your next visit, or sooner if you feel unwell."
 RULES = ("engine", "range", "info", "composite", "limbs", "zone", "parts", "fp_balance", "spiro")
 # rule 'spiro': the spirometer's own z-scores for FVC, FEV1 and FEV1/FVC, each given a light from the row's ranges (ERS/ATS 2022: -1.645 or above
 # is within the expected range). A caution is added when the test quality grades are below C.
@@ -787,12 +789,12 @@ def build_tiles(tests: list, comparisons: list, library: Library, include_drafts
             if c:
                 light = engine_light(c)
                 low = c["status"] == BELOW and bool(row.text["low"]["text"])
-                very_low = low and light == RED and row.key == "fat_pct"     # under essential fat: the engine's own careful words, not the 'lean' ones
+                very_low = low and light == RED and row.key in OWN_VERY_LOW_WORDS   # very low: the engine's own careful words, not the calm 'low' ones
                 if low and light == RED:
                     light = AMBER                                       # lower than expected is 'worth a mention', not 'focus first'
-                head, text, do = (c["headline"], c["meaning"], row.text["low"]["do"]) if very_low else _pick(row, light, c["status"])
+                head, text, do = (c["headline"], c["meaning"], VERY_LOW_DO) if very_low else _pick(row, light, c["status"])
                 src = [c["source"]] if c.get("source") else []          # only the table the range came from; other sources are named in the row's 'sources' column
-                src += [s for s in c.get("also_sources") or [] if c.get("parts") or s == "ace_essential_fat"]   # what a combined result, or the 'lean' line, rests on
+                src += [s for s in c.get("also_sources") or [] if c.get("parts") or s in ("ace_essential_fat", "athlete_ecg_2017")]   # what a combined result, or a 'low' line, rests on
                 tile = Tile(row.key, row.group, row.title, light, c["value_text"], row.what_it_is, [c["sentence"]], head, text, do, row.book, src + row.sources,
                             shown, row.priority, row.order, bar_html(c), c.get("parts") or [],
                             ("Very low" if very_low else row.text["low"]["headline"] if low else c.get("status_text", "") if c.get("parts") else ""), row.hash)
@@ -884,7 +886,7 @@ def summarize(tiles: list, S: dict) -> dict:
         headline = " ".join([lead] + ([fmt_pair(S["amber_clause"], a)] if a else []) + ([fmt_pair(S["red_clause"], r)] if r else []))
     todo = sorted([t for t in lit if t.light != GREEN], key=lambda t: (-SEVERITY[t.light], t.priority, t.order))[:3]
     return {"headline": headline, "green": g, "amber": a, "red": r, "n": n, BLUE: sum(1 for t in tiles if t.light == BLUE),   # lean: shown, not counted
-            "priorities": [{"key": t.key, "title": t.title, "light": t.light, "do": t.do} for t in todo]}
+            "priorities": [{"key": t.key, "title": t.title, "light": t.light, "do": t.do, "very_low": t.words == "Very low"} for t in todo]}
 
 
 # ------------------------------------------------------------------------------------------------------------------------ what this all means
@@ -892,15 +894,16 @@ def summarize(tiles: list, S: dict) -> dict:
 # work, then something good to finish. The clinician can edit it before publishing. Any phrase can be replaced from summary.csv with the same key.
 MEANING_HEADING = "What this all means"
 MEANING_AREAS = {"Fitness": "fitness", "Strength": "grip strength", "Your lungs (spirometry)": "lungs", "Your heart (ECG)": "heart",
-                 "Your longevity age": "longevity age", "Oxygen and pulse": "blood oxygen and pulse", "Body composition": "body composition",
+                 "Your longevity age": "longevity age", "Oxygen and pulse": "blood oxygen readings", "Body composition": "body composition",
                  "Skin ageing": "skin age", "Strength and balance (force plates)": "force plate tests"}
 MEANING_WORK = {"fat_pct": "your body fat", "bmi": "your BMI", "visceral_fat": "the fat stored around your organs", "limb_balance": "the muscle balance between your left and right sides",
                 "leg_score": "the muscle in your legs", "phase_angle": "your muscle quality (phase angle)", "phase_angle_limbs": "the muscle quality in your arms and legs",
                 "muscle_mass": "your muscle mass", "asm_index": "the muscle in your arms and legs", "metabolic_age": "your metabolic age", "age_level": "your skin AGE level",
                 "age_bodyage": "your skin age estimate", "ecg_hr": "your heart rate", "ecg_timings": "your heart timings", "spo2_avg": "your blood oxygen",
-                "pulse_avg": "your resting pulse", "fp_balance": "the balance between your left and right sides", "fp_strength": "your leg strength for your age",
+                "pulse_avg": "your resting pulse", "fp_balance": "the balance between your left and right sides",
+                "sides_both": "the balance between your left and right sides, both in the work each side does and in the muscle each side carries","fp_strength": "your leg strength for your age",
                 "vo2max_est": "your fitness", "longevity_age": "your longevity age", "grip": "your grip strength", "lung_function": "your breathing test"}
-TRAINABLE = {"fat_pct", "bmi", "visceral_fat", "limb_balance", "leg_score", "phase_angle", "phase_angle_limbs", "muscle_mass", "asm_index", "metabolic_age",
+TRAINABLE = {"sides_both", "fat_pct", "bmi", "visceral_fat", "limb_balance", "leg_score", "phase_angle", "phase_angle_limbs", "muscle_mass", "asm_index", "metabolic_age",
              "fp_balance", "fp_strength", "vo2max_est", "grip", "pulse_avg"}     # results that usually move with exercise, sleep and food; the rest are for the clinician to talk through
 MEANING_TEXT = {
     "open_strong": "Overall, this is a strong set of results.",
@@ -949,15 +952,18 @@ def meaning_paragraph(tiles: list, S: dict, links: list | None = None) -> str:
     if partial:
         out.append((W["partial"] if strong else W["partial_only"]).format(areas=_and_list(partial)))
     todo = summary["priorities"]
+    if len(todo) > 1 and {todo[0]["key"], todo[1]["key"]} == {"fp_balance", "limb_balance"}:      # both about left and right: say it once
+        todo = [{**todo[0], "key": "sides_both"}] + todo[2:]
     work = lambda p: S.get(f"meaning_work::{p['key']}") or MEANING_WORK.get(p["key"]) or "your " + p["title"].lower()
     if todo:
-        first = W["work_talk"] if todo[0]["key"] not in TRAINABLE else W["work_red"] if todo[0]["light"] == RED else W["work_amber"]
+        trainable = lambda p: p["key"] in TRAINABLE and not p.get("very_low")      # a very low result is talked through, not trained
+        first = W["work_talk"] if not trainable(todo[0]) else W["work_red"] if todo[0]["light"] == RED else W["work_amber"]
         out.append(first.format(what=work(todo[0])))
         if len(todo) > 1:
             out.append(W["work_next"].format(what=work(todo[1])))
         if links:
             out.append(W["links"])
-        if all(p["key"] in TRAINABLE for p in todo[:2]):
+        if all(trainable(p) for p in todo[:2]):
             out.append(W["close_train"].format(area=strong[0]) if strong else W["close_train_plain"])
         else:
             out.append(W["close_talk"])

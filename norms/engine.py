@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 from . import data
 
-NORMS_VERSION = "2026-10-28.1"
+NORMS_VERSION = "2026-10-28.2"
 
 # statuses
 WITHIN, BELOW, ABOVE, WELL_ABOVE, REPORTED, NO_REFERENCE = "within", "below", "above", "well_above", "reported", "no_reference"
@@ -315,11 +315,16 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
             headline, theme = "Worth working on", WORK_ON
             meaning = (f"A higher resting pulse can follow caffeine, poor sleep, stress, illness or being less fit. {_PULSE_LINK} "
                        "It is worth working on, and worth mentioning to your clinician if it stays high.")
+        elif v >= data.LOW_PULSE_LINE:
+            headline, theme = "Lower than usual", DOING_WELL      # below the range but not very low: common in fit people, shown calmly
+            meaning = "A lower resting pulse is common in people who exercise regularly. If you ever feel dizzy, faint or breathless, speak to your clinician or GP."
         else:
-            headline, theme = "Worth a mention to your clinician", DISCUSS
-            meaning = "A low resting pulse is common in people who exercise regularly. If you also feel dizzy, faint or breathless, speak to your clinician or GP."
+            headline, theme = "Worth talking to your clinician", DISCUSS
+            meaning = (f"Your resting pulse was under {data.LOW_PULSE_LINE} beats per minute. That can be normal in very fit people, "
+                       "but please talk it through with your clinician, especially if you ever feel dizzy, faint or breathless.")
         return Comparison(key=key, label=label, assessment=a, status=status, source="nhanes_pulse", value=v, value_text=f"{_fmt(v)} bpm",
-                          range_text=f"{lo} to {hi} bpm", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi)
+                          range_text=f"{lo} to {hi} bpm", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi,
+                          also_sources=["athlete_ecg_2017"] if status == BELOW else [])
 
     if key in _ECG_LABELS:
         label, unit_long, unit = _ECG_LABELS[key]
@@ -340,11 +345,15 @@ def _compare_one(key, m, age, sex, height_cm) -> Comparison:
         if status == WITHIN:
             headline, theme = "Within the range seen in healthy adults", DOING_WELL
             meaning = "Good news. Your clinician reads this together with the rest of your ECG."
+        elif key == "ecg_hr" and status == BELOW and v >= data.LOW_PULSE_LINE:
+            headline, theme = "Lower than usual", DOING_WELL      # a slow heart rate that is common in fit people, shown calmly
+            meaning = "A lower heart rate is common in people who exercise regularly. Your clinician reads this together with the rest of your ECG."
         else:
             headline, theme = "Worth discussing with your clinician", DISCUSS
             meaning = _CAUTION
         return Comparison(key=key, label=label, assessment=a, status=status, source="rijnbeek_ecg", value=v, value_text=f"{_fmt(v)} {unit}",
-                          range_text=f"{lo} to {hi} {unit}", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi)
+                          range_text=f"{lo} to {hi} {unit}", group=who, headline=headline, sentence=sentence, meaning=meaning, position=pos, theme=theme, low=lo, high=hi,
+                          also_sources=["athlete_ecg_2017"] if key == "ecg_hr" and status == BELOW else [])
 
     if key == "fat_pct":
         label, unit = "Body fat", "%"

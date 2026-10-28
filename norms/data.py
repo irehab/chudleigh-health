@@ -170,6 +170,15 @@ SOURCES = {
         "note": ("Chudleigh Health Hub uses the top of the essential range (5% for men, 13% for women) as its line for very low body fat. "
                  "Between that line and the healthy range is shown as lean, not as something to work on: the clinic's own working guide."),
     },
+    "athlete_ecg_2017": {
+        "short": "A low heart rate in people who train (international athlete ECG guidance, 2017)",
+        "citation": ("Sharma S, Drezner JA, Baggish A, et al. International recommendations for electrocardiographic interpretation in athletes. "
+                     "Journal of the American College of Cardiology 2017;69(8):1057-1075."),
+        "url": "https://doi.org/10.1016/j.jacc.2017.01.015",
+        "population": "An international expert consensus on ECGs in athletes.",
+        "note": ("It treats a slow heart rate of 30 beats per minute or more as a normal result of training. Chudleigh Health Hub uses a more cautious "
+                 "line of 40: below the usual range but at or above 40 is shown as lower than usual, and under 40 as worth talking through."),
+    },
     "clinic_age_profile": {
         "short": "Longevity age: the age your results match",
         "citation": ("Chudleigh Health Hub turns each result into the age at which an average person of your sex has that result, using the published "
@@ -275,6 +284,9 @@ FAT = {  # (at BMI 18.5, at BMI 25, at BMI 30)
     "female": {"20 to 39": (21, 33, 39), "40 to 59": (23, 34, 40), "60 to 79": (24, 36, 42)},
     "male": {"20 to 39": (8, 20, 25), "40 to 59": (11, 22, 28), "60 to 79": (13, 25, 30)},
 }
+
+# ---- Low pulse: below the usual range but at or above this (beats per minute) is shown calmly as 'lower than usual'; under it is worth discussing
+LOW_PULSE_LINE = 40
 
 # ---- Very low body fat: the top of the American Council on Exercise's essential fat range. Below the healthy range but at or above this is 'lean'.
 ESSENTIAL_FAT_LINE = {"male": 5.0, "female": 13.0}
