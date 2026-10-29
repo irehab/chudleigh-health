@@ -186,7 +186,7 @@ MAX_FIRESTORE_DOC_BYTES = 950_000
 PDF_READY_TIMEOUT_SECONDS = 120
 
 REPORTS = "longevity_reports"
-TIERS = ("30", "60", "90")
+TIERS = ("60",)                  # the plans offered (the 30- and 90-day plans were withdrawn 29 Oct 2026; their details stay below for past requests)
 # Plans are written personally by a clinician after payment (see "Plan requests" in the clinician dashboard).
 TIER_INFO = {
     "30": {
@@ -243,7 +243,7 @@ PLAN_START = "<!-- PLAN_SECTION_START -->"
 PLAN_END = "<!-- PLAN_SECTION_END -->"
 LEGACY_PLAN_NOTE = (
     '<div class="interpretation-text"><p>Action plans are now written personally for you by a clinician. '
-    'Request one in the "Your bespoke plans" section of your portal, above this report.</p></div>'
+    'Request one in the "Your bespoke plan" section of your portal, above this report.</p></div>'
 )
 
 # --- PAGE CONFIGURATION ---
@@ -1658,7 +1658,7 @@ def handle_stripe_return(session_id: str):
     metadata = stripe_field(cs, "metadata")
     key = stripe_field(metadata, "patient_key")
     tier = stripe_field(metadata, "tier")
-    if tier not in TIERS or not key or patient_key(key) != key:
+    if tier not in TIER_INFO or not key or patient_key(key) != key:
         log.warning("Paid Stripe session without valid metadata: %s", session_id)
         st.error(f"We couldn't match this payment to a plan. Please contact Chudleigh Health Hub quoting: {session_id[-12:]}")
         return
@@ -1708,7 +1708,7 @@ def reconcile_paid_checkouts(only_key: str = None) -> int:
             md = stripe_field(cs, "metadata")
             key, tier = stripe_field(md, "patient_key"), stripe_field(md, "tier")
             if (stripe_field(cs, "payment_status") != "paid" or stripe_field(md, "kind") != "bespoke_plan"
-                    or tier not in TIERS or not key or patient_key(key) != key or (only_key and key != only_key)):
+                    or tier not in TIER_INFO or not key or patient_key(key) != key or (only_key and key != only_key)):
                 continue
             session_id = stripe_field(cs, "id")
             if not _CHECKOUT_ID_RE.fullmatch(session_id or "") or db.collection(PLAN_REQUESTS).document(session_id).get().exists:
@@ -1803,7 +1803,7 @@ def _render_open_request(key: str, r: dict):
 
 def render_portal_plans(key: str, client_data: dict):
     """The 'Your bespoke plans' section of the patient portal."""
-    st.subheader("🧭 Your bespoke plans")
+    st.subheader("🧭 Your bespoke plan")
     st.caption(f"Each plan is written personally for you by a clinician and delivered here within {PLAN_TURNAROUND_DAYS} working days of payment.")
     try:
         requests = plan_requests_for(key)
@@ -4285,9 +4285,9 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
     # ==========================================
     # BESPOKE PLAN PRICES (the plans themselves are requested by participants and written by you: see "Plan requests" below)
     # ==========================================
-    st.subheader("💷 Bespoke plan prices")
+    st.subheader("💷 Bespoke plan price")
     st.markdown(
-        f"Participants can request a 30-, 60- or 90-day bespoke plan from their portal at these prices. You write each plan yourself "
+        f"Participants can request a 60-day bespoke plan from their portal at this price. You write each plan yourself "
         f"after payment, within {PLAN_TURNAROUND_DAYS} working days (see **Plan requests** at the bottom of this page)."
     )
 
