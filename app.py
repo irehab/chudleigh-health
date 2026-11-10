@@ -3856,8 +3856,8 @@ CLINICIAN_VIEW = "Clinician Dashboard"
 if APP_ROLE == "patient" or (APP_ROLE == "all" and is_patient_link):
     # In the patient role nothing in the URL or browser can reach the clinician dashboard: it is simply never run.
     app_mode = PATIENT_VIEW
-    st.sidebar.subheader("🔒 Client Portal Access")
-    st.sidebar.markdown("Chudleigh Health Hub Secure Patient Companion")
+    st.sidebar.subheader("🔒 Patient portal")
+    st.sidebar.markdown("Chudleigh Health Hub secure patient portal")
     st.sidebar.divider()
 elif APP_ROLE == "clinician":
     app_mode = CLINICIAN_VIEW
