@@ -99,6 +99,68 @@ def test_starter_template_only_uses_starter_blocks():
         dp.clean_block(b)
 
 
+TITLES = {"grip": "Grip strength", "vo2max_est": "Fitness (estimated VO2 max)", "visceral_fat": "Visceral fat", "fp_balance": "Left and right sides",
+          "muscle_mass": "Muscle mass", "fat_pct": "Body fat"}
+LIB = {k: {**v} for k, v in dp.STARTER_BLOCKS.items()}
+
+
+def test_detect_goals_from_their_words():
+    assert dp.detect_goals("I want to get stronger and lose a bit of weight before my daughter's wedding") == ["strength", "weight"]
+    assert dp.detect_goals("Sleep better, less stress") == ["sleep"]
+    assert dp.detect_goals("") == []
+
+
+def test_score_block_counts_amber_red_and_goals():
+    score, why = dp.score_block(LIB["s-strength-a"], {"grip": "amber", "muscle_mass": "red", "fat_pct": "amber"}, {"strength"}, TITLES)
+    assert score == 2 + 3 + 2
+    assert why == ["Grip strength (amber)", "Muscle mass (red)", "Get stronger"]
+    assert dp.score_block(LIB["s-strength-a"], {"grip": "green"}, set(), TITLES)[0] == 0
+
+
+def test_heart_and_lung_results_are_never_targeted():
+    b = {"type": "move", "title": "x", "targets": ["ecg_hr", "lung_function"]}
+    assert dp.score_block(b, {"ecg_hr": "red", "lung_function": "amber"}, set(), TITLES)[0] == 0
+    assert dp.caution_results({"ecg_hr": "red", "grip": "red"}, TITLES) == ["Heart rate (ECG) (red)"]
+
+
+def test_build_plan_follows_results_and_keeps_the_rhythm():
+    lights = {"vo2max_est": "red", "visceral_fat": "amber", "grip": "green"}
+    plan, notes = dp.build_plan(dp.STARTER_TEMPLATE, LIB, lights, {"fitness"}, TITLES)
+    base = dp.STARTER_TEMPLATE["phases"]
+    for ph, bph in zip(plan["phases"], base):
+        assert [d for d in dp.DAYS if ph["week"][d]] == [d for d in dp.DAYS if bph["week"][d]]   # same training days
+    first = plan["phases"][0]
+    assert "s-intervals" in first["week"].values() and first["week"]["Tue"] == "s-zone2"   # best hard and easy fits for a red VO2 max
+    assert all("s-intervals" in ph["week"].values() for ph in plan["phases"])
+    for ph, bph in zip(plan["phases"], base):                                          # hard days stay hard, easy days easy
+        assert all(dp.intensity(LIB.get(ph["week"][d])) == dp.intensity(LIB.get(bph["week"][d])) for d in dp.DAYS if bph["week"][d])
+    assert len(first["eat"]) == 2 and len(first["habits"]) == 1                      # few things to start with
+    assert first["eat"][0] in ("s-fibre", "s-sugar") and first["habits"] == ["s-walk-lunch"]
+    assert len(plan["phases"][2]["eat"]) == 4 and len(plan["phases"][2]["habits"]) == 3
+    assert len(set(plan["phases"][2]["week"].values()) - {""}) > len(set(first["week"].values()) - {""})   # more variety as it goes on
+    assert plan["lights"] == {"vo2max_est": "red", "visceral_fat": "amber"}
+    assert any(n.startswith("Zone 2 walk: ") and "Fitness (estimated VO2 max) (red)" in n for n in notes)
+
+
+def test_build_plan_with_nothing_to_go_on_is_the_base_plan():
+    plan, notes = dp.build_plan(dp.STARTER_TEMPLATE, LIB, {"grip": "green"}, set(), TITLES)
+    assert plan["phases"][0]["week"] == dp.STARTER_TEMPLATE["phases"][0]["week"]
+    assert "base plan" in notes[0]
+
+
+def test_reason_shown_to_the_patient():
+    plan = {"lights": {"grip": "amber"}, "titles": {"grip": "Grip strength"}}
+    assert dp.block_reason_for_patient(LIB["s-strength-a"], plan) == "Grip strength (amber)"
+    assert dp.block_reason_for_patient(LIB["s-strength-a"], {}) == "Grip strength"     # untailored: the block's own label
+
+
+def test_measure_titles_leave_out_heart_and_lungs():
+    t = dp.measure_titles()
+    assert t.get("grip") == "Grip strength" and "ecg_hr" not in t and "lung_function" not in t
+    for b in dp.STARTER_BLOCKS.values():
+        assert all(k in t for k in b.get("targets") or []), b["title"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

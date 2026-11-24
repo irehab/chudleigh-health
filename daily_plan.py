@@ -6,6 +6,11 @@ rhythm phase by phase, and gives a patient the plan with a start date. Each day 
 phase, how consistent they have been, and a two-tap check-in. A pain flag switches the day to the busy version and shows
 up on the clinician's "Who needs you" list. No AI writes any of it.
 
+Tailoring: each block can name the dashboard results it targets and the goals it suits. When the clinician picks a
+patient, build_plan() drafts their plan from a base plan's weekly rhythm, choosing the blocks that target their amber and
+red results and match their goals (read from their plan questionnaire). The clinician checks and edits the draft; the
+patient sees nothing until the clinician gives it to them. The rules are plain and shown with every choice.
+
 Stored in Firestore:
   daily_plan_library/{block_id}     one document per block
   daily_plan_templates/{plan_id}    one document per plan: name, length, retest days and phases
@@ -14,21 +19,52 @@ Stored in Firestore:
 
 The functions at the top are plain Python (tested in tests/test_daily_plan.py); the screens below them need Streamlit.
 """
+import csv
 import datetime
+import hashlib
+import os
 import re
 import secrets
 
+PLAN_REQUESTS = "plan_requests"
 LIBRARY = "daily_plan_library"
 TEMPLATES = "daily_plan_templates"
 LOG = "daily_log"
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 BLOCK_TYPES = {"move": "Movement", "eat": "Eating", "habit": "Habit"}
+INTENSITIES = {"hard": "Hard (strength or intervals: needs a recovery day after)", "easy": "Easy (walking, mobility, balance: fine any day)"}
 PAIN_CHOICES = {"none": "None", "mild": "Mild", "flag": "Tell my clinician"}
 QUIET_DAYS = 3          # this many days without a tick puts a patient on the "Who needs you" list
 PAIN_DAYS = 7           # a pain flag in this many days does too
 TITLE_MAX, TEXT_MAX, STEP_MAX, STEPS_MAX = 80, 600, 160, 15
 _ID_RE = re.compile(r"[a-z0-9-]{1,40}")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_KEY_RE = re.compile(r"[a-z0-9_]{1,40}")
+
+# Goals a block can suit. A patient's goals are read from their plan questionnaire by the words below (the clinician can change them).
+GOALS = {
+    "strength": "Get stronger",
+    "fitness": "Improve fitness and stamina",
+    "weight": "Lose body fat",
+    "mobility": "Move better, less stiffness",
+    "sleep": "Sleep, stress and energy",
+    "performance": "Sport and performance",
+    "longevity": "Healthy ageing",
+}
+GOAL_WORDS = {
+    "strength": ("strong", "strength", "muscle", "lift", "tone", "toning", "grip"),
+    "fitness": ("fit", "fitness", "stamina", "cardio", "endurance", "breath", "vo2", "walk further"),
+    "weight": ("weight", "body fat", "lose fat", "fat loss", "slim", "belly", "waist", "drop a size"),
+    "mobility": ("stiff", "mobil", "flexib", "move better", "moving better", "supple", "joint", "back pain", "posture"),
+    "sleep": ("sleep", "stress", "tired", "energy", "fatigue", "anxious", "burnout", "wind down"),
+    "performance": ("perform", "sport", "race", "marathon", "triathlon", "compete", "athlet", "1%", "personal best", "match"),
+    "longevity": ("longevity", "ageing", "aging", "age well", "live longer", "healthy", "healthier", "grandchildren", "independen"),
+}
+LIGHT_WEIGHT = {"red": 3, "amber": 2, "low": 2}      # how much a result counts towards choosing a block that targets it
+GOAL_WEIGHT = 2
+# Red or amber results here are for the clinician to look at before any exercise advice; blocks never target them.
+CAUTION_KEYS = {"ecg_hr", "ecg_timings", "spo2_avg", "lung_function"}
+EAT_MAX, HABIT_MAX = 4, 3
 
 
 # --- Plain logic ---------------------------------------------------------------------------------------------------------
@@ -73,6 +109,11 @@ def phase_for(template: dict, n: int) -> dict:
 def move_for_day(template: dict, n: int, d) -> str:
     """The block id of the day's priority session, or '' for a rest day."""
     return (phase_for(template, n).get("week") or {}).get(weekday(d), "") or ""
+
+
+def intensity(block) -> str:
+    """'hard' or 'easy'. Blocks saved before this field existed count as easy."""
+    return "hard" if (block or {}).get("intensity") == "hard" else "easy"
 
 
 def is_active(entry) -> bool:
@@ -165,7 +206,10 @@ def clean_block(data: dict) -> dict:
         "title": title,
         "full": clean_text(data.get("full"), TEXT_MAX),
         "busy": clean_text(data.get("busy"), TEXT_MAX) if kind == "move" else "",
-        "marker": clean_text(data.get("marker"), TITLE_MAX),
+        "intensity": intensity(data) if kind == "move" else "",
+        "marker": clean_text(data.get("marker"), TITLE_MAX * 3),
+        "targets": [k for k in dict.fromkeys(data.get("targets") or []) if _KEY_RE.fullmatch(str(k))][:12],
+        "goals": [g for g in dict.fromkeys(data.get("goals") or []) if g in GOALS],
         "why": clean_text(data.get("why"), TEXT_MAX),
         "steps": clean_lines(data.get("steps")) if kind == "move" else [],
         "busy_steps": clean_lines(data.get("busy_steps")) if kind == "move" else [],
@@ -200,33 +244,172 @@ def valid_id(value) -> bool:
     return bool(_ID_RE.fullmatch(str(value or "")))
 
 
+# --- Tailoring: drafting a patient's plan from their results and goals (plain rules, no AI) -------------------------------
+
+def measure_titles() -> dict:
+    """The dashboard results a block can target, {key: title}, from norms/measures.csv."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "norms", "measures.csv")
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            return {r["key"]: r["title"] for r in csv.DictReader(f) if r.get("key") and r["key"] not in CAUTION_KEYS}
+    except OSError:
+        return {}
+
+
+def detect_goals(text: str) -> list:
+    """The goals a patient's own words point to, by the words in GOAL_WORDS. The clinician can change the result."""
+    t = " " + re.sub(r"\s+", " ", str(text or "").lower()) + " "
+    return [g for g, words in GOAL_WORDS.items() if any(w in t for w in words)]
+
+
+def lights_from_dashboard(tiles) -> dict:
+    """{result key: light} from a saved report's dashboard tiles."""
+    return {t["key"]: t.get("light") for t in tiles or [] if isinstance(t, dict) and t.get("key")}
+
+
+def caution_results(lights: dict, titles: dict) -> list:
+    """Heart, oxygen and lung results that are amber or red: for the clinician to check before giving exercise advice."""
+    names = {"ecg_hr": "Heart rate (ECG)", "ecg_timings": "Heart electrical timings (ECG)", "spo2_avg": "Blood oxygen", "lung_function": "Lung function"}
+    return [f"{names.get(k, titles.get(k, k))} ({v})" for k, v in sorted(lights.items()) if k in CAUTION_KEYS and v in ("amber", "red")]
+
+
+def score_block(block: dict, lights: dict, goals, titles: dict):
+    """How well a block fits: results it targets that are amber or red, and goals it suits. Returns (score, reasons)."""
+    score, reasons = 0, []
+    for k in block.get("targets") or []:
+        light = lights.get(k)
+        if k in CAUTION_KEYS or light not in LIGHT_WEIGHT:
+            continue
+        score += LIGHT_WEIGHT[light]
+        reasons.append(f"{titles.get(k, k)} ({'lower than expected' if light == 'low' else light})")
+    for g in block.get("goals") or []:
+        if g in goals:
+            score += GOAL_WEIGHT
+            reasons.append(GOALS.get(g, g))
+    return score, reasons
+
+
+def build_plan(base: dict, library: dict, lights: dict, goals, titles: dict):
+    """A draft plan for one patient, built on a base plan's weekly rhythm. Returns (plan, notes).
+
+    For each phase the base plan's training days stay as they are, and so does which of them are hard and which easy. On
+    each, the session is the movement block of that effort that best fits the patient (most amber and red results
+    targeted, then goals), with more variety each phase, topped up from the base plan's own sessions. Eating principles and habits start few and grow
+    phase by phase (2 and 1 in the first phase, up to 4 and 3), best fit first, then the base plan's own. Where nothing
+    in the library fits, that part stays as the base plan has it.
+    """
+    goals = set(goals or [])
+    fit = {bid: score_block(b, lights, goals, titles) for bid, b in library.items()}
+
+    def ranked(kind):
+        ids = [bid for bid, b in library.items() if b.get("type") == kind and fit[bid][0] > 0]
+        return sorted(ids, key=lambda bid: (-fit[bid][0], library[bid].get("title", "")))
+
+    def first(ids, n):
+        return list(dict.fromkeys(i for i in ids if i in library))[:n]
+
+    moves, eats, habits = ranked("move"), ranked("eat"), ranked("habit")
+    phases, used = [], []
+    for i, ph in enumerate((base or {}).get("phases") or []):
+        week = dict(ph.get("week") or {})
+        slots = [d for d in DAYS if week.get(d)]
+        base_moves = [week[d] for d in slots]
+        new_week, picks = {d: week.get(d, "") for d in DAYS}, []
+        for effort in INTENSITIES:   # a hard day stays a hard day and an easy day an easy day, so recovery days stay where they were
+            group = [d for d in slots if intensity(library.get(week[d])) == effort]
+            fits = [b for b in moves if intensity(library[b]) == effort]
+            if not group:
+                continue
+            if not fits:   # nothing fits better: the base plan's own sessions
+                picks += [week[d] for d in group]
+                continue
+            in_base = [week[d] for d in group]
+            fits.sort(key=lambda b: (-fit[b][0], in_base.index(b) if b in in_base else len(in_base)))   # a tie goes to the base plan's own
+            chosen = first(fits + in_base, min(len(group), 2 + i))
+            # each chosen session the base plan already had keeps one of its days, the others take the days left, then they take turns
+            left = list(group)
+            for b in chosen:
+                d = next((d for d in left if week[d] == b), None)
+                if d:
+                    new_week[d] = b
+                    left.remove(d)
+            unplaced = [b for b in chosen if b not in [new_week[d] for d in group if d not in left]]
+            for j, d in enumerate(left):
+                new_week[d] = (unplaced + chosen)[j] if j < len(unplaced) else chosen[(j - len(unplaced)) % len(chosen)]
+            picks += chosen
+        eat = first(eats + list(ph.get("eat") or []), min(EAT_MAX, 2 + i)) if eats else first(ph.get("eat") or [], EAT_MAX)
+        hab = first(habits + list(ph.get("habits") or []), min(HABIT_MAX, 1 + i)) if habits else first(ph.get("habits") or [], HABIT_MAX)
+        phases.append({**ph, "week": new_week, "eat": eat, "habits": hab})
+        used += [b for b in picks + eat + hab if b not in used]
+    plan = {"name": (base or {}).get("name", "Plan"), "length": (base or {}).get("length", 60),
+            "retests": list((base or {}).get("retests") or []), "phases": phases, "tailored": True,
+            "lights": {k: v for k, v in lights.items() if v in LIGHT_WEIGHT and k not in CAUTION_KEYS},
+            "titles": {k: titles.get(k, k) for k, v in lights.items() if v in LIGHT_WEIGHT and k not in CAUTION_KEYS},
+            "goals": sorted(goals)}
+    notes = [f"{library[b].get('title', b)}: {', '.join(fit[b][1])}" for b in used if fit[b][0] > 0]
+    if not notes:
+        notes = ["Nothing in the library targets their amber or red results or matches their goals, so this is the base plan's own sessions."]
+    return plan, notes
+
+
+def block_reason_for_patient(block: dict, plan: dict) -> str:
+    """The results this block targets that were amber or red for this patient, for the 'why' line they see."""
+    lights, titles = (plan or {}).get("lights") or {}, (plan or {}).get("titles") or {}
+    hits = [f"{titles.get(k, k)} ({'lower than expected' if lights[k] == 'low' else lights[k]})" for k in block.get("targets") or [] if k in lights]
+    return ", ".join(hits) or block.get("marker", "")
+
+
 # Sample wording so the screens aren't empty on the first day. The clinician rewrites each block in their own words.
 STARTER_BLOCKS = {
-    "s-strength-a": {"type": "move", "title": "Strength A", "full": "25 min", "busy": "10 min", "marker": "Grip strength",
+    "s-strength-a": {"type": "move", "intensity": "hard", "title": "Strength A", "full": "25 min", "busy": "10 min", "marker": "Grip strength",
+                     "targets": ["grip", "muscle_mass", "asm_index", "fp_strength"], "goals": ["strength", "longevity"],
                      "why": "Loaded carries and hinges build grip and the muscles along the back of the body.",
                      "steps": ["Warm up: 2 min marching and arm swings", "Split squat 3 x 8 each leg", "Hip hinge with a weight 3 x 10",
                                "Farmer carry 4 x 30 m", "Dead hang 3 x 20 s"],
                      "busy_steps": ["Split squat 2 x 8 each leg", "Farmer carry 3 x 30 m"]},
-    "s-strength-b": {"type": "move", "title": "Strength B", "full": "25 min", "busy": "10 min", "marker": "Leg power",
+    "s-strength-b": {"type": "move", "intensity": "hard", "title": "Strength B", "full": "25 min", "busy": "10 min", "marker": "Leg power",
+                     "targets": ["fp_strength", "leg_score", "limb_balance", "muscle_mass"], "goals": ["strength", "performance"],
                      "why": "Step-ups and push work for leg power and upper-body strength.",
                      "steps": ["Warm up: 2 min easy steps", "Step-up 3 x 8 each leg", "Press-up (incline if needed) 3 x 8",
                                "Single-leg balance 3 x 30 s each", "Glute bridge 3 x 12"],
                      "busy_steps": ["Step-up 2 x 8 each leg", "Glute bridge 2 x 12"]},
-    "s-zone2": {"type": "move", "title": "Zone 2 walk", "full": "40 min", "busy": "15 min", "marker": "VO2 max",
+    "s-zone2": {"type": "move", "intensity": "easy", "title": "Zone 2 walk", "full": "40 min", "busy": "15 min", "marker": "VO2 max",
+                "targets": ["vo2max_est", "visceral_fat", "fat_pct", "pulse_avg", "metabolic_age"], "goals": ["fitness", "weight", "longevity"],
                 "why": "Steady walking where you can still talk builds the aerobic base behind VO2 max.",
                 "steps": ["Brisk walk at a pace where you can talk but not sing", "Hills are welcome; keep the effort steady"],
                 "busy_steps": ["15 min brisk walk, ideally after a meal"]},
-    "s-mobility": {"type": "move", "title": "Mobility flow", "full": "15 min", "busy": "5 min", "marker": "",
+    "s-mobility": {"type": "move", "intensity": "easy", "title": "Mobility flow", "full": "15 min", "busy": "5 min", "marker": "",
+                   "targets": [], "goals": ["mobility", "sleep"],
                    "why": "Keeps hips, spine and shoulders moving between strength days.",
                    "steps": ["Cat-cow x 10", "90/90 hip switches x 10", "Thoracic rotations x 8 each side", "Deep squat hold 3 x 30 s"],
                    "busy_steps": ["Deep squat hold 2 x 30 s", "Cat-cow x 10"]},
-    "s-protein": {"type": "eat", "title": "Protein at every meal", "full": "A palm-sized portion at breakfast, lunch and dinner", "marker": "Muscle mass"},
-    "s-colours": {"type": "eat", "title": "Two colours on the plate", "full": "Veg or fruit of two colours with lunch and dinner"},
-    "s-water": {"type": "eat", "title": "2 litres of water", "full": "Spread through the day, more on training days"},
-    "s-fibre": {"type": "eat", "title": "Add a fibre swap", "full": "Oats, beans, lentils or wholegrain in one meal"},
-    "s-walk-lunch": {"type": "habit", "title": "10 min walk after lunch", "full": "Straight after eating, before sitting back down"},
-    "s-screens": {"type": "habit", "title": "Screens off by 10pm", "full": "Phone on charge outside the bedroom"},
-    "s-daylight": {"type": "habit", "title": "Morning daylight", "full": "10 min outside before 10am"},
+    "s-balance": {"type": "move", "intensity": "easy", "title": "Balance and power", "full": "20 min", "busy": "8 min", "marker": "",
+                  "targets": ["fp_balance", "leg_score", "limb_balance"], "goals": ["performance", "longevity", "mobility"],
+                  "why": "Single-leg work and quick, springy movements keep you steady and powerful.",
+                  "steps": ["Single-leg stand, eyes open then closed, 3 x 30 s each", "Lateral step-down 3 x 8 each leg",
+                            "Pogo hops or fast heel raises 3 x 20", "Split-stance ball or bag throw 3 x 6 each side"],
+                  "busy_steps": ["Single-leg stand 2 x 30 s each", "Fast heel raises 2 x 20"]},
+    "s-intervals": {"type": "move", "intensity": "hard", "title": "Intervals", "full": "25 min", "busy": "12 min", "marker": "",
+                    "targets": ["vo2max_est", "metabolic_age"], "goals": ["fitness", "performance"],
+                    "why": "Short hard efforts with recovery push up the top end of your fitness.",
+                    "steps": ["10 min easy warm-up", "4 x 3 min hard (breathing hard, can say a few words), 3 min easy between", "5 min easy"],
+                    "busy_steps": ["5 min easy", "4 x 1 min hard, 1 min easy", "2 min easy"]},
+    "s-protein": {"type": "eat", "title": "Protein at every meal", "full": "A palm-sized portion at breakfast, lunch and dinner", "marker": "Muscle mass",
+                  "targets": ["muscle_mass", "asm_index", "grip", "fp_strength"], "goals": ["strength", "longevity", "weight"]},
+    "s-colours": {"type": "eat", "title": "Two colours on the plate", "full": "Veg or fruit of two colours with lunch and dinner",
+                  "targets": ["age_level", "age_bodyage"], "goals": ["longevity"]},
+    "s-water": {"type": "eat", "title": "2 litres of water", "full": "Spread through the day, more on training days",
+                "targets": ["phase_angle"], "goals": ["performance"]},
+    "s-fibre": {"type": "eat", "title": "Add a fibre swap", "full": "Oats, beans, lentils or wholegrain in one meal",
+                "targets": ["visceral_fat", "fat_pct"], "goals": ["weight"]},
+    "s-sugar": {"type": "eat", "title": "Swap one sugary drink or snack", "full": "Water, fruit or a handful of nuts instead",
+                "targets": ["visceral_fat", "fat_pct", "age_level", "metabolic_age"], "goals": ["weight", "longevity"]},
+    "s-walk-lunch": {"type": "habit", "title": "10 min walk after lunch", "full": "Straight after eating, before sitting back down",
+                     "targets": ["visceral_fat", "metabolic_age"], "goals": ["weight", "fitness"]},
+    "s-screens": {"type": "habit", "title": "Screens off by 10pm", "full": "Phone on charge outside the bedroom", "goals": ["sleep"]},
+    "s-daylight": {"type": "habit", "title": "Morning daylight", "full": "10 min outside before 10am", "goals": ["sleep", "longevity"]},
+    "s-breathing": {"type": "habit", "title": "5 min slow breathing", "full": "Breathe in for 4, out for 6, before bed",
+                    "targets": ["pulse_avg"], "goals": ["sleep"]},
 }
 STARTER_TEMPLATE_ID = "t-60-foundations"
 STARTER_TEMPLATE = {
@@ -321,14 +504,46 @@ def save_log(db, reports: str, key: str, day, entry: dict):
         profile.update(summary)
 
 
-def assign_plan(db, reports: str, key: str, template_id: str, start, note: str, who: str):
-    db.collection(reports).document(key).update({"daily_plan": {
-        "template": template_id, "start": as_date(start).isoformat(), "note": clean_text(note, TEXT_MAX),
-        "active": True, "assigned_by": who, "assigned_at": _server_time()}})
+def assign_plan(db, reports: str, key: str, template_id: str, start, note: str, who: str, custom: dict = None, block_ids=()):
+    """Gives a patient a plan. With custom (a tailored plan from build_plan, as checked by the clinician) the patient
+    follows their own copy, so later edits to the base plan don't change it."""
+    data = {"template": template_id, "start": as_date(start).isoformat(), "note": clean_text(note, TEXT_MAX),
+            "active": True, "assigned_by": who, "assigned_at": _server_time()}
+    if custom:
+        length = int(custom.get("length") or 60)
+        data["custom"] = {
+            "name": clean_text(custom.get("name"), 60) or "Plan", "length": length,
+            "retests": sorted({int(r) for r in custom.get("retests") or [] if 1 <= int(r) <= length}),
+            "phases": clean_phases(custom.get("phases"), set(block_ids), length),
+            "lights": {k: v for k, v in (custom.get("lights") or {}).items() if _KEY_RE.fullmatch(str(k)) and v in LIGHT_WEIGHT},
+            "titles": {k: clean_text(v, TITLE_MAX) for k, v in (custom.get("titles") or {}).items() if _KEY_RE.fullmatch(str(k))},
+            "goals": [g for g in custom.get("goals") or [] if g in GOALS],
+        }
+    db.collection(reports).document(key).update({"daily_plan": data})
 
 
 def stop_plan(db, reports: str, key: str):
     db.collection(reports).document(key).update({"daily_plan.active": False})
+
+
+def latest_results(db, reports: str, key: str):
+    """The traffic lights from the patient's most recent saved report: ({key: light}, assessment date), or ({}, '')."""
+    from google.cloud import firestore
+    docs = list(db.collection(reports).document(key).collection("scans")
+                .order_by("assessment_date", direction=firestore.Query.DESCENDING).limit(1).stream())
+    if not docs:
+        return {}, ""
+    d = docs[0].to_dict() or {}
+    return lights_from_dashboard(d.get("dashboard")), d.get("assessment_date") or docs[0].id
+
+
+def latest_goals(db, key: str) -> str:
+    """What the patient wrote under 'goals' in their most recent plan questionnaire, or ''."""
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    reqs = [d.to_dict() or {} for d in db.collection(PLAN_REQUESTS).where(filter=FieldFilter("patient_key", "==", key)).stream()]
+    reqs = [r for r in reqs if (r.get("questionnaire") or {}).get("goals")]
+    reqs.sort(key=lambda r: str(r.get("questionnaire_at") or r.get("created_at") or ""))
+    return reqs[-1]["questionnaire"]["goals"] if reqs else ""
 
 
 def patients_on_plans(db, reports: str) -> list:
@@ -358,8 +573,11 @@ def render_patient(db, reports: str, key: str, client_data: dict, fail, audit, p
         return
     today = as_date(today) or datetime.date.today()
     try:
-        tsnap = db.collection(TEMPLATES).document(plan["template"]).get()
-        template = (tsnap.to_dict() or {}) if tsnap.exists else {}
+        if plan.get("custom"):
+            template = plan["custom"]
+        else:
+            tsnap = db.collection(TEMPLATES).document(plan["template"]).get()
+            template = (tsnap.to_dict() or {}) if tsnap.exists else {}
         library = load_library(db)
         logs = load_logs(db, reports, key, today)
     except Exception:
@@ -421,8 +639,9 @@ def render_patient(db, reports: str, key: str, client_data: dict, fail, audit, p
             steps = (block.get("busy_steps") if busy and block.get("busy_steps") else block.get("steps")) or []
             if steps:
                 st.markdown(_steps_md(steps))
-            if block.get("why"):
-                st.caption(("🎯 " + esc(block["marker"]) + " · " if block.get("marker") else "") + esc(block["why"]))
+            reason = block_reason_for_patient(block, template)
+            if block.get("why") or reason:
+                st.caption(" · ".join(x for x in (("🎯 " + esc(reason)) if reason else "", esc(block.get("why", ""))) if x))
             if entry.get("done"):
                 st.success("Done. That counts towards your week.")
                 if st.button("Undo", key=f"dp_undo::{today}"):
@@ -550,7 +769,7 @@ def _template_editor(st, db, library: dict, templates: dict, who: str, fail):
                 rts = [int(x) for x in re.findall(r"\d+", retests)]
                 save_template(db, "" if tid == "__new__" else tid, {"name": name, "length": length, "retests": rts, "phases": edited},
                               set(library), who)
-                st.success("Plan saved. Everyone on it sees the change straight away.")
+                st.success("Plan saved. Patients already on it keep the version you gave them; give it to them again to update theirs.")
             except ValueError as e:
                 st.warning(str(e))
             except Exception:
@@ -558,9 +777,13 @@ def _template_editor(st, db, library: dict, templates: dict, who: str, fail):
 
 
 def _library_editor(st, db, library: dict, who: str, fail):
+    titles = measure_titles()
     if not library:
         st.info("Your library is empty. Add your first block below, or start from the sample library and rewrite it in your own words.")
-        if st.button("Add the sample library and a 60-day plan", key="dp_starter"):
+    missing = [b for b in STARTER_BLOCKS if b not in library]
+    if missing:
+        label = "Add the sample library and a 60-day plan" if not library else f"Add the {len(missing)} sample blocks you don't have yet"
+        if st.button(label, key="dp_starter"):
             try:
                 add_starter_content(db, who)
             except Exception:
@@ -573,7 +796,9 @@ def _library_editor(st, db, library: dict, who: str, fail):
         if items:
             st.markdown(f"**{title}**")
             for bid, b in items:
-                extra = f" · targets {b['marker']}" if b.get("marker") else ""
+                tg = ", ".join(titles.get(k, k) for k in b.get("targets") or [])
+                gl = ", ".join(GOALS.get(g, g) for g in b.get("goals") or [])
+                extra = (f" · targets {tg}" if tg else "") + (f" · suits {gl}" if gl else "")
                 st.markdown(f"- {b.get('title', '')} · {b.get('full', '')}{extra}")
     st.divider()
     options = ["__new__"] + sorted(library, key=lambda b: library[b].get("title", ""))
@@ -585,7 +810,11 @@ def _library_editor(st, db, library: dict, who: str, fail):
         title = st.text_input("Title", value=b.get("title", ""), max_chars=TITLE_MAX, placeholder="Strength C")
         full = st.text_input("Full version or detail", value=b.get("full", ""), max_chars=TEXT_MAX, placeholder="30 min")
         busy = st.text_input("Busy day version (movement only)", value=b.get("busy", ""), max_chars=TEXT_MAX, placeholder="10 min")
-        marker = st.text_input("Reading it targets (optional)", value=b.get("marker", ""), max_chars=TITLE_MAX, placeholder="Grip strength")
+        effort = st.radio("Effort (movement only)", list(INTENSITIES), index=list(INTENSITIES).index(intensity(b)), format_func=INTENSITIES.get,
+                          help="Tailored plans only swap a hard day for another hard session, and an easy day for an easy one.")
+        targets = st.multiselect("Results it targets (it's chosen for patients with these amber or red)", list(titles),
+                                 default=[k for k in b.get("targets") or [] if k in titles], format_func=lambda k: titles.get(k, k))
+        goals = st.multiselect("Goals it suits", list(GOALS), default=[g for g in b.get("goals") or [] if g in GOALS], format_func=GOALS.get)
         why = st.text_area("Why it's in the plan (the patient sees this)", value=b.get("why", ""), max_chars=TEXT_MAX)
         steps = st.text_area("Steps, one per line (movement only)", value="\n".join(b.get("steps") or []))
         bsteps = st.text_area("Busy day steps, one per line (movement only)", value="\n".join(b.get("busy_steps") or []))
@@ -595,7 +824,8 @@ def _library_editor(st, db, library: dict, who: str, fail):
     if saved:
         try:
             save_block(db, "" if bid == "__new__" else bid,
-                       {"type": kind, "title": title, "full": full, "busy": busy, "marker": marker, "why": why, "steps": steps, "busy_steps": bsteps}, who)
+                       {"type": kind, "title": title, "full": full, "busy": busy, "marker": ", ".join(titles.get(k, k) for k in targets),
+                        "targets": targets, "goals": goals, "intensity": effort, "why": why, "steps": steps, "busy_steps": bsteps}, who)
         except ValueError as e:
             st.warning(str(e))
         except Exception:
@@ -609,6 +839,91 @@ def _library_editor(st, db, library: dict, who: str, fail):
             fail("Couldn't delete the block. Please try again.", "Daily plan block delete failed")
         else:
             st.rerun()
+
+
+def _assign_screen(st, db, reports: str, key: str, prof: dict, library: dict, templates: dict, who: str, fail, today):
+    """Drafts the patient's plan from their latest results and goals, for the clinician to check, edit and give them."""
+    current = prof.get("daily_plan") or {}
+    if current.get("active"):
+        name = (current.get("custom") or {}).get("name") or templates.get(current.get("template"), {}).get("name", "a plan")
+        st.caption(f"Currently on {name} since {current.get('start')}. Giving a plan again replaces it; their ticks so far are kept.")
+    titles = measure_titles()
+    try:
+        lights, scan_date = latest_results(db, reports, key)
+        goals_text = latest_goals(db, key)
+    except Exception:
+        lights, scan_date, goals_text = {}, "", ""
+        fail("Couldn't load their results or questionnaire, so the draft isn't tailored.", "Daily plan results lookup failed")
+
+    # What the draft is based on
+    work_on = [(k, v) for k, v in lights.items() if v in LIGHT_WEIGHT and k not in CAUTION_KEYS]
+    order = {"red": 0, "amber": 1, "low": 2}
+    if scan_date:
+        listed = ", ".join(f"{'🔴' if v == 'red' else '🟠'} {titles.get(k, k)}" for k, v in sorted(work_on, key=lambda x: order[x[1]])) or "all green"
+        st.markdown(f"**Their results ({scan_date}):** {listed}")
+    else:
+        st.markdown("**Their results:** no saved report yet, so the draft follows their goals only.")
+    caution = caution_results(lights, titles)
+    if caution:
+        st.warning("Check before giving exercise advice: " + "; ".join(caution) + ". Daily plan blocks never target these.")
+    if goals_text:
+        st.markdown(f"**Their goals, in their words:** {goals_text}")
+    goals = st.multiselect("Goals to plan for", list(GOALS), default=detect_goals(goals_text), format_func=GOALS.get, key=f"dp_goals::{key}",
+                           help="Read from their plan questionnaire. Change them if they're wrong.")
+    tids = list(templates)
+    tid = st.selectbox("Base plan (its weekly rhythm and phases)", tids, format_func=lambda t: templates[t].get("name", t),
+                       index=tids.index(current.get("template")) if current.get("template") in tids else 0, key=f"dp_base::{key}")
+    tailor = st.checkbox("Tailor it to their results and goals", value=True, key=f"dp_tailor::{key}")
+    if tailor:
+        draft, notes = build_plan(templates[tid], library, lights, goals, titles)
+    else:
+        draft, notes = {**templates[tid], "lights": {}, "titles": {}, "goals": []}, []
+    if notes:
+        with st.expander("Why these were chosen", expanded=True):
+            st.markdown("\n".join(f"- {n}" for n in notes))
+
+    sig = "|".join([tid, ",".join(sorted(goals)), str(tailor), scan_date or "", str(len(library))])
+    sig = hashlib.sha256(sig.encode("utf-8")).hexdigest()[:10]
+    moves = {b: v for b, v in library.items() if v.get("type") == "move"}
+    eats = {b: v for b, v in library.items() if v.get("type") == "eat"}
+    habits = {b: v for b, v in library.items() if v.get("type") == "habit"}
+    title_of = lambda b: library.get(b, {}).get("title", b)  # noqa: E731
+    with st.form(f"dp_assign::{key}::{sig}"):
+        st.markdown("**Check the draft.** Change anything before you give it to them.")
+        edited = []
+        for i, ph in enumerate(draft.get("phases") or []):
+            st.markdown(f"**{ph.get('name', 'Phase')}** · days {ph.get('from')} to {ph.get('to')}")
+            cols = st.columns(7)
+            week = {}
+            opts = [""] + list(moves)
+            for d, col in zip(DAYS, cols):
+                cur = (ph.get("week") or {}).get(d, "")
+                week[d] = col.selectbox(d, opts, index=opts.index(cur) if cur in opts else 0, format_func=lambda v: "Rest" if not v else title_of(v),
+                                        key=f"dp_a::{key}::{sig}::{i}::{d}")
+            eat = st.multiselect("Eating principles", list(eats), default=[b for b in ph.get("eat") or [] if b in eats], format_func=title_of,
+                                 key=f"dp_ae::{key}::{sig}::{i}")
+            hab = st.multiselect("Habits", list(habits), default=[b for b in ph.get("habits") or [] if b in habits], format_func=title_of,
+                                 key=f"dp_ah::{key}::{sig}::{i}")
+            edited.append({**ph, "week": week, "eat": eat, "habits": hab})
+        start = st.date_input("Start date (day 1)", value=as_date(current.get("start")) or today, format="DD/MM/YYYY")
+        note = st.text_area("A personal note they'll see every day (optional)", value=current.get("note", ""), max_chars=TEXT_MAX)
+        c1, c2 = st.columns(2)
+        go = c1.form_submit_button("Give them this plan", type="primary")
+        stop = c2.form_submit_button("Stop their plan") if current.get("active") else False
+    if go:
+        try:
+            assign_plan(db, reports, key, tid, start, note, who, custom={**draft, "phases": edited}, block_ids=set(library))
+            st.success("Done. It appears in their patient portal under 'Your daily plan'.")
+        except ValueError as e:
+            st.warning(str(e))
+        except Exception:
+            fail("Couldn't give them the plan. Please try again.", "Daily plan assign failed")
+    if stop:
+        try:
+            stop_plan(db, reports, key)
+            st.success("Their daily plan is stopped. Their history is kept.")
+        except Exception:
+            fail("Couldn't stop the plan. Please try again.", "Daily plan stop failed")
 
 
 def render_clinician(db, reports: str, who: str, fail, pick_patient, today=None):
@@ -639,7 +954,7 @@ def render_clinician(db, reports: str, who: str, fail, pick_patient, today=None)
             except Exception:
                 logs = {}
             fl = flags(plan, logs, today)
-            tname = templates.get(plan.get("template"), {}).get("name", "Plan")
+            tname = (plan.get("custom") or {}).get("name") or templates.get(plan.get("template"), {}).get("name", "Plan")
             rows.append((0 if fl else 1, prof.get("name") or key, tname, day_number(plan.get("start"), today), consistency(logs, today), fl))
         for _, name, tname, n, c, fl in sorted(rows):
             text = []
@@ -649,34 +964,11 @@ def render_clinician(db, reports: str, who: str, fail, pick_patient, today=None)
 
     with t_assign:
         if not templates:
-            st.info("Make a plan in the Plan builder first.")
+            st.info("Make a plan in the Plan builder first (or add the sample library in the Library tab).")
         else:
             key, prof = pick_patient()
             if key:
-                current = (prof or {}).get("daily_plan") or {}
-                if current.get("active"):
-                    st.caption(f"Currently on {templates.get(current.get('template'), {}).get('name', 'a plan')} since {current.get('start')}.")
-                with st.form(f"dp_assign::{key}"):
-                    tids = list(templates)
-                    tid = st.selectbox("Plan", tids, format_func=lambda t: templates[t].get("name", t),
-                                       index=tids.index(current.get("template")) if current.get("template") in tids else 0)
-                    start = st.date_input("Start date (day 1)", value=as_date(current.get("start")) or today, format="DD/MM/YYYY")
-                    note = st.text_area("A personal note they'll see every day (optional)", value=current.get("note", ""), max_chars=TEXT_MAX)
-                    c1, c2 = st.columns(2)
-                    go = c1.form_submit_button("Give them this plan", type="primary")
-                    stop = c2.form_submit_button("Stop their plan") if current.get("active") else False
-                if go:
-                    try:
-                        assign_plan(db, reports, key, tid, start, note, who)
-                        st.success("Done. It appears in their patient portal under 'Your daily plan'.")
-                    except Exception:
-                        fail("Couldn't give them the plan. Please try again.", "Daily plan assign failed")
-                if stop:
-                    try:
-                        stop_plan(db, reports, key)
-                        st.success("Their daily plan is stopped. Their history is kept.")
-                    except Exception:
-                        fail("Couldn't stop the plan. Please try again.", "Daily plan stop failed")
+                _assign_screen(st, db, reports, key, prof or {}, library, templates, who, fail, today)
 
     with t_build:
         if not library:
