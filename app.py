@@ -65,6 +65,7 @@ import mailer  # noqa: E402  (emails to patients: sign-in codes, reminders)
 import reminders  # noqa: E402  (the reminder emails and texts; the daily job is reminders.py itself)
 import sms  # noqa: E402  (text messages to patients)
 import report_drafts  # noqa: E402  (shared report drafts: health checks on one device, force plates on another)
+import daily_plan  # noqa: E402  (the daily plan: a pre-written diary of each day's session, eating and habits)
 from helpers import (  # noqa: E402  (report files kept in private storage)
     MAX_SHARED_PDF_BYTES,
     MAX_SHARED_TOTAL_BYTES,
@@ -2069,6 +2070,26 @@ def render_portal_exercises(key: str, client_data: dict):
         st.caption(f"Last ticked off: {friendly_date(done[-1])}.")
 
 
+def _daily_plan_pick_patient():
+    """For the daily plan screen: type a patient's name, choose between people with the same name. Returns (record_id, profile)."""
+    name = st.text_input("Patient full name", key="dp_name", max_chars=120)
+    key = patient_key(name)
+    if not key:
+        return None, None
+    try:
+        record_id, decided = choose_participant(key, f"dp_who::{key}", allow_new=False, label="Which patient is this?")
+        if not decided:
+            return None, None
+        if not record_id:
+            st.warning("No patient record has that name. Add them under 'Patient portal for any patient' first.")
+            return None, None
+        snap = db.collection(REPORTS).document(record_id).get()
+        return record_id, (snap.to_dict() or {}) if snap.exists else {}
+    except Exception:
+        fail("Couldn't look up that name. Please try again.", "Daily plan patient lookup failed")
+        return None, None
+
+
 def render_portal_retest(client_data: dict):
     """A re-test the clinician agreed with the patient: when it is due, and how to book it."""
     due_on = _as_date(client_data.get("retest_due"))
@@ -3928,6 +3949,20 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         render_portal_record_editor()
     with st.expander("📈 Force plate tests (VALD export): add them to a patient's record"):
         render_force_plate_upload()
+    with st.expander("📅 Daily plans: who needs you, give a patient a plan, plan builder and library"):
+        if db:
+            try:
+                ai_ready = get_ai_client(current_provider()) is not None
+            except Exception:
+                ai_ready = False
+            try:
+                daily_plan.render_clinician(db, REPORTS, st.session_state.get("clinician_email") or "clinician", fail, _daily_plan_pick_patient,
+                                            ai=(lambda prompt, json_mode=False: generate(prompt, json_mode=json_mode)) if ai_ready else None,
+                                            ai_label=AI_PROVIDERS.get(current_provider(), ""))
+            except Exception:  # a problem in the daily plans panel must never stop the rest of the dashboard loading
+                fail("The daily plans panel couldn't load. The rest of the dashboard is unaffected.", "Daily plan clinician panel failed")
+        else:
+            st.info("Daily plans need the database.")
 
     render_draft_bar()
 
@@ -4904,6 +4939,10 @@ elif app_mode == "Secure Patient Mobile Portal":
         elif not scan_ids:
             # A patient seen for osteopathy or physio, who hasn't had a Longevity assessment yet.
             st.success(f"Welcome, {client_data.get('name', '')}!")
+            try:
+                daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            except Exception:  # a problem in the daily plan must never stop the rest of the portal loading
+                fail("Your daily plan couldn't be shown just now. Please try again later.", "Daily plan portal section failed")
             render_portal_exercises(lookup_key, client_data)
             render_portal_retest(client_data)
             render_force_plate_progress(lookup_key, client_data)
@@ -4921,6 +4960,10 @@ elif app_mode == "Secure Patient Mobile Portal":
             html_output = scan_data.get("html_output") or "<p>Report payload not found.</p>"
 
             st.success(f"Authentication successful. Welcome back, {display_name}!")
+            try:
+                daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            except Exception:  # a problem in the daily plan must never stop the rest of the portal loading
+                fail("Your daily plan couldn't be shown just now. Please try again later.", "Daily plan portal section failed")
             st.markdown(
                 f"""
                 <div class='portal-box'>
