@@ -3951,7 +3951,13 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
         render_force_plate_upload()
     with st.expander("📅 Daily plans: who needs you, give a patient a plan, plan builder and library"):
         if db:
-            daily_plan.render_clinician(db, REPORTS, st.session_state.get("clinician_email") or "clinician", fail, _daily_plan_pick_patient)
+            try:
+                ai_ready = get_ai_client(current_provider()) is not None
+            except Exception:
+                ai_ready = False
+            daily_plan.render_clinician(db, REPORTS, st.session_state.get("clinician_email") or "clinician", fail, _daily_plan_pick_patient,
+                                        ai=(lambda prompt, json_mode=False: generate(prompt, json_mode=json_mode)) if ai_ready else None,
+                                        ai_label=AI_PROVIDERS.get(current_provider(), ""))
         else:
             st.info("Daily plans need the database.")
 
