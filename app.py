@@ -3955,9 +3955,12 @@ if app_mode == "Clinician Dashboard" and clinician_gate():
                 ai_ready = get_ai_client(current_provider()) is not None
             except Exception:
                 ai_ready = False
-            daily_plan.render_clinician(db, REPORTS, st.session_state.get("clinician_email") or "clinician", fail, _daily_plan_pick_patient,
-                                        ai=(lambda prompt, json_mode=False: generate(prompt, json_mode=json_mode)) if ai_ready else None,
-                                        ai_label=AI_PROVIDERS.get(current_provider(), ""))
+            try:
+                daily_plan.render_clinician(db, REPORTS, st.session_state.get("clinician_email") or "clinician", fail, _daily_plan_pick_patient,
+                                            ai=(lambda prompt, json_mode=False: generate(prompt, json_mode=json_mode)) if ai_ready else None,
+                                            ai_label=AI_PROVIDERS.get(current_provider(), ""))
+            except Exception:  # a problem in the daily plans panel must never stop the rest of the dashboard loading
+                fail("The daily plans panel couldn't load. The rest of the dashboard is unaffected.", "Daily plan clinician panel failed")
         else:
             st.info("Daily plans need the database.")
 
@@ -4936,7 +4939,10 @@ elif app_mode == "Secure Patient Mobile Portal":
         elif not scan_ids:
             # A patient seen for osteopathy or physio, who hasn't had a Longevity assessment yet.
             st.success(f"Welcome, {client_data.get('name', '')}!")
-            daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            try:
+                daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            except Exception:  # a problem in the daily plan must never stop the rest of the portal loading
+                fail("Your daily plan couldn't be shown just now. Please try again later.", "Daily plan portal section failed")
             render_portal_exercises(lookup_key, client_data)
             render_portal_retest(client_data)
             render_force_plate_progress(lookup_key, client_data)
@@ -4954,7 +4960,10 @@ elif app_mode == "Secure Patient Mobile Portal":
             html_output = scan_data.get("html_output") or "<p>Report payload not found.</p>"
 
             st.success(f"Authentication successful. Welcome back, {display_name}!")
-            daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            try:
+                daily_plan.render_patient(db, REPORTS, lookup_key, client_data, fail, audit, CLINIC_PHONE)
+            except Exception:  # a problem in the daily plan must never stop the rest of the portal loading
+                fail("Your daily plan couldn't be shown just now. Please try again later.", "Daily plan portal section failed")
             st.markdown(
                 f"""
                 <div class='portal-box'>

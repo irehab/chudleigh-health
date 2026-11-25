@@ -980,7 +980,8 @@ def _library_editor(st, db, library: dict, who: str, fail, ai=None):
                 st.markdown(f"- {b.get('title', '')} · {b.get('full', '')}{extra}")
     st.divider()
     if ai:
-        with st.expander("✨ Draft a new block with AI"):
+        with st.container(border=True):  # not an expander: this whole panel sits inside one, and expanders cannot nest
+            st.markdown("**✨ Draft a new block with AI**")
             desc = st.text_area("Describe the block you want", key="dp_ai_desc", max_chars=600,
                                 placeholder="A 20-minute beginner kettlebell session for hip and grip strength")
             if st.button("Draft it", key="dp_ai_go"):
@@ -1105,10 +1106,12 @@ def _assign_screen(st, db, reports: str, key: str, prof: dict, library: dict, te
         sig += "-ai"
         if ai_cautions:
             st.warning("The AI suggests you check: " + "; ".join(ai_cautions))
-        with st.expander("What the AI changed (only you see this)", expanded=True):
+        with st.container(border=True):
+            st.markdown("**What the AI changed (only you see this)**")
             st.markdown("\n".join(f"- {r}" for r in ai_reasons) or "- It kept the rules draft as it was.")
     elif notes:
-        with st.expander("Why these were chosen", expanded=True):
+        with st.container(border=True):
+            st.markdown("**Why these were chosen**")
             st.markdown("\n".join(f"- {n}" for n in notes))
     moves = {b: v for b, v in library.items() if v.get("type") == "move"}
     eats = {b: v for b, v in library.items() if v.get("type") == "eat"}
